@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scenario",
         default="base",
-        help="Scenario in config.yaml. Version one accepts only 'base'.",
+        help="Scenario in config.yaml: 'base' or 'base_with_exchanges'.",
     )
     parser.add_argument(
         "--no-plots",

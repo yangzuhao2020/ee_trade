@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from .models import (
+    ClearedDemandBid,
     ClearedSupplyOffer,
     DemandBid,
     MarketClearingResult,
@@ -47,7 +48,11 @@ def clear_pay_as_clear(
         raise ValueError("All bids and offers passed to one clearing must share a product.")
     delivery_start, delivery_end = products.pop()
 
-    ordered_demands = sorted(demand_bids, key=lambda bid: (-bid.price_eur_per_mwh, bid.unit_name)) #! 价格从高到低排序。
+    # 需求按价格从高到低排序；同价时再按名称和原始顺序稳定打破平局。
+    ordered_demands = sorted(
+        enumerate(demand_bids),
+        key=lambda item: (-item[1].price_eur_per_mwh, item[1].unit_name, item[0]),
+    )
     ordered_supply = sorted(
         supply_offers, key=lambda offer: (offer.bid_price_eur_per_mwh, offer.unit_name)
     ) #! 按价格从小到大排。
@@ -57,8 +62,9 @@ def clear_pay_as_clear(
         ordered_supply[0].offered_energy_mwh if ordered_supply else 0.0
     )
     marginal_unit_name: str | None = None
+    accepted_by_demand_index = [0.0] * len(demand_bids)
 
-    for demand in ordered_demands:
+    for demand_index, demand in ordered_demands:
         remaining_demand = demand.volume_mwh # 记录这个需求单还剩多少电量没满足。
         while remaining_demand > _EPSILON and supply_index < len(ordered_supply):
             offer = ordered_supply[supply_index] # 当前取一个供给报价
@@ -68,8 +74,9 @@ def clear_pay_as_clear(
             accepted = min(remaining_demand, remaining_supply)
             # 取需求和供给的最小值作为成交量。
             accepted_by_unit[offer.unit_name] += accepted
-            remaining_demand -= accepted
-            remaining_supply -= accepted
+            accepted_by_demand_index[demand_index] += accepted
+            remaining_demand -= accepted # 这个需求单还剩多少电量没满足。
+            remaining_supply -= accepted # 这个供给报价还剩多少电量没成交。
             if accepted > _EPSILON:
                 # This offer is the latest accepted offer in the deterministic
                 # merit order, so it is the product's marginal unit so far.
@@ -93,16 +100,36 @@ def clear_pay_as_clear(
         )
         for offer in sorted(supply_offers, key=lambda offer: offer.unit_name)
     )
+    cleared_demands = tuple(
+        ClearedDemandBid(
+            bid=bid,
+            accepted_energy_mwh=accepted_by_demand_index[index],
+            clearing_price_eur_per_mwh=clearing_price,
+        )
+        for index, bid in enumerate(demand_bids)
+    )
     requested_demand = sum(bid.volume_mwh for bid in demand_bids)
     cleared_energy = sum(item.accepted_energy_mwh for item in cleared_offers)
+    unserved_load = sum(
+        item.unserved_energy_mwh
+        for item in cleared_demands
+        if item.bid.bid_type == "local_load"
+    )
+    unfulfilled_export = sum(
+        item.unserved_energy_mwh
+        for item in cleared_demands
+        if item.bid.bid_type == "export"
+    )
 
     return MarketClearingResult(
         delivery_start=delivery_start,
         delivery_end=delivery_end,
         requested_demand_mwh=requested_demand,
         cleared_energy_mwh=cleared_energy,
-        unserved_load_mwh=max(0.0, requested_demand - cleared_energy),
+        unserved_load_mwh=unserved_load,
+        unfulfilled_export_mwh=unfulfilled_export,
         clearing_price_eur_per_mwh=clearing_price,
         offers=cleared_offers,
+        demand_bids=cleared_demands,
         marginal_unit_name=marginal_unit_name,
     )

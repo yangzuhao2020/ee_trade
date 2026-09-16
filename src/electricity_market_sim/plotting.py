@@ -96,12 +96,12 @@ def _validate_plot_data(results: tuple[MarketClearingResult, ...]) -> None:
             )
         if not isclose(
             market.requested_demand_mwh,
-            market.cleared_energy_mwh + market.unserved_load_mwh,
+            market.cleared_energy_mwh + market.unserved_demand_mwh,
             rel_tol=0.0,
             abs_tol=_ENERGY_TOLERANCE_MWH,
         ):
             raise PlottingError(
-                "Demand energy must equal cleared energy plus unserved load for "
+                "Demand energy must equal cleared energy plus unmet demand for "
                 f"{market.delivery_start:%Y-%m-%d %H:%M}."
             )
 
@@ -138,7 +138,7 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
     prices = [market.clearing_price_eur_per_mwh for market in results]
     demand = [market.requested_demand_mwh for market in results]
     cleared = [market.cleared_energy_mwh for market in results]
-    unserved = [market.unserved_load_mwh for market in results]
+    unserved = [market.unserved_demand_mwh for market in results]
 
     figure, (price_axis, energy_axis) = pyplot.subplots(
         2, 1, figsize=(16, 9), sharex=True, gridspec_kw={"height_ratios": (1, 1.35)}
@@ -157,7 +157,7 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
     price_axis.legend(loc="upper right")
 
     # The stacked fills make the required identity visually explicit:
-    # demand energy = cleared energy + unserved-load energy.
+    # total demand energy = cleared energy + unmet-demand energy.
     energy_axis.fill_between(
         times,
         0,
@@ -174,7 +174,7 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
         step="mid",
         color="#E45756",
         alpha=0.45,
-        label="Unserved load",
+        label="Unmet demand",
     )
     energy_axis.step(
         times,
@@ -182,7 +182,7 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
         where="mid",
         color="#1F1F1F",
         linewidth=1.1,
-        label="Demand energy",
+        label="Market demand energy",
     )
     energy_axis.step(
         times,
@@ -267,6 +267,8 @@ def _plot_operator_profit(pyplot, results, path: Path) -> Path:
     profits: dict[str, float] = defaultdict(float)
     for market in results:
         for cleared in market.offers:
+            if cleared.offer.offer_type != "power_plant":
+                continue
             profits[cleared.offer.operator] += cleared.profit_eur
 
     operators = sorted(profits, key=lambda operator: (profits[operator], operator))

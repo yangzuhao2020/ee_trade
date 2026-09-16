@@ -37,6 +37,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
 
     market_rows = []
     unit_rows = []
+    exchange_rows = []
     operator_totals: dict[str, dict[str, float]] = defaultdict(
         lambda: {"accepted_energy_mwh": 0.0, "revenue_eur": 0.0, "variable_cost_eur": 0.0, "profit_eur": 0.0}
     )
@@ -53,8 +54,28 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "requested_demand_energy_mwh": _number(
                     market_result.requested_demand_mwh
                 ),
+                "requested_local_demand_energy_mwh": _number(
+                    market_result.requested_local_demand_mwh
+                ),
+                "cleared_local_demand_energy_mwh": _number(
+                    market_result.cleared_local_demand_mwh
+                ),
                 "cleared_energy_mwh": _number(market_result.cleared_energy_mwh),
                 "unserved_load_mwh": _number(market_result.unserved_load_mwh),
+                "requested_export_mwh": _number(market_result.requested_export_mwh),
+                "cleared_export_mwh": _number(market_result.cleared_export_mwh),
+                "unfulfilled_export_mwh": _number(
+                    market_result.unfulfilled_export_mwh
+                ),
+                "unserved_total_demand_mwh": _number(
+                    market_result.unserved_demand_mwh
+                ),
+                "offered_import_mwh": _number(market_result.offered_import_mwh),
+                "cleared_import_mwh": _number(market_result.cleared_import_mwh),
+                "net_exchange_mwh": _number(market_result.net_exchange_mwh),
+                "exchange_market_cash_flow_eur": _number(
+                    market_result.exchange_cash_flow_eur
+                ),
                 "clearing_price_eur_per_mwh": _number(
                     market_result.clearing_price_eur_per_mwh
                 ),
@@ -65,6 +86,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         )
         for cleared in market_result.offers:
             offer = cleared.offer
+            if offer.offer_type != "power_plant":
+                continue
             unit_rows.append(
                 {
                     "delivery_start": _timestamp(offer.delivery_start),
@@ -90,6 +113,59 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             totals["variable_cost_eur"] += cleared.variable_cost_eur
             totals["profit_eur"] += cleared.profit_eur
 
+        import_offer = next(
+            (
+                cleared
+                for cleared in market_result.offers
+                if cleared.offer.offer_type == "import"
+            ),
+            None,
+        )
+        export_bid = next(
+            (
+                cleared
+                for cleared in market_result.demand_bids
+                if cleared.bid.bid_type == "export"
+            ),
+            None,
+        )
+        if import_offer is not None or export_bid is not None:
+            if import_offer is None or export_bid is None:
+                raise ValueError("An Exchange market result must contain both orders.")
+            exchange_rows.append(
+                {
+                    "delivery_start": _timestamp(market_result.delivery_start),
+                    "delivery_end": _timestamp(market_result.delivery_end),
+                    "exchange_name": import_offer.offer.unit_name,
+                    "exchange_operator": import_offer.offer.operator,
+                    "offered_import_power_mw": _number(
+                        import_offer.offer.offered_power_mw
+                    ),
+                    "offered_import_mwh": _number(
+                        import_offer.offer.offered_energy_mwh
+                    ),
+                    "cleared_import_power_mw": _number(
+                        import_offer.accepted_power_mw
+                    ),
+                    "cleared_import_mwh": _number(import_offer.accepted_energy_mwh),
+                    "requested_export_power_mw": _number(
+                        export_bid.bid.volume_mwh / market_result.duration_hours
+                    ),
+                    "requested_export_mwh": _number(export_bid.bid.volume_mwh),
+                    "cleared_export_power_mw": _number(export_bid.accepted_power_mw),
+                    "cleared_export_mwh": _number(export_bid.accepted_energy_mwh),
+                    "unfulfilled_export_mwh": _number(
+                        export_bid.unserved_energy_mwh
+                    ),
+                    "net_exchange_mwh": _number(market_result.net_exchange_mwh),
+                    "import_revenue_eur": _number(market_result.import_revenue_eur),
+                    "export_payment_eur": _number(market_result.export_payment_eur),
+                    "exchange_market_cash_flow_eur": _number(
+                        market_result.exchange_cash_flow_eur
+                    ),
+                }
+            )
+
     _write_rows(
         output_dir / "market_results.csv",
         [
@@ -98,8 +174,18 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "delivery_end",
             "duration_hours",
             "requested_demand_energy_mwh",
+            "requested_local_demand_energy_mwh",
+            "cleared_local_demand_energy_mwh",
             "cleared_energy_mwh",
             "unserved_load_mwh",
+            "requested_export_mwh",
+            "cleared_export_mwh",
+            "unfulfilled_export_mwh",
+            "unserved_total_demand_mwh",
+            "offered_import_mwh",
+            "cleared_import_mwh",
+            "net_exchange_mwh",
+            "exchange_market_cash_flow_eur",
             "clearing_price_eur_per_mwh",
             "total_transaction_value_eur",
         ],
@@ -143,3 +229,27 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             for operator, totals in sorted(operator_totals.items())
         ),
     )
+    if exchange_rows:
+        _write_rows(
+            output_dir / "exchange_results.csv",
+            [
+                "delivery_start",
+                "delivery_end",
+                "exchange_name",
+                "exchange_operator",
+                "offered_import_power_mw",
+                "offered_import_mwh",
+                "cleared_import_power_mw",
+                "cleared_import_mwh",
+                "requested_export_power_mw",
+                "requested_export_mwh",
+                "cleared_export_power_mw",
+                "cleared_export_mwh",
+                "unfulfilled_export_mwh",
+                "net_exchange_mwh",
+                "import_revenue_eur",
+                "export_payment_eur",
+                "exchange_market_cash_flow_eur",
+            ],
+            exchange_rows,
+        )

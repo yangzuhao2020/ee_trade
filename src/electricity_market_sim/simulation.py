@@ -17,8 +17,10 @@ from .config import load_market_settings
 from .errors import InputValidationError
 from .loader import (
     load_demand_units,
+    load_exchange_unit,
     load_fuel_prices,
     load_hourly_demand_profiles,
+    load_hourly_exchange_profiles,
     load_powerplants,
     validate_fuel_coverage,
 )
@@ -62,6 +64,30 @@ def simulate(
         input_path / "demand_df.csv", demand_units
     )
 
+    exchange_unit = None
+    exchange_profiles = {}
+    if settings.exchange_units_file is not None:
+        exchange_unit = load_exchange_unit(input_path / settings.exchange_units_file)
+        existing_names = {plant.name for plant in plants} | {
+            demand_unit.name for demand_unit in demand_units
+        }
+        if exchange_unit.name in existing_names:
+            raise InputValidationError(
+                f"Exchange name {exchange_unit.name!r} must not duplicate another unit name."
+            )
+        for label, price in (
+            ("import", exchange_unit.price_import_eur_per_mwh),
+            ("export", exchange_unit.price_export_eur_per_mwh),
+        ):
+            if not settings.minimum_bid_price <= price <= settings.maximum_bid_price:
+                raise InputValidationError(
+                    f"Exchange {label} price ({price:.6f} EUR/MWh) is outside "
+                    "the configured bid-price limits."
+                )
+        exchange_profiles = load_hourly_exchange_profiles(
+            input_path / "exchanges_df.csv", exchange_unit
+        )
+
     marginal_costs = {plant.name: plant.marginal_cost(fuel_prices) for plant in plants}
     for plant in plants:
         marginal_cost = marginal_costs[plant.name]
@@ -93,6 +119,25 @@ def simulate(
                     price_eur_per_mwh=settings.maximum_bid_price,
                 )
             )
+        if exchange_unit is not None:
+            try:
+                exchange_schedule = exchange_profiles[delivery_start]
+            except KeyError as exc:
+                raise InputValidationError(
+                    "exchanges_df.csv has no complete hourly profile for "
+                    f"{delivery_start.isoformat(sep=' ', timespec='minutes')}."
+                ) from exc
+            demand_bids.append(
+                DemandBid(
+                    unit_name=exchange_unit.name,
+                    operator=exchange_unit.operator,
+                    delivery_start=delivery_start,
+                    delivery_end=delivery_end,
+                    volume_mwh=exchange_schedule.export_power_mw * duration_hours,
+                    price_eur_per_mwh=exchange_unit.price_export_eur_per_mwh,
+                    bid_type="export",
+                )
+            )
         offers = [
             SupplyOffer(
                 unit_name=plant.name,
@@ -107,6 +152,24 @@ def simulate(
             )
             for plant in plants
         ]
+        if exchange_unit is not None:
+            offers.append(
+                SupplyOffer(
+                    unit_name=exchange_unit.name,
+                    operator=exchange_unit.operator,
+                    technology="exchange",
+                    delivery_start=delivery_start,
+                    delivery_end=delivery_end,
+                    offered_power_mw=exchange_schedule.import_power_mw,
+                    offered_energy_mwh=(
+                        exchange_schedule.import_power_mw * duration_hours
+                    ),
+                    bid_price_eur_per_mwh=exchange_unit.price_import_eur_per_mwh,
+                    # Import price is a bid priority, not an external procurement cost.
+                    marginal_cost_eur_per_mwh=0.0,
+                    offer_type="import",
+                )
+            )
         results.append(clear_pay_as_clear(demand_bids, offers))
 
     return SimulationResult(settings=settings, market_results=tuple(results))

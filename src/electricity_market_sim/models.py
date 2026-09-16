@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from math import isclose
+from math import isclose, isfinite
 
 
 _ENERGY_TOLERANCE_MWH = 1e-7
@@ -34,6 +34,7 @@ class MarketSettings:
     minimum_bid_price: float
     market_mechanism: str
     market_id: str = "EOM"
+    exchange_units_file: str | None = None
 
     @property
     def product_duration_hours(self) -> float:
@@ -47,6 +48,24 @@ class DemandUnit:
     name: str
     operator: str
     profile_column: str
+
+
+@dataclass(frozen=True)
+class ExchangeUnit:
+    """The single virtual participant representing planned imports and exports."""
+
+    name: str
+    operator: str
+    price_import_eur_per_mwh: float
+    price_export_eur_per_mwh: float
+
+
+@dataclass(frozen=True)
+class ExchangeSchedule:
+    """One delivery hour's positive planned import and export powers."""
+
+    import_power_mw: float
+    export_power_mw: float
 
 
 @dataclass(frozen=True)
@@ -88,6 +107,7 @@ class DemandBid:
     delivery_end: datetime
     volume_mwh: float
     price_eur_per_mwh: float
+    bid_type: str = "local_load"
 
 
 @dataclass(frozen=True)
@@ -103,6 +123,7 @@ class SupplyOffer:
     offered_energy_mwh: float
     bid_price_eur_per_mwh: float
     marginal_cost_eur_per_mwh: float
+    offer_type: str = "power_plant"
 
 
 @dataclass(frozen=True)
@@ -137,6 +158,31 @@ class ClearedSupplyOffer:
 
 
 @dataclass(frozen=True)
+class ClearedDemandBid:
+    """The cleared quantity and settlement payment for one demand bid."""
+
+    bid: DemandBid
+    accepted_energy_mwh: float
+    clearing_price_eur_per_mwh: float
+
+    @property
+    def duration_hours(self) -> float:
+        return (self.bid.delivery_end - self.bid.delivery_start).total_seconds() / 3600
+
+    @property
+    def accepted_power_mw(self) -> float:
+        return self.accepted_energy_mwh / self.duration_hours
+
+    @property
+    def unserved_energy_mwh(self) -> float:
+        return self.bid.volume_mwh - self.accepted_energy_mwh
+
+    @property
+    def payment_eur(self) -> float:
+        return self.accepted_energy_mwh * self.clearing_price_eur_per_mwh
+
+
+@dataclass(frozen=True)
 class MarketClearingResult:
     """One delivery product's cleared market state."""
 
@@ -145,8 +191,10 @@ class MarketClearingResult:
     requested_demand_mwh: float
     cleared_energy_mwh: float
     unserved_load_mwh: float
+    unfulfilled_export_mwh: float
     clearing_price_eur_per_mwh: float
     offers: tuple[ClearedSupplyOffer, ...]
+    demand_bids: tuple[ClearedDemandBid, ...]
     marginal_unit_name: str | None
 
     def __post_init__(self) -> None:
@@ -154,23 +202,73 @@ class MarketClearingResult:
 
         if self.delivery_end <= self.delivery_start:
             raise ValueError("A market product must have a positive delivery duration.")
+        if not isfinite(self.clearing_price_eur_per_mwh):
+            raise ValueError("The clearing price must be finite.")
         if any(
             value < -_ENERGY_TOLERANCE_MWH
             for value in (
                 self.requested_demand_mwh,
                 self.cleared_energy_mwh,
                 self.unserved_load_mwh,
+                self.unfulfilled_export_mwh,
             )
         ):
             raise ValueError("Market energy quantities cannot be negative.")
+        if any(
+            cleared.offer.delivery_start != self.delivery_start
+            or cleared.offer.delivery_end != self.delivery_end
+            for cleared in self.offers
+        ) or any(
+            cleared.bid.delivery_start != self.delivery_start
+            or cleared.bid.delivery_end != self.delivery_end
+            for cleared in self.demand_bids
+        ):
+            raise ValueError("All cleared bids and offers must share the market product.")
+        if any(
+            cleared.accepted_energy_mwh < -_ENERGY_TOLERANCE_MWH
+            or cleared.accepted_energy_mwh
+            > cleared.offer.offered_energy_mwh + _ENERGY_TOLERANCE_MWH
+            for cleared in self.offers
+        ) or any(
+            cleared.accepted_energy_mwh < -_ENERGY_TOLERANCE_MWH
+            or cleared.accepted_energy_mwh
+            > cleared.bid.volume_mwh + _ENERGY_TOLERANCE_MWH
+            for cleared in self.demand_bids
+        ):
+            raise ValueError("Accepted energy must be between zero and the submitted volume.")
+        if any(
+            not isclose(
+                cleared.clearing_price_eur_per_mwh,
+                self.clearing_price_eur_per_mwh,
+                rel_tol=0.0,
+                abs_tol=_ENERGY_TOLERANCE_MWH,
+            )
+            for cleared in (*self.offers, *self.demand_bids)
+        ):
+            raise ValueError("All cleared orders must use the market clearing price.")
+        offer_names = [cleared.offer.unit_name for cleared in self.offers]
+        if len(offer_names) != len(set(offer_names)):
+            raise ValueError("Supply offer unit names must be unique within a product.")
+        if any(
+            cleared.bid.bid_type not in {"local_load", "export"}
+            for cleared in self.demand_bids
+        ):
+            raise ValueError("Demand bids must be local_load or export bids.")
+        if any(
+            cleared.offer.offer_type not in {"power_plant", "import"}
+            for cleared in self.offers
+        ):
+            raise ValueError("Supply offers must be power_plant or import offers.")
+
+        requested_demand = sum(cleared.bid.volume_mwh for cleared in self.demand_bids)
         if not isclose(
             self.requested_demand_mwh,
-            self.cleared_energy_mwh + self.unserved_load_mwh,
+            requested_demand,
             rel_tol=0.0,
             abs_tol=_ENERGY_TOLERANCE_MWH,
         ):
             raise ValueError(
-                "Demand energy must equal cleared energy plus unserved load."
+                "Requested demand energy must equal the sum of demand bids."
             )
         accepted_energy = sum(offer.accepted_energy_mwh for offer in self.offers)
         if not isclose(
@@ -182,12 +280,67 @@ class MarketClearingResult:
             raise ValueError(
                 "The sum of accepted supply energy must equal cleared energy."
             )
-        offer_names = {offer.offer.unit_name for offer in self.offers}
+        accepted_demand_energy = sum(
+            demand.accepted_energy_mwh for demand in self.demand_bids
+        )
+        if not isclose(
+            accepted_demand_energy,
+            self.cleared_energy_mwh,
+            rel_tol=0.0,
+            abs_tol=_ENERGY_TOLERANCE_MWH,
+        ):
+            raise ValueError(
+                "The sum of accepted demand energy must equal cleared energy."
+            )
+        expected_unserved_load = sum(
+            demand.unserved_energy_mwh
+            for demand in self.demand_bids
+            if demand.bid.bid_type == "local_load"
+        )
+        if not isclose(
+            self.unserved_load_mwh,
+            expected_unserved_load,
+            rel_tol=0.0,
+            abs_tol=_ENERGY_TOLERANCE_MWH,
+        ):
+            raise ValueError(
+                "Unserved load must equal the unmet local-load demand energy."
+            )
+        expected_unfulfilled_export = sum(
+            demand.unserved_energy_mwh
+            for demand in self.demand_bids
+            if demand.bid.bid_type == "export"
+        )
+        if not isclose(
+            self.unfulfilled_export_mwh,
+            expected_unfulfilled_export,
+            rel_tol=0.0,
+            abs_tol=_ENERGY_TOLERANCE_MWH,
+        ):
+            raise ValueError(
+                "Unfulfilled export must equal the unmet export demand energy."
+            )
+
+        offer_names_set = set(offer_names)
         if self.cleared_energy_mwh > _ENERGY_TOLERANCE_MWH:
             if self.marginal_unit_name is None:
                 raise ValueError("A cleared market must identify its marginal unit.")
-            if self.marginal_unit_name not in offer_names:
+            if self.marginal_unit_name not in offer_names_set:
                 raise ValueError("The marginal unit must belong to the cleared offers.")
+            marginal_offer = next(
+                offer
+                for offer in self.offers
+                if offer.offer.unit_name == self.marginal_unit_name
+            )
+            if marginal_offer.accepted_energy_mwh <= _ENERGY_TOLERANCE_MWH:
+                raise ValueError("The marginal unit must have accepted energy.")
+            if not isclose(
+                marginal_offer.offer.bid_price_eur_per_mwh,
+                self.clearing_price_eur_per_mwh,
+                rel_tol=0.0,
+                abs_tol=_ENERGY_TOLERANCE_MWH,
+            ):
+                raise ValueError("The marginal unit bid must equal the clearing price.")
         elif self.marginal_unit_name is not None:
             raise ValueError("An uncleared market cannot have a marginal unit.")
 
@@ -208,6 +361,92 @@ class MarketClearingResult:
     @property
     def unserved_load_power_mw(self) -> float:
         return self.unserved_load_mwh / self.duration_hours
+
+    @property
+    def unserved_demand_mwh(self) -> float:
+        """All unmet demand: local unserved load plus unfulfilled exports."""
+
+        return self.unserved_load_mwh + self.unfulfilled_export_mwh
+
+    @property
+    def unserved_demand_power_mw(self) -> float:
+        return self.unserved_demand_mwh / self.duration_hours
+
+    @property
+    def requested_local_demand_mwh(self) -> float:
+        return sum(
+            demand.bid.volume_mwh
+            for demand in self.demand_bids
+            if demand.bid.bid_type == "local_load"
+        )
+
+    @property
+    def cleared_local_demand_mwh(self) -> float:
+        return sum(
+            demand.accepted_energy_mwh
+            for demand in self.demand_bids
+            if demand.bid.bid_type == "local_load"
+        )
+
+    @property
+    def requested_export_mwh(self) -> float:
+        return sum(
+            demand.bid.volume_mwh
+            for demand in self.demand_bids
+            if demand.bid.bid_type == "export"
+        )
+
+    @property
+    def cleared_export_mwh(self) -> float:
+        return sum(
+            demand.accepted_energy_mwh
+            for demand in self.demand_bids
+            if demand.bid.bid_type == "export"
+        )
+
+    @property
+    def offered_import_mwh(self) -> float:
+        return sum(
+            offer.offer.offered_energy_mwh
+            for offer in self.offers
+            if offer.offer.offer_type == "import"
+        )
+
+    @property
+    def cleared_import_mwh(self) -> float:
+        return sum(
+            offer.accepted_energy_mwh
+            for offer in self.offers
+            if offer.offer.offer_type == "import"
+        )
+
+    @property
+    def net_exchange_mwh(self) -> float:
+        """Positive values are net imports into the local market."""
+
+        return self.cleared_import_mwh - self.cleared_export_mwh
+
+    @property
+    def import_revenue_eur(self) -> float:
+        return sum(
+            offer.revenue_eur
+            for offer in self.offers
+            if offer.offer.offer_type == "import"
+        )
+
+    @property
+    def export_payment_eur(self) -> float:
+        return sum(
+            demand.payment_eur
+            for demand in self.demand_bids
+            if demand.bid.bid_type == "export"
+        )
+
+    @property
+    def exchange_cash_flow_eur(self) -> float:
+        """Positive values are net market receipts for the Exchange participant."""
+
+        return self.import_revenue_eur - self.export_payment_eur
 
     @property
     def transaction_value_eur(self) -> float:

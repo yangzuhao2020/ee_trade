@@ -5,10 +5,11 @@ from __future__ import annotations
 import csv
 from collections import defaultdict
 from datetime import datetime
+from math import isfinite
 from pathlib import Path
 
 from .errors import InputValidationError
-from .models import DemandUnit, PowerPlant
+from .models import DemandUnit, ExchangeSchedule, ExchangeUnit, PowerPlant
 
 
 def _read_rows(path: Path) -> list[dict[str, str]]:
@@ -36,11 +37,16 @@ def _require(row: dict[str, str], column: str, path: Path, row_number: int) -> s
 def _float(row: dict[str, str], column: str, path: Path, row_number: int) -> float:
     raw = _require(row, column, path, row_number)
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as exc:
         raise InputValidationError(
             f"{path.name}, row {row_number}: {column!r} must be numeric, got {raw!r}."
         ) from exc
+    if not isfinite(value):
+        raise InputValidationError(
+            f"{path.name}, row {row_number}: {column!r} must be finite."
+        )
+    return value
 
 
 def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
@@ -112,6 +118,30 @@ def load_demand_units(path: Path) -> tuple[DemandUnit, ...]:
             )
         )
     return tuple(units)
+
+
+def load_exchange_unit(path: Path) -> ExchangeUnit:
+    """Read exactly one v1 Exchange participant from `exchange_units.csv`."""
+
+    rows = _read_rows(path)
+    if len(rows) != 1:
+        raise InputValidationError(
+            f"{path.name}: version one supports exactly one Exchange unit."
+        )
+
+    row_number = 2
+    row = rows[0]
+    strategy = _require(row, "bidding_EOM", path, row_number)
+    if strategy != "exchange_energy_naive":
+        raise InputValidationError(
+            f"{path.name}, row {row_number}: only 'exchange_energy_naive' is supported."
+        )
+    return ExchangeUnit(
+        name=_require(row, "name", path, row_number),
+        operator=_require(row, "unit_operator", path, row_number),
+        price_import_eur_per_mwh=_float(row, "price_import", path, row_number),
+        price_export_eur_per_mwh=_float(row, "price_export", path, row_number),
+    )
 
 
 def load_fuel_prices(path: Path) -> dict[str, float]:
@@ -204,6 +234,64 @@ def load_hourly_demand_profiles(
             hour: sum(values) / len(values) for hour, values in hourly_values.items()
         }
         for unit_name, hourly_values in buckets.items()
+    }
+
+
+def load_hourly_exchange_profiles(
+    path: Path, exchange_unit: ExchangeUnit
+) -> dict[datetime, ExchangeSchedule]:
+    """Load positive 15-minute exchange plans and resample them to hourly MW."""
+
+    if not path.is_file():
+        raise InputValidationError(f"Missing required input file: {path}")
+
+    import_column = f"{exchange_unit.name}_import"
+    export_column = f"{exchange_unit.name}_export"
+    with path.open(encoding="utf-8", newline="") as file:
+        reader = csv.DictReader(file)
+        if not reader.fieldnames or "datetime" not in reader.fieldnames:
+            raise InputValidationError(f"{path.name} must include a 'datetime' column.")
+        missing = [
+            column
+            for column in (import_column, export_column)
+            if column not in reader.fieldnames
+        ]
+        if missing:
+            raise InputValidationError(
+                f"{path.name} is missing exchange profile columns: {', '.join(missing)}."
+            )
+
+        import_buckets: dict[datetime, list[float]] = defaultdict(list)
+        export_buckets: dict[datetime, list[float]] = defaultdict(list)
+        seen_timestamps: set[datetime] = set()
+        for row_number, row in enumerate(reader, start=2):
+            timestamp = _parse_datetime(row["datetime"], path, row_number)
+            if timestamp in seen_timestamps:
+                raise InputValidationError(
+                    f"{path.name}, row {row_number}: duplicate timestamp "
+                    f"{timestamp.isoformat(sep=' ')}."
+                )
+            seen_timestamps.add(timestamp)
+            import_power = _float(row, import_column, path, row_number)
+            export_power = _float(row, export_column, path, row_number)
+            if import_power < 0 or export_power < 0:
+                raise InputValidationError(
+                    f"{path.name}, row {row_number}: import and export powers must be non-negative."
+                )
+            hour = _hour_start(timestamp)
+            import_buckets[hour].append(import_power)
+            export_buckets[hour].append(export_power)
+
+    if import_buckets.keys() != export_buckets.keys():
+        raise InputValidationError(
+            f"{path.name}: import and export profiles do not cover the same hours."
+        )
+    return {
+        hour: ExchangeSchedule(
+            import_power_mw=sum(import_values) / len(import_values),
+            export_power_mw=sum(export_buckets[hour]) / len(export_buckets[hour]),
+        )
+        for hour, import_values in import_buckets.items()
     }
 
 

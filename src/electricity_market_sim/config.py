@@ -53,11 +53,12 @@ def _parse_datetime(value: Any, field_name: str) -> datetime:
 
 
 def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSettings:
-    """Read `base` from config.yaml and reject v1-incompatible market designs."""
+    """Read a supported v1 scenario and reject incompatible market designs."""
 
-    if scenario != "base":
+    supported_scenarios = {"base", "base_with_exchanges"}
+    if scenario not in supported_scenarios:
         raise InputValidationError(
-            "Version one supports only the 'base' scenario; "
+            "Version one supports only 'base' or 'base_with_exchanges'; "
             f"received scenario {scenario!r}."
         )
     if not config_path.is_file():
@@ -73,6 +74,16 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
     data = loaded[scenario]
     if not isinstance(data, dict):
         raise InputValidationError(f"Scenario {scenario!r} must be a YAML mapping.")
+
+    raw_exchange_units = data.get("exchange_units")
+    if raw_exchange_units is None:
+        exchange_units_file = None
+    elif isinstance(raw_exchange_units, str) and raw_exchange_units.strip():
+        exchange_units_file = raw_exchange_units.strip()
+    else:
+        raise InputValidationError(
+            "exchange_units must be null or the non-empty name of a CSV file."
+        )
 
     markets = data.get("markets_config")
     if not isinstance(markets, dict) or "EOM" not in markets:
@@ -107,6 +118,7 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
             maximum_bid_price=float(eom["maximum_bid_price"]),
             minimum_bid_price=float(eom["minimum_bid_price"]),
             market_mechanism=str(eom["market_mechanism"]),
+            exchange_units_file=exchange_units_file,
         )
     except KeyError as exc:
         raise InputValidationError(f"Missing required configuration field: {exc.args[0]}") from exc
@@ -129,5 +141,11 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
         raise InputValidationError("Version one supports only market_mechanism: pay_as_clear.")
     if settings.minimum_bid_price > settings.maximum_bid_price:
         raise InputValidationError("minimum_bid_price cannot exceed maximum_bid_price.")
+    if scenario == "base" and settings.exchange_units_file is not None:
+        raise InputValidationError("The 'base' scenario must not configure exchange_units.")
+    if scenario == "base_with_exchanges" and settings.exchange_units_file is None:
+        raise InputValidationError(
+            "The 'base_with_exchanges' scenario requires an exchange_units CSV file."
+        )
 
     return settings
