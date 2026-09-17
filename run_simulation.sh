@@ -4,31 +4,28 @@
 set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-scenario="base_with_exchanges"
+scenario="base"
 if (($# > 0)); then
   case "$1" in
-    base|base_with_exchanges)
+    base)
       scenario="$1"
       shift
       ;;
     --*)
       ;;
     *)
-      echo "Usage: $0 [base|base_with_exchanges] [output_dir] [--no-plots]" >&2
-      exit 2
+      # The first positional argument can also be the optional output path.
+      :
       ;;
   esac
 fi
 
 case "$scenario" in
   base)
-    default_output_dir="$project_dir/outputs/example_01a"
-    ;;
-  base_with_exchanges)
-    default_output_dir="$project_dir/outputs/example_01a_exchange"
+    default_output_dir="$project_dir/outputs/example_01b"
     ;;
   *)
-    echo "Usage: $0 [base|base_with_exchanges] [output_dir] [--no-plots]" >&2
+    echo "Usage: $0 [base] [output_dir] [--no-plots]" >&2
     exit 2
     ;;
 esac
@@ -50,7 +47,7 @@ conda activate ee_trade
 
 export PYTHONPATH="$project_dir/src${PYTHONPATH:+:$PYTHONPATH}"
 exec python -m electricity_market_sim \
-  --input-dir "$project_dir/examples/input/example_01a" \
+  --input-dir "$project_dir/examples/input/example_01b" \
   --output-dir "$output_dir" \
   --scenario "$scenario" \
   "$@"

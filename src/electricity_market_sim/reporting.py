@@ -37,9 +37,17 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
 
     market_rows = []
     unit_rows = []
+    offer_rows = []
     exchange_rows = []
     operator_totals: dict[str, dict[str, float]] = defaultdict(
-        lambda: {"accepted_energy_mwh": 0.0, "revenue_eur": 0.0, "variable_cost_eur": 0.0, "profit_eur": 0.0}
+        lambda: {
+            "accepted_energy_mwh": 0.0,
+            "revenue_eur": 0.0,
+            "variable_cost_eur": 0.0,
+            "startup_cost_eur": 0.0,
+            "total_cost_eur": 0.0,
+            "profit_eur": 0.0,
+        }
     )
     for market_result in sorted_results:
         duration_hours = (
@@ -84,34 +92,109 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 ),
             }
         )
-        for cleared in market_result.offers:
+        powerplant_offers = [
+            cleared
+            for cleared in market_result.offers
+            if cleared.offer.offer_type == "power_plant"
+        ]
+        for cleared in powerplant_offers:
             offer = cleared.offer
-            if offer.offer_type != "power_plant":
-                continue
-            unit_rows.append(
+            offer_rows.append(
                 {
                     "delivery_start": _timestamp(offer.delivery_start),
                     "delivery_end": _timestamp(offer.delivery_end),
                     "unit_name": offer.unit_name,
                     "unit_operator": offer.operator,
                     "technology": offer.technology,
-                    "marginal_cost_eur_per_mwh": _number(offer.marginal_cost_eur_per_mwh),
+                    "offer_id": offer.identifier,
+                    "offer_segment": offer.offer_segment,
+                    "marginal_cost_eur_per_mwh": _number(
+                        offer.marginal_cost_eur_per_mwh
+                    ),
                     "bid_price_eur_per_mwh": _number(offer.bid_price_eur_per_mwh),
                     "offered_power_mw": _number(offer.offered_power_mw),
                     "offered_energy_mwh": _number(offer.offered_energy_mwh),
                     "accepted_power_mw": _number(cleared.accepted_power_mw),
                     "accepted_energy_mwh": _number(cleared.accepted_energy_mwh),
-                    "clearing_price_eur_per_mwh": _number(cleared.clearing_price_eur_per_mwh),
+                    "clearing_price_eur_per_mwh": _number(
+                        cleared.clearing_price_eur_per_mwh
+                    ),
                     "revenue_eur": _number(cleared.revenue_eur),
                     "variable_cost_eur": _number(cleared.variable_cost_eur),
+                    "startup_cost_eur": _number(cleared.startup_cost_eur),
+                    "total_cost_eur": _number(cleared.total_cost_eur),
                     "profit_eur": _number(cleared.profit_eur),
                 }
             )
-            totals = operator_totals[offer.operator]
-            totals["accepted_energy_mwh"] += cleared.accepted_energy_mwh
-            totals["revenue_eur"] += cleared.revenue_eur
-            totals["variable_cost_eur"] += cleared.variable_cost_eur
-            totals["profit_eur"] += cleared.profit_eur
+
+        offers_by_unit: dict[str, list] = defaultdict(list)
+        for cleared in powerplant_offers:
+            offers_by_unit[cleared.offer.unit_name].append(cleared)
+        for unit_name, cleared_offers in sorted(offers_by_unit.items()):
+            first_offer = cleared_offers[0].offer
+            offered_energy_mwh = sum(
+                cleared.offer.offered_energy_mwh for cleared in cleared_offers
+            )
+            offered_power_mw = sum(
+                cleared.offer.offered_power_mw for cleared in cleared_offers
+            )
+            accepted_energy_mwh = sum(
+                cleared.accepted_energy_mwh for cleared in cleared_offers
+            )
+            accepted_power_mw = accepted_energy_mwh / duration_hours
+            weighted_bid_price = (
+                sum(
+                    cleared.offer.bid_price_eur_per_mwh
+                    * cleared.offer.offered_energy_mwh
+                    for cleared in cleared_offers
+                )
+                / offered_energy_mwh
+                if offered_energy_mwh > 0
+                else first_offer.bid_price_eur_per_mwh
+            )
+            revenue_eur = sum(cleared.revenue_eur for cleared in cleared_offers)
+            variable_cost_eur = sum(
+                cleared.variable_cost_eur for cleared in cleared_offers
+            )
+            startup_cost_eur = sum(
+                cleared.startup_cost_eur for cleared in cleared_offers
+            )
+            total_cost_eur = sum(cleared.total_cost_eur for cleared in cleared_offers)
+            profit_eur = sum(cleared.profit_eur for cleared in cleared_offers)
+            unit_rows.append(
+                {
+                    "delivery_start": _timestamp(market_result.delivery_start),
+                    "delivery_end": _timestamp(market_result.delivery_end),
+                    "unit_name": unit_name,
+                    "unit_operator": first_offer.operator,
+                    "technology": first_offer.technology,
+                    "marginal_cost_eur_per_mwh": _number(
+                        first_offer.marginal_cost_eur_per_mwh
+                    ),
+                    # For a two-part offer this is the volume-weighted price;
+                    # offer_results.csv preserves the individual bid prices.
+                    "bid_price_eur_per_mwh": _number(weighted_bid_price),
+                    "offered_power_mw": _number(offered_power_mw),
+                    "offered_energy_mwh": _number(offered_energy_mwh),
+                    "accepted_power_mw": _number(accepted_power_mw),
+                    "accepted_energy_mwh": _number(accepted_energy_mwh),
+                    "clearing_price_eur_per_mwh": _number(
+                        market_result.clearing_price_eur_per_mwh
+                    ),
+                    "revenue_eur": _number(revenue_eur),
+                    "variable_cost_eur": _number(variable_cost_eur),
+                    "startup_cost_eur": _number(startup_cost_eur),
+                    "total_cost_eur": _number(total_cost_eur),
+                    "profit_eur": _number(profit_eur),
+                }
+            )
+            totals = operator_totals[first_offer.operator]
+            totals["accepted_energy_mwh"] += accepted_energy_mwh
+            totals["revenue_eur"] += revenue_eur
+            totals["variable_cost_eur"] += variable_cost_eur
+            totals["startup_cost_eur"] += startup_cost_eur
+            totals["total_cost_eur"] += total_cost_eur
+            totals["profit_eur"] += profit_eur
 
         import_offer = next(
             (
@@ -208,6 +291,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "clearing_price_eur_per_mwh",
             "revenue_eur",
             "variable_cost_eur",
+            "startup_cost_eur",
+            "total_cost_eur",
             "profit_eur",
         ],
         unit_rows,
@@ -219,6 +304,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "accepted_energy_mwh",
             "revenue_eur",
             "variable_cost_eur",
+            "startup_cost_eur",
+            "total_cost_eur",
             "profit_eur",
         ],
         (
@@ -252,4 +339,30 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "exchange_market_cash_flow_eur",
             ],
             exchange_rows,
+        )
+    if any(row["offer_segment"] != "single" for row in offer_rows):
+        _write_rows(
+            output_dir / "offer_results.csv",
+            [
+                "delivery_start",
+                "delivery_end",
+                "unit_name",
+                "unit_operator",
+                "technology",
+                "offer_id",
+                "offer_segment",
+                "marginal_cost_eur_per_mwh",
+                "bid_price_eur_per_mwh",
+                "offered_power_mw",
+                "offered_energy_mwh",
+                "accepted_power_mw",
+                "accepted_energy_mwh",
+                "clearing_price_eur_per_mwh",
+                "revenue_eur",
+                "variable_cost_eur",
+                "startup_cost_eur",
+                "total_cost_eur",
+                "profit_eur",
+            ],
+            offer_rows,
         )

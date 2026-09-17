@@ -1,4 +1,4 @@
-"""Small, explicit data structures used by the first-version simulator.
+"""Small, explicit data structures used by the electricity-market simulator.
 例如：
 - 市场配置：MarketSettings
 - 发电机组与需求单元：PowerPlant、DemandUnit
@@ -36,11 +36,6 @@ class MarketSettings:
     market_id: str = "EOM"
     exchange_units_file: str | None = None
 
-    @property
-    def product_duration_hours(self) -> float:
-        return self.product_duration.total_seconds() / 3600
-
-
 @dataclass(frozen=True)
 class DemandUnit:
     """An inflexible demand participant backed by one CSV profile column."""
@@ -70,17 +65,23 @@ class ExchangeSchedule:
 
 @dataclass(frozen=True)
 class PowerPlant:
-    """A dispatchable plant using the naïve marginal-cost bidding strategy."""
+    """A dispatchable plant and the parameters used by its bidding strategy."""
 
     name: str
     operator: str
     technology: str
+    bidding_strategy: str
     fuel_type: str
     emission_factor: float
     max_power_mw: float
     min_power_mw: float
     efficiency: float
     additional_cost_eur_per_mwh: float
+    # These optional V2 parameters retain the V2 example defaults when their
+    # columns are absent from ``powerplant_units.csv``.
+    start_cost_eur: float = 0.0
+    min_operating_time_hours: float = 1.0
+    min_down_time_hours: float = 1.0
 
     def marginal_cost(self, fuel_prices: dict[str, float]) -> float:
         """Return the ASSUME-compatible variable marginal cost.
@@ -89,7 +90,9 @@ class PowerPlant:
         fuel and CO2 costs are divided by the electrical efficiency.
         """
 
-        fuel_price = fuel_prices[self.fuel_type]
+        # Variable renewables in the supplied V2 examples have no fuel-price
+        # column; their fuel component is conventionally zero.
+        fuel_price = fuel_prices.get(self.fuel_type, 0.0)
         co2_price = fuel_prices["co2"]
         return (
             (fuel_price + co2_price * self.emission_factor) / self.efficiency
@@ -124,6 +127,16 @@ class SupplyOffer:
     bid_price_eur_per_mwh: float
     marginal_cost_eur_per_mwh: float
     offer_type: str = "power_plant"
+    # A plant can submit more than one offer in V2.  ``unit_name`` remains the
+    # physical-unit identifier; ``offer_id`` identifies one market order.
+    offer_id: str | None = None
+    offer_segment: str = "single"
+
+    @property
+    def identifier(self) -> str:
+        """Return the unique order key, retaining V1's unit-name default."""
+
+        return self.offer_id or self.unit_name
 
 
 @dataclass(frozen=True)
@@ -133,6 +146,7 @@ class ClearedSupplyOffer:
     offer: SupplyOffer
     accepted_energy_mwh: float
     clearing_price_eur_per_mwh: float
+    startup_cost_eur: float = 0.0
 
     @property
     def duration_hours(self) -> float:
@@ -153,8 +167,13 @@ class ClearedSupplyOffer:
         return self.accepted_energy_mwh * self.offer.marginal_cost_eur_per_mwh
 
     @property
+    def total_cost_eur(self) -> float:
+        """Variable cost plus a possible whole-unit startup cost."""
+        return self.variable_cost_eur + self.startup_cost_eur
+
+    @property
     def profit_eur(self) -> float:
-        return self.revenue_eur - self.variable_cost_eur
+        return self.revenue_eur - self.total_cost_eur
 
 
 @dataclass(frozen=True)
@@ -246,9 +265,12 @@ class MarketClearingResult:
             for cleared in (*self.offers, *self.demand_bids)
         ):
             raise ValueError("All cleared orders must use the market clearing price.")
-        offer_names = [cleared.offer.unit_name for cleared in self.offers]
-        if len(offer_names) != len(set(offer_names)):
-            raise ValueError("Supply offer unit names must be unique within a product.")
+        offer_ids = [cleared.offer.identifier for cleared in self.offers]
+        if len(offer_ids) != len(set(offer_ids)):
+            raise ValueError(
+                "Supply offer identifiers must be unique within a product; "
+                "unit names must be unique when no offer_id is supplied."
+            )
         if any(
             cleared.bid.bid_type not in {"local_load", "export"}
             for cleared in self.demand_bids
@@ -321,26 +343,28 @@ class MarketClearingResult:
                 "Unfulfilled export must equal the unmet export demand energy."
             )
 
-        offer_names_set = set(offer_names)
+        offer_names_set = {cleared.offer.unit_name for cleared in self.offers}
         if self.cleared_energy_mwh > _ENERGY_TOLERANCE_MWH:
             if self.marginal_unit_name is None:
                 raise ValueError("A cleared market must identify its marginal unit.")
             if self.marginal_unit_name not in offer_names_set:
                 raise ValueError("The marginal unit must belong to the cleared offers.")
-            marginal_offer = next(
+            marginal_offers = [
                 offer
                 for offer in self.offers
                 if offer.offer.unit_name == self.marginal_unit_name
-            )
-            if marginal_offer.accepted_energy_mwh <= _ENERGY_TOLERANCE_MWH:
-                raise ValueError("The marginal unit must have accepted energy.")
-            if not isclose(
-                marginal_offer.offer.bid_price_eur_per_mwh,
-                self.clearing_price_eur_per_mwh,
-                rel_tol=0.0,
-                abs_tol=_ENERGY_TOLERANCE_MWH,
-            ):
-                raise ValueError("The marginal unit bid must equal the clearing price.")
+                and offer.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH
+                and isclose(
+                    offer.offer.bid_price_eur_per_mwh,
+                    self.clearing_price_eur_per_mwh,
+                    rel_tol=0.0,
+                    abs_tol=_ENERGY_TOLERANCE_MWH,
+                )
+            ]
+            if not marginal_offers:
+                raise ValueError(
+                    "The marginal unit must have an accepted offer at the clearing price."
+                )
         elif self.marginal_unit_name is not None:
             raise ValueError("An uncleared market cannot have a marginal unit.")
 
@@ -359,18 +383,10 @@ class MarketClearingResult:
         return self.cleared_energy_mwh / self.duration_hours
 
     @property
-    def unserved_load_power_mw(self) -> float:
-        return self.unserved_load_mwh / self.duration_hours
-
-    @property
     def unserved_demand_mwh(self) -> float:
         """All unmet demand: local unserved load plus unfulfilled exports."""
 
         return self.unserved_load_mwh + self.unfulfilled_export_mwh
-
-    @property
-    def unserved_demand_power_mw(self) -> float:
-        return self.unserved_demand_mwh / self.duration_hours
 
     @property
     def requested_local_demand_mwh(self) -> float:

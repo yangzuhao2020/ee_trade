@@ -1,4 +1,4 @@
-"""YAML parsing and validation for the deliberately narrow v1 market design."""
+"""YAML parsing and validation for the supported single-node market design."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _parse_datetime(value: Any, field_name: str) -> datetime:
 
 
 def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSettings:
-    """Read a supported v1 scenario and reject incompatible market designs."""
+    """Read a supported scenario and reject incompatible market designs."""
 
     supported_scenarios = {"base", "base_with_exchanges"}
     if scenario not in supported_scenarios:

@@ -1,4 +1,4 @@
-"""Command-line entry point for the first-version simulator."""
+"""Command-line entry point for the electricity-market simulator."""
 
 from __future__ import annotations
 
@@ -18,13 +18,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=Path("examples/input/example_01a"),
-        help="Directory containing config.yaml and the v1 CSV input files.",
+        default=Path("examples/input/example_01b"),
+        help="Directory containing config.yaml and the V1/V2 CSV input files.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs/example_01a"),
+        default=Path("outputs/example_01b"),
         help="Directory where result CSV files will be written.",
     )
     parser.add_argument(

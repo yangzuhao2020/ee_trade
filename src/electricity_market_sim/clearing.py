@@ -37,9 +37,12 @@ def clear_pay_as_clear(
 
     if not demand_bids and not supply_offers:
         raise ValueError("Cannot clear an empty market.")
-    offer_names = [offer.unit_name for offer in supply_offers]
-    if len(offer_names) != len(set(offer_names)):
-        raise ValueError("Supply offer unit names must be unique within a product.")
+    offer_ids = [offer.identifier for offer in supply_offers]
+    if len(offer_ids) != len(set(offer_ids)):
+        raise ValueError(
+            "Supply offer identifiers must be unique within a product; "
+            "unit names must be unique when no offer_id is supplied."
+        )
 
     products = {
         (bid.delivery_start, bid.delivery_end) for bid in demand_bids
@@ -54,9 +57,14 @@ def clear_pay_as_clear(
         key=lambda item: (-item[1].price_eur_per_mwh, item[1].unit_name, item[0]),
     )
     ordered_supply = sorted(
-        supply_offers, key=lambda offer: (offer.bid_price_eur_per_mwh, offer.unit_name)
-    ) #! 按价格从小到大排。
-    accepted_by_unit: dict[str, float] = defaultdict(float)
+        supply_offers,
+        key=lambda offer: (
+            offer.bid_price_eur_per_mwh,
+            offer.unit_name,
+            offer.identifier,
+        ),
+    )  # 按价格从小到大排。
+    accepted_by_offer: dict[str, float] = defaultdict(float)
     supply_index = 0
     remaining_supply = (
         ordered_supply[0].offered_energy_mwh if ordered_supply else 0.0
@@ -73,7 +81,7 @@ def clear_pay_as_clear(
                 break
             accepted = min(remaining_demand, remaining_supply)
             # 取需求和供给的最小值作为成交量。
-            accepted_by_unit[offer.unit_name] += accepted
+            accepted_by_offer[offer.identifier] += accepted
             accepted_by_demand_index[demand_index] += accepted
             remaining_demand -= accepted # 这个需求单还剩多少电量没满足。
             remaining_supply -= accepted # 这个供给报价还剩多少电量没成交。
@@ -89,16 +97,19 @@ def clear_pay_as_clear(
     accepted_prices = [
         offer.bid_price_eur_per_mwh
         for offer in ordered_supply
-        if accepted_by_unit[offer.unit_name] > _EPSILON
+        if accepted_by_offer[offer.identifier] > _EPSILON
     ]
     clearing_price = max(accepted_prices) if accepted_prices else 0.0
     cleared_offers = tuple(
         ClearedSupplyOffer(
             offer=offer,
-            accepted_energy_mwh=accepted_by_unit[offer.unit_name],
+            accepted_energy_mwh=accepted_by_offer[offer.identifier],
             clearing_price_eur_per_mwh=clearing_price,
         )
-        for offer in sorted(supply_offers, key=lambda offer: offer.unit_name)
+        for offer in sorted(
+            supply_offers,
+            key=lambda offer: (offer.unit_name, offer.offer_segment, offer.identifier),
+        )
     )
     cleared_demands = tuple(
         ClearedDemandBid(

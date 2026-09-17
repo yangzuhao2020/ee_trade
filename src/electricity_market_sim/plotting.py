@@ -210,10 +210,9 @@ def _plot_dispatch_by_unit(pyplot, dates, results, unit_colors, path: Path) -> P
     marginal_y_positions: list[float] = []
 
     for market in results:
-        accepted_power = {
-            cleared.offer.unit_name: cleared.accepted_power_mw
-            for cleared in market.offers
-        }
+        accepted_power: dict[str, float] = defaultdict(float)
+        for cleared in market.offers:
+            accepted_power[cleared.offer.unit_name] += cleared.accepted_power_mw
         cumulative_power = 0.0
         for name in unit_names:
             unit_power = accepted_power.get(name, 0.0)
@@ -304,6 +303,7 @@ def _plot_first_merit_order(pyplot, market, unit_colors, path: Path) -> Path:
         key=lambda cleared: (
             cleared.offer.bid_price_eur_per_mwh,
             cleared.offer.unit_name,
+            cleared.offer.identifier,
         ),
     )
     cumulative_energy = 0.0
@@ -338,7 +338,16 @@ def _plot_first_merit_order(pyplot, market, unit_colors, path: Path) -> Path:
             va="bottom",
             fontsize=9,
         )
-        if offer.unit_name == market.marginal_unit_name:
+        if (
+            offer.unit_name == market.marginal_unit_name
+            and cleared.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH
+            and isclose(
+                offer.bid_price_eur_per_mwh,
+                market.clearing_price_eur_per_mwh,
+                rel_tol=0.0,
+                abs_tol=_ENERGY_TOLERANCE_MWH,
+            )
+        ):
             axis.scatter(
                 [accepted_end],
                 [offer.bid_price_eur_per_mwh],

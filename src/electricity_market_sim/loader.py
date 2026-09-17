@@ -1,4 +1,4 @@
-"""CSV readers and input validation for the first-version data contract."""
+"""CSV readers and input validation for the supported V1/V2 data contract."""
 
 from __future__ import annotations
 
@@ -49,8 +49,33 @@ def _float(row: dict[str, str], column: str, path: Path, row_number: int) -> flo
     return value
 
 
+def _optional_float(
+    row: dict[str, str],
+    column: str,
+    default: float,
+    path: Path,
+    row_number: int,
+) -> float:
+    """Read an optional numeric CSV column, using the documented V2 default."""
+
+    raw = row.get(column)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError as exc:
+        raise InputValidationError(
+            f"{path.name}, row {row_number}: {column!r} must be numeric, got {raw!r}."
+        ) from exc
+    if not isfinite(value):
+        raise InputValidationError(
+            f"{path.name}, row {row_number}: {column!r} must be finite."
+        )
+    return value
+
+
 def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
-    """Read naïvely bidding power plants from `powerplant_units.csv`."""
+    """Read V1 naïve and V2 heuristic plants from `powerplant_units.csv`."""
 
     rows = _read_rows(path)
     plants: list[PowerPlant] = []
@@ -62,21 +87,33 @@ def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
         names.add(name)
 
         strategy = _require(row, "bidding_EOM", path, row_number)
-        if strategy != "powerplant_energy_naive":
+        if strategy not in {
+            "powerplant_energy_naive",
+            "powerplant_energy_heuristic_flexable",
+        }:
             raise InputValidationError(
-                f"{path.name}, row {row_number}: only 'powerplant_energy_naive' is supported."
+                f"{path.name}, row {row_number}: unsupported bidding_EOM strategy "
+                f"{strategy!r}."
             )
 
         plant = PowerPlant(
             name=name,
             operator=_require(row, "unit_operator", path, row_number),
             technology=_require(row, "technology", path, row_number),
+            bidding_strategy=strategy,
             fuel_type=_require(row, "fuel_type", path, row_number),
             emission_factor=_float(row, "emission_factor", path, row_number),
             max_power_mw=_float(row, "max_power", path, row_number),
             min_power_mw=_float(row, "min_power", path, row_number),
             efficiency=_float(row, "efficiency", path, row_number),
             additional_cost_eur_per_mwh=_float(row, "additional_cost", path, row_number),
+            start_cost_eur=_optional_float(row, "start_cost", 0.0, path, row_number),
+            min_operating_time_hours=_optional_float(
+                row, "min_operating_time", 1.0, path, row_number
+            ),
+            min_down_time_hours=_optional_float(
+                row, "min_down_time", 1.0, path, row_number
+            ),
         )
         if plant.max_power_mw <= 0:
             raise InputValidationError(f"{path.name}, row {row_number}: max_power must be positive.")
@@ -89,6 +126,18 @@ def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
         if plant.emission_factor < 0:
             raise InputValidationError(
                 f"{path.name}, row {row_number}: emission_factor cannot be negative."
+            )
+        if plant.start_cost_eur < 0:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: start_cost cannot be negative."
+            )
+        if plant.min_operating_time_hours <= 0:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: min_operating_time must be positive."
+            )
+        if plant.min_down_time_hours < 0:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: min_down_time cannot be negative."
             )
         plants.append(plant)
     return tuple(plants)
@@ -237,6 +286,70 @@ def load_hourly_demand_profiles(
     }
 
 
+def load_hourly_availability_profiles(
+    path: Path, plants: tuple[PowerPlant, ...]
+) -> dict[str, dict[datetime, float]]:
+    """Load optional 0--1 availability factors and resample them by hourly mean.
+
+    A plant with no column uses availability 1.0.  A plant with a column must
+    provide every delivery hour that the simulation or its price forecast uses.
+    """
+
+    if not path.is_file():
+        return {}
+    with path.open(encoding="utf-8", newline="") as file:
+        reader = csv.DictReader(file)
+        if not reader.fieldnames or "datetime" not in reader.fieldnames:
+            raise InputValidationError(f"{path.name} must include a 'datetime' column.")
+        plant_names = {plant.name for plant in plants}
+        profile_columns = [
+            column for column in reader.fieldnames if column != "datetime" and column in plant_names
+        ]
+        unknown_columns = [
+            column
+            for column in reader.fieldnames
+            if column != "datetime" and column not in plant_names
+        ]
+        if unknown_columns:
+            raise InputValidationError(
+                f"{path.name} contains no matching plant for availability columns: "
+                + ", ".join(unknown_columns)
+            )
+        if not profile_columns:
+            raise InputValidationError(
+                f"{path.name} must contain at least one power-plant availability column."
+            )
+
+        buckets: dict[str, dict[datetime, list[float]]] = {
+            column: defaultdict(list) for column in profile_columns
+        }
+        seen_timestamps: set[datetime] = set()
+        for row_number, row in enumerate(reader, start=2):
+            timestamp = _parse_datetime(row["datetime"], path, row_number)
+            if timestamp in seen_timestamps:
+                raise InputValidationError(
+                    f"{path.name}, row {row_number}: duplicate timestamp "
+                    f"{timestamp.isoformat(sep=' ')}."
+                )
+            seen_timestamps.add(timestamp)
+            hour = _hour_start(timestamp)
+            for column in profile_columns:
+                value = _float(row, column, path, row_number)
+                if not 0.0 <= value <= 1.0:
+                    raise InputValidationError(
+                        f"{path.name}, row {row_number}: availability for {column!r} "
+                        "must be between 0 and 1."
+                    )
+                buckets[column][hour].append(value)
+
+    return {
+        plant_name: {
+            hour: sum(values) / len(values) for hour, values in hourly_values.items()
+        }
+        for plant_name, hourly_values in buckets.items()
+    }
+
+
 def load_hourly_exchange_profiles(
     path: Path, exchange_unit: ExchangeUnit
 ) -> dict[datetime, ExchangeSchedule]:
@@ -296,7 +409,14 @@ def load_hourly_exchange_profiles(
 
 
 def validate_fuel_coverage(plants: tuple[PowerPlant, ...], fuel_prices: dict[str, float]) -> None:
-    missing = sorted({plant.fuel_type for plant in plants} - fuel_prices.keys())
+    missing = sorted(
+        {
+            plant.fuel_type
+            for plant in plants
+            if plant.fuel_type != "renewable"
+        }
+        - fuel_prices.keys()
+    )
     if missing:
         raise InputValidationError(
             "fuel_prices_df.csv is missing prices for: " + ", ".join(missing)
