@@ -45,7 +45,7 @@ class PlantRuntimeState:
         return self.operating_periods / self.elapsed_periods
 
     def record_dispatch(self, accepted_power_mw: float, duration_hours: float) -> None:
-        """Advance the state after the associated delivery period clears."""
+        """Advance the state after the associated delivery period ends."""
 
         self.elapsed_periods += 1
         self.power_mw = accepted_power_mw if accepted_power_mw > _POWER_TOLERANCE_MW else 0.0

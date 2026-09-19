@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 import warnings
@@ -149,6 +150,7 @@ def _elastic_demand_bids(
                 volume_mwh=power * duration_hours,
                 price_eur_per_mwh=price,
                 bid_id=f"{demand_unit.name}::elastic::{timestamp}::{index + 1}",
+                demand_type="elastic_load",
             )
         )
     return bids
@@ -212,6 +214,7 @@ def _demand_bids_for_product(
             price_eur_per_mwh=exchange_unit.price_export_eur_per_mwh,
             bid_type="export",
             bid_id=f"{exchange_unit.name}::export::{delivery_start.isoformat()}",
+            demand_type="export",
         )
     )
     return demand_bids, exchange_schedule
@@ -402,7 +405,7 @@ def _apply_startup_costs(
     plants: tuple[PowerPlant, ...],
     runtime_states: dict[str, PlantRuntimeState],
 ) -> MarketClearingResult:
-    """Attach one startup cost to a formerly-off, accepted runtime plant."""
+    """Attach a startup cost when an accepted product begins delivery."""
 
     plants_by_name = {plant.name: plant for plant in plants}
     accepted_by_plant: dict[str, float] = defaultdict(float)
@@ -455,6 +458,7 @@ def _apply_startup_costs(
         demand_bids=market_result.demand_bids,
         marginal_unit_name=market_result.marginal_unit_name,
         pricing_method=market_result.pricing_method,
+        opening_time=market_result.opening_time,
     )
 
 
@@ -462,6 +466,8 @@ def _record_runtime_states(
     market_result: MarketClearingResult,
     runtime_states: dict[str, PlantRuntimeState],
 ) -> None:
+    """Commit actual dispatch only after the product's delivery period ends."""
+
     accepted_by_plant: dict[str, float] = defaultdict(float)
     for cleared in market_result.offers:
         if cleared.offer.unit_name in runtime_states:
@@ -558,6 +564,73 @@ def _offers_for_opening(
     return offers
 
 
+def _clear_opening(
+    *,
+    opening: MarketOpening,
+    settings: MarketSettings,
+    plants: tuple[PowerPlant, ...],
+    runtime_states: dict[str, PlantRuntimeState],
+    demand_units,
+    demand_profiles: dict[str, dict[datetime, float]],
+    availability_profiles: dict[str, dict[datetime, float]],
+    marginal_costs: dict[str, float],
+    price_forecasts: dict[datetime, float],
+    exchange_unit: ExchangeUnit | None,
+    exchange_profiles: dict[datetime, ExchangeSchedule],
+) -> tuple[MarketClearingResult, ...]:
+    """Quote and clear one opening from its gate-closure state snapshot."""
+
+    all_demand_bids: list[DemandBid] = []
+    exchange_schedules: dict[datetime, ExchangeSchedule | None] = {}
+    for delivery_start, delivery_end in opening.products:
+        demand_bids, schedule = _demand_bids_for_product(
+            demand_units=demand_units,
+            demand_profiles=demand_profiles,
+            exchange_unit=exchange_unit,
+            exchange_profiles=exchange_profiles,
+            delivery_start=delivery_start,
+            delivery_end=delivery_end,
+            maximum_bid_price=settings.maximum_bid_price,
+        )
+        all_demand_bids.extend(demand_bids)
+        exchange_schedules[delivery_start] = schedule
+    _validate_demand_prices(all_demand_bids, settings)
+
+    offers = _offers_for_opening(
+        opening=opening,
+        plants=plants,
+        runtime_states=runtime_states,
+        availability_profiles=availability_profiles,
+        marginal_costs=marginal_costs,
+        price_forecasts=price_forecasts,
+        exchange_unit=exchange_unit,
+        exchange_schedules=exchange_schedules,
+    )
+    _validate_offer_prices(offers, settings)
+    if settings.market_mechanism == "complex_clearing":
+        return clear_complex_opening(all_demand_bids, offers)
+    if any(offer.bid_type != "SB" for offer in offers):
+        raise InputValidationError(
+            "Block and linked EOM strategies require market_mechanism: "
+            "complex_clearing."
+        )
+    return tuple(
+        clear_pay_as_clear(
+            [
+                bid
+                for bid in all_demand_bids
+                if (bid.delivery_start, bid.delivery_end) == (start, end)
+            ],
+            [
+                offer
+                for offer in offers
+                if (offer.delivery_start, offer.delivery_end) == (start, end)
+            ],
+        )
+        for start, end in opening.products
+    )
+
+
 def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
     """Calculate one V1- or V2-compatible scenario without writing files."""
 
@@ -625,46 +698,79 @@ def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
         )
     runtime_states = {plant.name: PlantRuntimeState.initially_off(plant) for plant in runtime_plants}
 
-    results: list[MarketClearingResult] = []
+    # Clearing is a forward market event; its products are not dispatched at
+    # gate closure.  Keep cleared products on a physical-time queue so a later
+    # opening observes only deliveries that have already ended.
+    openings_by_time: dict[datetime, list[MarketOpening]] = defaultdict(list)
     for opening in valid_openings:
-        all_demand_bids: list[DemandBid] = []
-        exchange_schedules: dict[datetime, ExchangeSchedule | None] = {}
-        for delivery_start, delivery_end in opening.products:
-            demand_bids, schedule = _demand_bids_for_product(
-                demand_units=demand_units, demand_profiles=demand_profiles,
-                exchange_unit=exchange_unit, exchange_profiles=exchange_profiles,
-                delivery_start=delivery_start, delivery_end=delivery_end,
-                maximum_bid_price=settings.maximum_bid_price,
-            )
-            all_demand_bids.extend(demand_bids)
-            exchange_schedules[delivery_start] = schedule
-        _validate_demand_prices(all_demand_bids, settings)
-        offers = _offers_for_opening(
-            opening=opening, plants=plants, runtime_states=runtime_states,
-            availability_profiles=availability_profiles, marginal_costs=marginal_costs,
-            price_forecasts=price_forecasts, exchange_unit=exchange_unit,
-            exchange_schedules=exchange_schedules,
+        openings_by_time[opening.opening_time].append(opening)
+
+    # Keys retain the opening identity in case different openings have products
+    # with equal delivery timestamps.
+    ScheduledProductKey = tuple[datetime, datetime, datetime]
+    scheduled_results: dict[ScheduledProductKey, MarketClearingResult] = {}
+    pending_starts: dict[datetime, list[ScheduledProductKey]] = defaultdict(list)
+    pending_ends: dict[datetime, list[ScheduledProductKey]] = defaultdict(list)
+    results: list[MarketClearingResult] = []
+
+    while openings_by_time or pending_starts or pending_ends:
+        event_time = min(
+            [*openings_by_time, *pending_starts, *pending_ends]
         )
-        _validate_offer_prices(offers, settings)
-        if settings.market_mechanism == "complex_clearing":
-            opening_results = clear_complex_opening(all_demand_bids, offers)
-        else:
-            if any(offer.bid_type != "SB" for offer in offers):
-                raise InputValidationError(
-                    "Block and linked EOM strategies require market_mechanism: complex_clearing."
-                )
-            opening_results = tuple(
-                clear_pay_as_clear(
-                    [bid for bid in all_demand_bids if (bid.delivery_start, bid.delivery_end) == (start, end)],
-                    [offer for offer in offers if (offer.delivery_start, offer.delivery_end) == (start, end)],
-                )
-                for start, end in opening.products
+
+        # A product ending at this instant belongs to the past for every market
+        # that opens now.  Only these completed deliveries may affect its bids.
+        for key in pending_ends.pop(event_time, []):
+            _record_runtime_states(scheduled_results[key], runtime_states)
+
+        for opening in openings_by_time.pop(event_time, []):
+            opening_results = _clear_opening(
+                opening=opening,
+                settings=settings,
+                plants=plants,
+                runtime_states=runtime_states,
+                demand_units=demand_units,
+                demand_profiles=demand_profiles,
+                availability_profiles=availability_profiles,
+                marginal_costs=marginal_costs,
+                price_forecasts=price_forecasts,
+                exchange_unit=exchange_unit,
+                exchange_profiles=exchange_profiles,
             )
-        for market_result in sorted(opening_results, key=lambda result: result.delivery_start):
-            market_result = _apply_startup_costs(market_result, plants, runtime_states)
-            _record_runtime_states(market_result, runtime_states)
+            for market_result in opening_results:
+                market_result = replace(
+                    market_result, opening_time=opening.opening_time
+                )
+                key = (
+                    opening.opening_time,
+                    market_result.delivery_start,
+                    market_result.delivery_end,
+                )
+                scheduled_results[key] = market_result
+                pending_starts[market_result.delivery_start].append(key)
+                pending_ends[market_result.delivery_end].append(key)
+
+        # Products beginning now were unavailable to the preceding bid
+        # generation.  Startup costs use the state immediately before delivery.
+        for key in pending_starts.pop(event_time, []):
+            market_result = _apply_startup_costs(
+                scheduled_results[key], plants, runtime_states
+            )
+            scheduled_results[key] = market_result
             results.append(market_result)
-    return SimulationResult(settings=settings, market_results=tuple(results))
+
+    return SimulationResult(
+        settings=settings,
+        market_results=tuple(
+            sorted(
+                results,
+                key=lambda result: (
+                    result.delivery_start,
+                    result.opening_time or result.delivery_start,
+                ),
+            )
+        ),
+    )
 
 
 def run_simulation(

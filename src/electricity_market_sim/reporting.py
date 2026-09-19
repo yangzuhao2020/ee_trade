@@ -38,6 +38,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
     market_rows = []
     unit_rows = []
     offer_rows = []
+    demand_rows = []
     exchange_rows = []
     operator_totals: dict[str, dict[str, float]] = defaultdict(
         lambda: {
@@ -50,12 +51,16 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         }
     )
     for market_result in sorted_results:
+        opening_time = market_result.opening_time or market_result.delivery_start
+        opening_id = opening_time.isoformat()
         duration_hours = (
             market_result.delivery_end - market_result.delivery_start
         ).total_seconds() / 3600
         market_rows.append(
             {
                 "market_id": simulation_result.settings.market_id,
+                "opening_id": opening_id,
+                "opening_time": _timestamp(opening_time),
                 "delivery_start": _timestamp(market_result.delivery_start),
                 "delivery_end": _timestamp(market_result.delivery_end),
                 "duration_hours": _number(duration_hours),
@@ -67,6 +72,21 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 ),
                 "cleared_local_demand_energy_mwh": _number(
                     market_result.cleared_local_demand_mwh
+                ),
+                "requested_inelastic_demand_mwh": _number(
+                    market_result.requested_inelastic_demand_mwh
+                ),
+                "cleared_inelastic_demand_mwh": _number(
+                    market_result.cleared_inelastic_demand_mwh
+                ),
+                "requested_elastic_demand_mwh": _number(
+                    market_result.requested_elastic_demand_mwh
+                ),
+                "cleared_elastic_demand_mwh": _number(
+                    market_result.cleared_elastic_demand_mwh
+                ),
+                "unaccepted_elastic_demand_mwh": _number(
+                    market_result.unaccepted_elastic_demand_mwh
                 ),
                 "cleared_energy_mwh": _number(market_result.cleared_energy_mwh),
                 "unserved_load_mwh": _number(market_result.unserved_load_mwh),
@@ -93,6 +113,30 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 ),
             }
         )
+        for cleared in market_result.demand_bids:
+            demand_rows.append(
+                {
+                    "opening_id": opening_id,
+                    "opening_time": _timestamp(opening_time),
+                    "delivery_start": _timestamp(cleared.bid.delivery_start),
+                    "delivery_end": _timestamp(cleared.bid.delivery_end),
+                    "unit_name": cleared.bid.unit_name,
+                    "unit_operator": cleared.bid.operator,
+                    "bid_id": cleared.bid.identifier,
+                    "bid_type": cleared.bid.bid_type,
+                    "demand_type": cleared.bid.demand_type or "",
+                    "bid_price_eur_per_mwh": _number(
+                        cleared.bid.price_eur_per_mwh
+                    ),
+                    "requested_energy_mwh": _number(cleared.bid.volume_mwh),
+                    "accepted_energy_mwh": _number(cleared.accepted_energy_mwh),
+                    "unaccepted_energy_mwh": _number(cleared.unserved_energy_mwh),
+                    "clearing_price_eur_per_mwh": _number(
+                        cleared.clearing_price_eur_per_mwh
+                    ),
+                    "payment_eur": _number(cleared.payment_eur),
+                }
+            )
         powerplant_offers = [
             cleared
             for cleared in market_result.offers
@@ -102,6 +146,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             offer = cleared.offer
             offer_rows.append(
                 {
+                    "opening_id": opening_id,
+                    "opening_time": _timestamp(opening_time),
                     "delivery_start": _timestamp(offer.delivery_start),
                     "delivery_end": _timestamp(offer.delivery_end),
                     "unit_name": offer.unit_name,
@@ -171,6 +217,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             profit_eur = sum(cleared.profit_eur for cleared in cleared_offers)
             unit_rows.append(
                 {
+                    "opening_id": opening_id,
+                    "opening_time": _timestamp(opening_time),
                     "delivery_start": _timestamp(market_result.delivery_start),
                     "delivery_end": _timestamp(market_result.delivery_end),
                     "unit_name": unit_name,
@@ -225,6 +273,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 raise ValueError("An Exchange market result must contain both orders.")
             exchange_rows.append(
                 {
+                    "opening_id": opening_id,
+                    "opening_time": _timestamp(opening_time),
                     "delivery_start": _timestamp(market_result.delivery_start),
                     "delivery_end": _timestamp(market_result.delivery_end),
                     "exchange_name": import_offer.offer.unit_name,
@@ -261,12 +311,19 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         output_dir / "market_results.csv",
         [
             "market_id",
+            "opening_id",
+            "opening_time",
             "delivery_start",
             "delivery_end",
             "duration_hours",
             "requested_demand_energy_mwh",
             "requested_local_demand_energy_mwh",
             "cleared_local_demand_energy_mwh",
+            "requested_inelastic_demand_mwh",
+            "cleared_inelastic_demand_mwh",
+            "requested_elastic_demand_mwh",
+            "cleared_elastic_demand_mwh",
+            "unaccepted_elastic_demand_mwh",
             "cleared_energy_mwh",
             "unserved_load_mwh",
             "requested_export_mwh",
@@ -284,8 +341,31 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         market_rows,
     )
     _write_rows(
+        output_dir / "demand_results.csv",
+        [
+            "opening_id",
+            "opening_time",
+            "delivery_start",
+            "delivery_end",
+            "unit_name",
+            "unit_operator",
+            "bid_id",
+            "bid_type",
+            "demand_type",
+            "bid_price_eur_per_mwh",
+            "requested_energy_mwh",
+            "accepted_energy_mwh",
+            "unaccepted_energy_mwh",
+            "clearing_price_eur_per_mwh",
+            "payment_eur",
+        ],
+        demand_rows,
+    )
+    _write_rows(
         output_dir / "unit_results.csv",
         [
+            "opening_id",
+            "opening_time",
             "delivery_start",
             "delivery_end",
             "unit_name",
@@ -329,6 +409,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         _write_rows(
             output_dir / "exchange_results.csv",
             [
+                "opening_id",
+                "opening_time",
                 "delivery_start",
                 "delivery_end",
                 "exchange_name",
@@ -353,6 +435,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         _write_rows(
             output_dir / "offer_results.csv",
             [
+                "opening_id",
+                "opening_time",
                 "delivery_start",
                 "delivery_end",
                 "unit_name",

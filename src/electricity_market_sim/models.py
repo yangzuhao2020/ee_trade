@@ -132,6 +132,24 @@ class DemandBid:
     price_eur_per_mwh: float
     bid_type: str = "local_load"
     bid_id: str | None = None
+    # ``bid_type`` retains the market-side role used by the V1 exchange logic.
+    # ``demand_type`` distinguishes reliability load from price-responsive load
+    # so rejected elastic bids are not reported as involuntary curtailment.
+    demand_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.bid_type not in {"local_load", "export"}:
+            raise ValueError("Demand bids must be local_load or export bids.")
+        demand_type = self.demand_type
+        if demand_type is None:
+            demand_type = "export" if self.bid_type == "export" else "inelastic_load"
+            object.__setattr__(self, "demand_type", demand_type)
+        if demand_type not in {"inelastic_load", "elastic_load", "export"}:
+            raise ValueError(
+                "demand_type must be inelastic_load, elastic_load, or export."
+            )
+        if (self.bid_type == "export") != (demand_type == "export"):
+            raise ValueError("Export demand bids must use demand_type='export'.")
 
     @property
     def identifier(self) -> str:
@@ -269,12 +287,15 @@ class MarketClearingResult:
     demand_bids: tuple[ClearedDemandBid, ...]
     marginal_unit_name: str | None
     pricing_method: str = "merit_order"
+    opening_time: datetime | None = None
 
     def __post_init__(self) -> None:
         """Guard the physical and financial quantities used by reporting and plots."""
 
         if self.delivery_end <= self.delivery_start:
             raise ValueError("A market product must have a positive delivery duration.")
+        if self.opening_time is not None and self.opening_time > self.delivery_start:
+            raise ValueError("A market opening cannot occur after delivery starts.")
         if not isfinite(self.clearing_price_eur_per_mwh):
             raise ValueError("The clearing price must be finite.")
         if any(
@@ -326,11 +347,6 @@ class MarketClearingResult:
                 "unit names must be unique when no offer_id is supplied."
             )
         if any(
-            cleared.bid.bid_type not in {"local_load", "export"}
-            for cleared in self.demand_bids
-        ):
-            raise ValueError("Demand bids must be local_load or export bids.")
-        if any(
             cleared.offer.offer_type not in {"power_plant", "import"}
             for cleared in self.offers
         ):
@@ -371,7 +387,7 @@ class MarketClearingResult:
         expected_unserved_load = sum(
             demand.unserved_energy_mwh
             for demand in self.demand_bids
-            if demand.bid.bid_type == "local_load"
+            if demand.bid.demand_type == "inelastic_load"
         )
         if not isclose(
             self.unserved_load_mwh,
@@ -440,9 +456,49 @@ class MarketClearingResult:
 
     @property
     def unserved_demand_mwh(self) -> float:
-        """All unmet demand: local unserved load plus unfulfilled exports."""
+        """All unaccepted demand, including price-responsive elastic bids."""
 
-        return self.unserved_load_mwh + self.unfulfilled_export_mwh
+        return sum(demand.unserved_energy_mwh for demand in self.demand_bids)
+
+    @property
+    def unaccepted_elastic_demand_mwh(self) -> float:
+        return sum(
+            demand.unserved_energy_mwh
+            for demand in self.demand_bids
+            if demand.bid.demand_type == "elastic_load"
+        )
+
+    @property
+    def requested_inelastic_demand_mwh(self) -> float:
+        return sum(
+            demand.bid.volume_mwh
+            for demand in self.demand_bids
+            if demand.bid.demand_type == "inelastic_load"
+        )
+
+    @property
+    def cleared_inelastic_demand_mwh(self) -> float:
+        return sum(
+            demand.accepted_energy_mwh
+            for demand in self.demand_bids
+            if demand.bid.demand_type == "inelastic_load"
+        )
+
+    @property
+    def requested_elastic_demand_mwh(self) -> float:
+        return sum(
+            demand.bid.volume_mwh
+            for demand in self.demand_bids
+            if demand.bid.demand_type == "elastic_load"
+        )
+
+    @property
+    def cleared_elastic_demand_mwh(self) -> float:
+        return sum(
+            demand.accepted_energy_mwh
+            for demand in self.demand_bids
+            if demand.bid.demand_type == "elastic_load"
+        )
 
     @property
     def requested_local_demand_mwh(self) -> float:

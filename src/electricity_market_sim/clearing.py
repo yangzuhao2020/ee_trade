@@ -127,7 +127,7 @@ def clear_pay_as_clear(
     unserved_load = sum(
         item.unserved_energy_mwh
         for item in cleared_demands
-        if item.bid.bid_type == "local_load"
+        if item.bid.demand_type == "inelastic_load"
     )
     unfulfilled_export = sum(
         item.unserved_energy_mwh
@@ -196,10 +196,19 @@ def clear_complex_opening(
             prices,
         )
         if negative_parent is None:
+            # ``active_offers`` is only the order book used for the final
+            # re-clearing round.  Preserve the originally submitted order book
+            # in the result so a BB/LB family removed for negative surplus is
+            # reported as rejected (accepted energy 0), rather than appearing
+            # never to have been submitted.
+            final_accepted_supply = {
+                offer.identifier: accepted_supply.get(offer.identifier, 0.0)
+                for offer in supply_offers
+            }
             return _complex_results(
                 demand_bids,
-                active_offers,
-                accepted_supply,
+                supply_offers,
+                final_accepted_supply,
                 accepted_demand,
                 prices,
                 products,
@@ -470,7 +479,7 @@ def _complex_results(
                 unserved_load_mwh=sum(
                     item.unserved_energy_mwh
                     for item in cleared_demands
-                    if item.bid.bid_type == "local_load"
+                    if item.bid.demand_type == "inelastic_load"
                 ),
                 unfulfilled_export_mwh=sum(
                     item.unserved_energy_mwh

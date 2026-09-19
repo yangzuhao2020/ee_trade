@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 import sys
 
 from .errors import SimulationError
 from .plotting import generate_plots
 from .simulation import run_simulation
+
+
+def _plot_opening(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "--plot-opening must be an ISO-like date and time."
+        ) from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +47,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write CSV results only; skip post-simulation PNG generation.",
     )
+    parser.add_argument(
+        "--plot-opening",
+        type=_plot_opening,
+        help=(
+            "For complex clearing, render detailed plots for this market opening "
+            "(for example '2019-01-01 00:00'). Defaults to the first opening."
+        ),
+    )
     return parser
 
 
@@ -54,7 +72,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if not arguments.no_plots:
         try:
-            generate_plots(result, arguments.output_dir / "plots")
+            generate_plots(
+                result,
+                arguments.output_dir / "plots",
+                opening_time=arguments.plot_opening,
+            )
         except Exception as exc:
             # CSV output is already durable at this point. Plot failures must
             # not change a successful simulation into a lost result.
