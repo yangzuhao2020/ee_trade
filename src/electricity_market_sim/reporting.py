@@ -87,6 +87,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "clearing_price_eur_per_mwh": _number(
                     market_result.clearing_price_eur_per_mwh
                 ),
+                "pricing_method": market_result.pricing_method,
                 "total_transaction_value_eur": _number(
                     market_result.transaction_value_eur
                 ),
@@ -107,6 +108,10 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     "unit_operator": offer.operator,
                     "technology": offer.technology,
                     "offer_id": offer.identifier,
+                    "bid_id": offer.complex_identifier,
+                    "bid_type": offer.bid_type,
+                    "min_acceptance_ratio": _number(offer.min_acceptance_ratio),
+                    "parent_bid_id": offer.parent_bid_id or "",
                     "offer_segment": offer.offer_segment,
                     "marginal_cost_eur_per_mwh": _number(
                         offer.marginal_cost_eur_per_mwh
@@ -117,6 +122,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     "accepted_power_mw": _number(cleared.accepted_power_mw),
                     "accepted_energy_mwh": _number(cleared.accepted_energy_mwh),
                     "clearing_price_eur_per_mwh": _number(
+                        cleared.clearing_price_eur_per_mwh
+                    ),
+                    "accepted_price_eur_per_mwh": _number(
                         cleared.clearing_price_eur_per_mwh
                     ),
                     "revenue_eur": _number(cleared.revenue_eur),
@@ -270,6 +278,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "net_exchange_mwh",
             "exchange_market_cash_flow_eur",
             "clearing_price_eur_per_mwh",
+            "pricing_method",
             "total_transaction_value_eur",
         ],
         market_rows,
@@ -350,6 +359,10 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "unit_operator",
                 "technology",
                 "offer_id",
+                "bid_id",
+                "bid_type",
+                "min_acceptance_ratio",
+                "parent_bid_id",
                 "offer_segment",
                 "marginal_cost_eur_per_mwh",
                 "bid_price_eur_per_mwh",
@@ -358,6 +371,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "accepted_power_mw",
                 "accepted_energy_mwh",
                 "clearing_price_eur_per_mwh",
+                "accepted_price_eur_per_mwh",
                 "revenue_eur",
                 "variable_cost_eur",
                 "startup_cost_eur",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from .models import PowerPlant, SupplyOffer
@@ -87,6 +87,7 @@ def naive_offer(
     """Build V1's one-part marginal-cost offer with V2 availability applied."""
 
     duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
+    offer_id = f"{plant.name}::single::{delivery_start.isoformat()}"
     return SupplyOffer(
         unit_name=plant.name,
         operator=plant.operator,
@@ -97,6 +98,8 @@ def naive_offer(
         offered_energy_mwh=available_power * duration_hours,
         bid_price_eur_per_mwh=marginal_cost,
         marginal_cost_eur_per_mwh=marginal_cost,
+        offer_id=offer_id,
+        bid_id=offer_id,
     )
 
 
@@ -118,13 +121,16 @@ def heuristic_flexible_offers(
     """
 
     duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
-    # The minimum-stable tranche may clear partially in V2, but neither
-    # tranche may offer more than the unit can physically provide this hour.
-    # This is also the constrained q_inflex used to spread startup cost.
-    inflexible_power = min(plant.min_power_mw, available_power)
+    # A unit that cannot physically reach its minimum stable output does not
+    # submit an offer.  This is distinct from clearing: a submitted minimum
+    # tranche may still be partially accepted by the market.
+    if available_power < plant.min_power_mw:
+        return []
+
+    inflexible_power = plant.min_power_mw
     flexible_power = available_power - inflexible_power
 
-    if state.is_running:
+    if inflexible_power > _POWER_TOLERANCE_MW and state.is_running:
         future_prices = [
             price_forecast[delivery_start + timedelta(hours=hour)]
             for hour in range(_FORECAST_HOURS + 1)
@@ -137,7 +143,7 @@ def heuristic_flexible_offers(
             if current_forecast < marginal_cost and future_expected_profit >= 0.0
             else marginal_cost
         ) # 机组已经处于运行状态时，最低稳定出力段 inflexible 应该报多少钱。
-    elif inflexible_power > _POWER_TOLERANCE_MW: #!
+    elif inflexible_power > _POWER_TOLERANCE_MW:
         expected_operating_time = max(
             state.average_operating_time,
             plant.min_operating_time_hours,
@@ -145,13 +151,12 @@ def heuristic_flexible_offers(
         inflexible_price = marginal_cost + plant.start_cost_eur / (
             expected_operating_time * inflexible_power
         )
-    else:
-        # No energy can be offered while unavailable, so a startup-cost
-        # allocation would divide by zero.  Keep its irrelevant price at MC.
-        inflexible_price = marginal_cost
 
-    return [
-        SupplyOffer(
+    offers: list[SupplyOffer] = []
+    timestamp = delivery_start.isoformat()
+    if inflexible_power > _POWER_TOLERANCE_MW:
+        offers.append(
+            SupplyOffer(
             unit_name=plant.name,
             operator=plant.operator,
             technology=plant.technology,
@@ -161,10 +166,14 @@ def heuristic_flexible_offers(
             offered_energy_mwh=inflexible_power * duration_hours,
             bid_price_eur_per_mwh=inflexible_price,
             marginal_cost_eur_per_mwh=marginal_cost,
-            offer_id=f"{plant.name}::inflexible",
+            offer_id=f"{plant.name}::inflexible::{timestamp}",
             offer_segment="inflexible",
-        ), # 最低稳定出力段的报价。
-        SupplyOffer(
+            bid_id=f"{plant.name}::inflexible::{timestamp}",
+            )
+        )
+    if flexible_power > _POWER_TOLERANCE_MW:
+        offers.append(
+            SupplyOffer(
             unit_name=plant.name,
             operator=plant.operator,
             technology=plant.technology,
@@ -174,7 +183,82 @@ def heuristic_flexible_offers(
             offered_energy_mwh=flexible_power * duration_hours,
             bid_price_eur_per_mwh=marginal_cost,
             marginal_cost_eur_per_mwh=marginal_cost,
-            offer_id=f"{plant.name}::flexible",
+            offer_id=f"{plant.name}::flexible::{timestamp}",
             offer_segment="flexible",
-        ), # 剩余灵活出力卖单报价。
-    ]
+            bid_id=f"{plant.name}::flexible::{timestamp}",
+            )
+        )
+    return offers
+
+
+def heuristic_block_offers(
+    plant: PowerPlant,
+    state: PlantRuntimeState,
+    products: tuple[tuple[datetime, datetime], ...],
+    available_powers_mw: dict[datetime, float],
+    marginal_cost: float,
+    price_forecast: dict[datetime, float],
+    opening_time: datetime,
+    linked: bool,
+) -> list[SupplyOffer]:
+    """Create one minimum-output BB and its hourly flexible legs for an opening.
+
+    ``state`` is deliberately not advanced while the offers are built: V2 prices
+    all products of one day-ahead opening from the gate-closure state snapshot.
+    """
+
+    inflexible_legs: list[SupplyOffer] = []
+    flexible_legs: list[SupplyOffer] = []
+    for delivery_start, delivery_end in products:
+        hourly = heuristic_flexible_offers(
+            plant,
+            state,
+            delivery_start,
+            delivery_end,
+            available_powers_mw[delivery_start],
+            marginal_cost,
+            price_forecast,
+        )
+        for offer in hourly:
+            if offer.offer_segment == "inflexible":
+                inflexible_legs.append(offer)
+            else:
+                flexible_legs.append(offer)
+
+    opening_id = opening_time.isoformat()
+    parent_bid_id = f"{plant.name}::BB::{opening_id}"
+    has_parent = bool(inflexible_legs)
+    offers: list[SupplyOffer] = []
+    if has_parent:
+        total_energy = sum(leg.offered_energy_mwh for leg in inflexible_legs)
+        block_price = sum(
+            leg.bid_price_eur_per_mwh * leg.offered_energy_mwh
+            for leg in inflexible_legs
+        ) / total_energy
+        offers.extend(
+            replace(
+                leg,
+                offer_id=f"{parent_bid_id}::{leg.delivery_start.isoformat()}",
+                bid_id=parent_bid_id,
+                bid_type="BB",
+                min_acceptance_ratio=1.0,
+                parent_bid_id=None,
+                bid_price_eur_per_mwh=block_price,
+                offer_segment="block_inflexible",
+            )
+            for leg in inflexible_legs
+        )
+
+    for leg in flexible_legs:
+        child_id = f"{plant.name}::{'LB' if linked and has_parent else 'SB'}::{opening_id}::{leg.delivery_start.isoformat()}"
+        offers.append(
+            replace(
+                leg,
+                offer_id=child_id,
+                bid_id=child_id,
+                bid_type="LB" if linked and has_parent else "SB",
+                parent_bid_id=parent_bid_id if linked and has_parent else None,
+                offer_segment="linked_flexible" if linked and has_parent else "flexible",
+            )
+        )
+    return offers

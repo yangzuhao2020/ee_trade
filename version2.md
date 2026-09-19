@@ -22,36 +22,56 @@ powerplant_energy_heuristic_flexable
 ```
 ### 市场出清
 和第一版本相同。
+但是，存在块报价时，将同一次市场开放包含的全部时段联合出清，并使用混合整数优化处理块报价的全接受或全拒绝约束。
 ### 输出结果
 和第一版本相同
 ## 报价方式
 ### 需求侧报价
-和第一版本相同。
+`demand_energy_naive` 和第一版本相同。
+	读取 `demand_df.csv`。
+`demand_energy_heuristic_elastic` [新增]
+	`demand_elastic` 不读取 `demand_df.csv`，而是直接根据以下参数生成需求。
+同时报价不再是只有一份报价，而是多份报价。
 ### 发电侧报价
 `powerplant_energy_naive` 和第一版本相同。
 `powerplant_energy_heuristic_flexable` [新增]
-## powerplant_energy_heuristic_flexable
+`powerplant_energy_heuristic_block`[新增]
+`powerplant_energy_heuristic_linked`[新增]
+### 文件映射
+| 文件                     | 第一版用途            |
+| ---------------------- | ---------------- |
+| `config.yaml`          | 读取仿真时间、市场限价和出清机制 |
+| `demand_df.csv`        | 提供各时段负荷          |
+| `demand_units.csv`     | 定义负荷参与者及其运营商     |
+| `fuel_prices_df.csv`   | 提供燃料价格与碳价        |
+| `powerplant_units.csv` | 建立机组并计算边际成本      |
+| `exchange_units.csv`   | 外部电网             |
+| `exchanges_df.csv`     | 进口量和出口量均以正数保存    |
+| `availability_df.csv`  | 随时间变化的可用率        |
+| `config.yaml`          | 交易中的配置文件         |
+`availability_df.csv` 中的可用率范围为 `[0,1]`。
+# powerplant_energy_heuristic_flexable
 考虑最低出力、启停状态、启动成本、爬坡、未来价格和热电联产。
 	将一台机组拆成两条报价。第一部分属于最低稳定出力，然后第二部分属于灵活出力。
-### 灵活出力定价
+## 灵活出力定价
 - 灵活出力通常按边际成本报价。增加出力会增加总燃料与碳排放成本；
 - 但在当前实现中，单位电量的边际成本不随出力变化。
-### 最低出力怎么定价
+## 最低出力怎么定价
 最低出力的价格取决于机组当前是“运行”还是“停机”。
-注意：如果 min_power = 0 就意味着全部都是灵活定价。
-#### 停机
+注意：如果 csv 表格中设定 min_power = 0 就意味着全部都是灵活定价。
+### 停机
 如果要让机组启动，除了燃料成本，还要支付启动成本。$$p_{\text{inflex}} = C_{\text{marginal}} + \frac{C_{\text{start}}}{T \times q_{\text{inflex}}}$$其中： $$T=\max(\text{avg\_op\_time},\text{min\_operating\_time})$$
 $$\text{avg\_op\_time} = \frac{\text{累计出力大于 0 的时段数}}{\text{截至当前的总时段数}}$$
 	注意：名称虽为 op_time，但不是平均连续运行小时数。
-	q_inflex 是经过已有出力、其他市场承诺和爬坡约束修正后的最低报价量。
+	q_inflex 当可用出力不低于 `min_power` 时，最低出力报价量等于 `min_power`。
 	所以，边际成本 + 启动费用=最低出力报价。($C_{start}$启动成本可能为0)
-#### 运行
+### 运行
 如果现在关闭机组，将来再启动，还会产生启动成本。所以机组可能愿意让最低出力暂时少赚一点，甚至亏一点，也不愿意关闭。$$p_{\text{inflex}} = C_{\text{flex}}^* - \text{避免重启带来的价值} - \text{供热相关的报价下调（成本分摊）}$$
 当未来 12 小时累计预期收益**非负**、且当前预测电价低于边际成本时，代码会将 $C_{\text{flex}}^{*}$ 设为 0。
 未来价格预测：
 	该策略默认读取从当前时点开始、长度约 12 小时的 `EOM` 价格预测，并计算累计预期收益：
 $$
-R_t=\sum_{\tau=t}^{t+12h}\left(p_t^{\text{forecast}}-C_{\text{marginal}}\right)$$
+R_t=\sum_{\tau=t}^{t+12h}\left(p_{\tau}^{\text{forecast}}-C_{\text{marginal}}\right)$$
   当 $R_t \ge 0$，且当前小时预测价格 $p_t^{\text{forecast}} < C_{\text{marginal}}$ 时，代码会将 $C_{\text{flex}}^{*}$ 设为 0。
 
 ```mermaid
@@ -63,25 +83,268 @@ flowchart LR
   E --> F["price['EOM'][t]<br/>边际机组成本"]
 ```
 ### 成交
-最低出力允许部分成交
-## 文件映射
-| 文件                     | 第一版用途            |
-| ---------------------- | ---------------- |
-| `config.yaml`          | 读取仿真时间、市场限价和出清机制 |
-| `demand_df.csv`        | 提供各时段负荷          |
-| `demand_units.csv`     | 定义负荷参与者及其运营商     |
-| `fuel_prices_df.csv`   | 提供燃料价格与碳价        |
-| `powerplant_units.csv` | 建立机组并计算边际成本      |
-| `exchange_units.csv`   | 外部电网             |
-| `exchanges_df.csv`     | 进口量和出口量均以正数保存    |
-| `availability_df.csv`  | 随时间变化的可用出力       |
-
+注意：
+- 报价前：可用出力低于 `min_power`，不报价；
+- 出清时：已经提交的最低出力段允许部分成交。
 ## 数据来源
+### 测试1
 输入：`examples/input/example_01b`
 输出：`outputs/example_01b`
+### 测试2
+输入：`examples/input/example_01c`
+输出：`outputs/example_01c`
 
+| `demand_df.csv` 列 | `demand_units.csv` 中的负荷 |
+| ----------------- | ----------------------- |
+| `demand_EOM`      | `demand_EOM`            |
+| `demand_CRM_pos`  | 正备用容量需求                 |
+| `demand_CRM_neg`  | 负备用容量需求                 |
+| 无对应列              | `demand_elastic`        |
+### 其他的设置
 启动成本 = 0
 爬坡约束 = 不启用
 供热出力 = 0
 
 `exchanges_df.csv` 同样是15分钟功率数据，采用和第一版相同的方式计算。
+
+# powerplant_energy_heuristic_block
+该策略将机组的最低稳定出力打包成跨时段块报价，最低稳定出力以上的灵活出力仍然逐小时报价。
+
+例如：
+> 我愿意在这三个小时里每小时至少发200 MW，但这三小时的最低出力必须整体接受；不能只接受其中一个小时。
+## 块报价范围
+一个最低出力块覆盖同一次市场开放中的全部交付产品。
+块报价测试使用 `config.yaml` 中的：dam_with_complex_opt_clearing
+其市场配置为：
+```yaml
+products:
+  - duration: 1h
+    count: 24
+    first_delivery: 24h
+opening_frequency: 24h
+market_mechanism: complex_clearing
+additional_fields:
+  - bid_type
+  - min_acceptance_ratio
+```
+因此，市场每次联合出清24个1小时产品，最低出力形成一个24小时块。
+**这里要考虑为未来交付时，处于运行还是停机状态。**
+对于同一次市场开放中的全部交付时段，报价使用开市时已知的机组运行状态快照；不根据本次尚未出清的未来交付时段推断运行状态。出清后，再按照实际交付时间顺序更新机组运行状态。第二版中启动成本为 0、爬坡约束未启用、供热出力为 0。
+## 生成两类报价
+$$P_{t}^{\text{available}} = P^{\max} a_{t},\quad a_{t}\in[0,1] $$当$P_t^{\text{available}} < P^{\min}$：$$
+P_t^{\text{inflex}} = 0, \qquad P_t^{\text{flex}} = 0.
+$$否则：
+$$
+P_t^{\text{inflex}} = P^{\min}, \qquad P_t^{\text{flex}} = P_t^{\text{available}} - P^{\min}.
+$$此时：$$P_{t}^{available}=P_{t}^{\mathrm{inflex}}+P_{t}^{\mathrm{flex}}$$
+
+| 组成                        | 含义          | 报价形式        |
+| ------------------------- | ----------- | ----------- |
+| $P_{t}^{\mathrm{inflex}}$ | 机组最低稳定出力    | 多个小时合成一个块报价 |
+| $P_{t}^{\mathrm{flex}}$   | 最低出力以上的额外能力 | 每小时一个普通报价   |
+## 块报价的价格怎么得到？
+程序先分别计算每小时的最低出力报价，然后求电量加权平均价：
+$$
+C^{\text{block}} = \frac{\sum_{t} C_{t}^{\text{inflex}} P_{t}^{\text{inflex}} \Delta t}{\sum_{t} P_{t}^{\text{inflex}} \Delta t}.
+$$这个公式是在计算多个小时最低出力报价的“电量加权平均价格”。其中的 $C^{\mathrm{block}}$ 为整个块只有一个报价价格，但是每个小时的电量可以不同。
+
+最低出力块设置 `MAR=1`，意味着接受比例只能是 `0` 或 `1`，不能部分小时成交，也不能部分接受块内电量。
+
+灵活出力仍然是独立的逐小时普通报价。因此可能出现：
+> 最低出力块被拒绝，但某些小时的灵活出力成交。
+
+第二版保留该行为，不建立最低出力块与灵活报价之间的父子约束。该行为可能导致机组出力低于最低稳定出力，属于本策略的已知限制。
+# powerplant_energy_heuristic_linked
+该策略在 `powerplant_energy_heuristic_block` 的基础上，为最低稳定出力和逐小时灵活出力建立父子关系。
+- 最低稳定出力组成一个父块报价；
+- 每小时的灵活出力分别作为子报价；
+- 父块被拒绝时，所有子报价都必须被拒绝；
+- 父块被接受后，各小时子报价才有资格成交。
+
+情况1
+	父块：拒绝
+	08:00子报价：必须拒绝
+	09:00子报价：必须拒绝
+	10:00子报价：必须拒绝
+情况2
+	父块：接受
+	三个子报价：全部拒绝
+情况3
+	父 和 子 都成交。
+
+父块和子报价在同一次市场出清中联合决定。只有父块被接受，灵活出力子报价才允许成交。
+
+## 配置文件
+`powerplant_energy_heuristic_linked` 必须使用复杂出清，并在 `config.yaml` 中配置以下字段：
+market_mechanism: complex_clearing
+additional_fields:
+- bid_type
+- min_acceptance_ratio
+- parent_bid_id
+
+- `bid_type`：区分普通报价、块报价和关联报价；
+    - `SB`：普通逐时报价；
+    - `BB`：父块报价；
+    - `LB`：关联子报价。
+- `min_acceptance_ratio`：第二版不支持通用最小接受比例。父块 `BB` 必须设置为 `1`，表示只能全部接受或全部拒绝；普通报价 `SB` 与关联子报价 `LB` 必须设置为 `0`。其他取值将被程序拒绝。
+- `parent_bid_id`：记录子报价对应的父块编号，用于建立父子依赖关系。
+$$x_{\mathrm{child},t}\leq x_{\mathrm{parent}}.$$
+- $x_parent​$：父块的接受比例；
+- $x_{\mathrm{child},t}$：时段 tt 的子报价接受比例。
+
+当父块被拒绝时，$x_{\mathrm{parent}}=0$，因此所有子报价的接受比例也只能为0。
+# demand_energy_heuristic_elastic
+把一个负荷拆成多档需求报价。电价低时多用电，电价高时少用电。
+
+{
+    "name": "demand_elastic",
+    "technology": "elastic_demand",
+    "bidding_EOM": "demand_energy_heuristic_elastic",
+    "max_power": 20, # 最大可消费功率
+    "min_power": 0,
+    "unit_operator": "elastic_de",
+    "elasticity": -0.05, # 需求价格弹性
+    "elasticity_model": "isoelastic",  # 使用等弹性需求曲线
+    "max_price": 3000, # 最高愿付价格
+    "num_bids": 10 # 把需求曲线拆成10档报价
+}
+
+其中的弹性 `−0.05` 是什么意思呢？
+$$ E = \frac{\text{需求量变化百分比}}{\text{价格变化百分比}} \quad E = -0.05$$
+大致表示：
+> 电价上涨1%，需求量下降0.05%。负号表示价格上涨时，用电量下降。
+## 等弹性需求曲线
+使用：
+$$ Q(P) = Q_{\max} P^{E} $$
+该负荷的最高愿付价格 `max_price` 为 3000 EUR/MWh。本例中它也等于市场价格上限。
+$$
+Q_{\text{first}} = Q_{\max} P_{\max}^{E}
+$$
+代入：
+$$
+Q_{\text{first}} = 20 \times 3000^{-0.05} \approx 13.402\ \text{MW}
+$$
+这表示：
+> 即使电价达到3000 EUR/MWh，这个负荷仍然希望购买约13.402 MW。
+
+因此第一档报价为：
+```python
+{
+    "volume": 13.402,
+    "price": 3000
+}
+```
+剩余待拆分需求量为：20−13.402=6.598 MW
+`num_bids=10`，除第一档外还需要生成9档，因此每档数量为：
+$$
+\frac{6.598}{9} \approx 0.733\ \text{MW}
+$$
+本平台沿用第一版规则，需求买单数量统一使用正数。
+
+| 档位  |   本档数量    |   累计需求    | 最高愿付价格(EUR/MWh) |
+| :-: | :-------: | :-------: | :-------------: |
+|  1  | 13.402 MW | 13.402 MW |     3000.00     |
+|  2  | 0.733 MW  | 14.135 MW |     1034.05     |
+|  3  | 0.733 MW  | 14.868 MW |     376.15      |
+|  4  | 0.733 MW  | 15.601 MW |     143.65      |
+|  5  | 0.733 MW  | 16.335 MW |      57.34      |
+|  6  | 0.733 MW  | 17.068 MW |      23.83      |
+|  7  | 0.733 MW  | 17.801 MW |      10.28      |
+|  8  | 0.733 MW  | 18.534 MW |      4.58       |
+|  9  | 0.733 MW  | 19.267 MW |      2.11       |
+| 10  | 0.733 MW  | 20.000 MW |      1.00       |
+已知需求 如何求解价格呢？
+举例：使用公式：
+$$
+Q_i = Q_{\text{first}} + i\Delta Q \quad i=1,...,9
+$$
+$$
+P_i = \left( \frac{Q_i}{Q_{\max}} \right)^{1/E}
+$$已知：
+- $i = 1$：第二档；
+- $i = 9$：第十档；
+- 第一档直接使用 $Q_{\text{first}}$ 和 $P_{\max}$。
+
+第二档：
+$$
+\begin{align*}
+Q_1 &= 13.402133 + 0.733096 = 14.135229\ \text{MW} \\
+P_1 &= \left(\frac{14.135229}{20}\right)^{-20} \approx 1034.05\ \text{EUR/MWh}
+\end{align*}
+$$
+第一档的含义也可以进一步表述为：理论曲线上累计需求低于 $13.402\text{ MW}$ 的部分，愿付价格都高于市场限价 `3000`，因此统一合并为一档，以 `3000 EUR/MWh` 报价。
+# 确定最后的价格
+## 复杂出清
+当订单簿中出现 `BB` 块报价或 `LB` 关联报价时，ASSUME 将同一次市场开放包含的全部交付时段放入同一个优化模型中联合出清。
+
+优化目标本质上是最大化社会福利：
+$$
+\max(\text{需求愿付价值} - \text{供给报价成本})
+$$
+ASSUME 实际写成：$$
+\min \sum_{o} \sum_{t \in T_o} p_o q_{o,t} x_o
+$$ASSUME 使用带符号的订单量：
+- 供给报价量为正数；
+- 需求报价量为负数。
+
+因为需求量是负数，所以需求项会降低目标值，效果等价于最大化社会福利。
+每个时段满足：$$
+\sum_{o} q_{o,t} x_o = 0
+$$$x_o$  表示订单 o 的接受比例。对于块报价，同一个 $x_o$ 应用于块内全部交付时段。
+并加入：
+- `SB` 与 `LB` 的接受比例在 $[0,1]$ 内连续取值，且其 `min_acceptance_ratio=0`；
+- 父块 `BB` 的 `min_acceptance_ratio=1`，因此块报价只能整体接受或整体拒绝；第二版不支持其他 MAR 取值；
+- 子报价的接受比例不超过父报价的接受比例。
+例如：$$
+x_{\text{child}} \leq x_{\text{parent}}
+$$子报价的接受比例不能超过父报价的接受比例。
+## 如何确定价格
+ASSUME 使用两阶段求解：
+1. 求解 MILP，确定块报价接受还是拒绝；
+2. 固定 MILP 求得的整数接受决策。
+3. 重新求解连续 LP；
+4. 读取每个时段供需平衡约束的对偶值。
+$$
+p_t^{\text{clear}} = \lambda_t
+$$
+其中，$\lambda_t$ 是时段供需平衡约束的对偶值。
+因此，一次联合出清包含24个1小时交付产品时，最终会得到24个时段价格，而不是一个24小时统一价格。
+
+块报价虽然只有一个 `bid_price`，但成交后的 `accepted_price` 按小时保存。例如：
+块报价价格：40 EUR/MWh<br>
+	08:00 结算价格：35 EUR/MWh<br>
+	09:00 结算价格：42 EUR/MWh<br>
+	10:00 结算价格：51 EUR/MWh
+
+块报价的 `bid_price` 是覆盖全部时段的统一报价价格；块报价被接受后，块内各时段分别按照对应时段的市场出清价格结算。因此，`accepted_price` 不一定等于 `bid_price`，各时段之间也可以不同。
+单个时段的结算价格可以低于块报价价格，此时该时段产生负盈余，但不会单独拒绝该时段；ASSUME按照整个块的合计盈余进行检查。$$
+S_{\text{block}} = \sum_{t \in T} Q_t \Delta t \left( P_t^{\text{clear}} - P^{\text{bid}} \right)
+$$其中：
+- $Q_t$：块报价在时段 $t$ 的功率，单位 MW；
+- $\Delta t$：时段长度，单位 h；
+- $Q_t \Delta t$：该时段成交电量，单位 MWh；
+- $S_{\text{block}}$：整个块的盈余，单位 EUR。
+
+ASSUME 随后检查每个订单的盈余。对于普通块报价，按照 $S_{\text{block}}$ 检查。对于存在关联子报价的父块，按照父子报价的合计盈余检查：
+$$
+S_{\text{family}} = S_{\text{parent}} + \sum_{c} Q_c x_c \Delta t \left( P_c^{\text{clear}} - P_c^{\text{bid}} \right)
+$$
+其中，$x_c$ 是子报价的接受比例，$Q_c x_c \Delta t$ 是子报价的实际成交电量。关联子报价的正盈余可以补偿父块的负盈余。负盈余订单组的删除顺序与重新出清规则见下文。
+
+`bid_price` 参与优化目标和块报价接受决策；`accepted_price` 用于计算各时段的实际结算金额。
+
+# 注意的地方
+demand_EOM → 进入EOM demand_elastic → 进入EOM demand_CRM_pos → 忽略 demand_CRM_neg → 忽略
+
+当一次市场开放要求生成24个1小时交付产品，但仿真结束时间或输入数据不足以覆盖完整24小时时，本次市场开放整体跳过。不得截断产品数量、缩短块报价或使用零值补齐。程序应输出警告，说明被跳过的开市时间及缺失时段。
+
+对使用启发式最低稳定出力定价的机组，完整性检查还必须覆盖从每个交付时段开始、长度为 12 小时的价格预测所依赖的数据。若该预测所需的需求、可用率或其他输入数据缺失，也跳过整次市场开放；警告应注明这是报价预测数据缺失。
+
+多个负盈余块同时出现时，删除顺序是什么？
+	每轮出清后，计算各已接受块报价的盈余；对关联报价，计算父块与子报价的合计盈余。若有多个负盈余报价组，按盈余从低到高选取一个删除（同值时按 `bid_id` 排序），然后重新出清。重复此过程，直到没有负盈余报价组。
+
+某个 BB 在 24 小时内全部因可用容量低于 `min_power` 而为零时，应当“不提交 BB，也不提交零量 SB/LB”。
+
+只要市场配置为 `complex_clearing`，就使用优化模型出清，并从各时段供需平衡约束的对偶值取价。不要根据这次订单簿有没有 `BB/LB` 临时切换出清算法。
+
+EOM 配置了 `markets_config.EOM.start_date` 时用它安排开市；未配置时才使用 `config.yaml` 顶层场景字段的 `start_date`。

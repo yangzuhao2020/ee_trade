@@ -5,14 +5,16 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+import warnings
 
 from .bidding import (
     PlantRuntimeState,
     available_power_mw,
+    heuristic_block_offers,
     heuristic_flexible_offers,
     naive_offer,
 )
-from .clearing import clear_pay_as_clear
+from .clearing import clear_complex_opening, clear_pay_as_clear
 from .config import load_market_settings
 from .errors import InputValidationError
 from .loader import (
@@ -31,6 +33,7 @@ from .models import (
     ExchangeSchedule,
     ExchangeUnit,
     MarketClearingResult,
+    MarketOpening,
     MarketSettings,
     PowerPlant,
     SimulationResult,
@@ -40,20 +43,60 @@ from .reporting import write_results
 
 
 _POWER_TOLERANCE_MW = 1e-9
+_FORECAST_HOURS = 12
+_LINKED_REQUIRED_FIELDS = frozenset(
+    {"bid_type", "min_acceptance_ratio", "parent_bid_id"}
+)
+
+
+def market_openings(settings: MarketSettings) -> list[MarketOpening]:
+    """Schedule candidate openings without silently shortening their products.
+
+    A candidate is included while its first delivery begins inside the simulation
+    horizon. Whether all products and supporting inputs exist is checked later,
+    so a V2 day-ahead opening can be skipped whole with a useful warning.
+    """
+
+    openings: list[MarketOpening] = []
+    opening_time = settings.start
+    # For a multi-product opening, retain the boundary opening whose first
+    # delivery starts exactly at ``end``. Its preflight will deliberately skip
+    # the whole opening and emit the required incomplete-product warning. The
+    # one-product V1 path retains its established strict boundary.
+    includes_end_boundary = settings.product_count > 1
+    while (
+        opening_time + settings.first_delivery < settings.end
+        or (
+            includes_end_boundary
+            and opening_time + settings.first_delivery == settings.end
+        )
+    ):
+        first_start = opening_time + settings.first_delivery
+        products = tuple(
+            (
+                first_start + index * settings.product_duration,
+                first_start + (index + 1) * settings.product_duration,
+            )
+            for index in range(settings.product_count)
+        )
+        openings.append(MarketOpening(opening_time=opening_time, products=products))
+        opening_time += settings.opening_frequency
+    return openings
 
 
 def delivery_products(settings: MarketSettings) -> list[tuple[datetime, datetime]]:
-    """Create only products whose delivery end does not exceed ``end_date``."""
+    """Return complete in-horizon products, retained for the public V1 helper."""
 
-    products: list[tuple[datetime, datetime]] = []
-    opening_time = settings.start
-    while True:
-        delivery_start = opening_time + settings.first_delivery
-        delivery_end = delivery_start + settings.product_duration
-        if delivery_end > settings.end:
-            return products
-        products.append((delivery_start, delivery_end))
-        opening_time += settings.opening_frequency
+    return [
+        product
+        for opening in market_openings(settings)
+        if all(delivery_end <= settings.end for _, delivery_end in opening.products)
+        for product in opening.products
+    ]
+
+
+def _timestamp(value: datetime) -> str:
+    return value.isoformat(sep=" ", timespec="minutes")
 
 
 def _profile_power(
@@ -67,9 +110,48 @@ def _profile_power(
     except KeyError as exc:
         raise InputValidationError(
             f"{source_name} has no complete hourly profile for "
-            f"{delivery_start.isoformat(sep=' ', timespec='minutes')}"
-            f" and unit {unit_name!r}."
+            f"{_timestamp(delivery_start)} and unit {unit_name!r}."
         ) from exc
+
+
+def _elastic_demand_bids(
+    demand_unit,
+    delivery_start: datetime,
+    delivery_end: datetime,
+) -> list[DemandBid]:
+    """Discretise V2's isoelastic demand curve into descending-value buy bids."""
+
+    assert demand_unit.max_power_mw is not None
+    assert demand_unit.elasticity is not None
+    assert demand_unit.max_price_eur_per_mwh is not None
+    assert demand_unit.num_bids is not None
+    duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
+    maximum_power = demand_unit.max_power_mw
+    maximum_price = demand_unit.max_price_eur_per_mwh
+    first_power = maximum_power * maximum_price ** demand_unit.elasticity
+    incremental_power = (maximum_power - first_power) / (demand_unit.num_bids - 1)
+    timestamp = delivery_start.isoformat()
+    bids: list[DemandBid] = []
+    for index in range(demand_unit.num_bids):
+        if index == 0:
+            power = first_power
+            price = maximum_price
+        else:
+            power = incremental_power
+            cumulative_power = first_power + index * incremental_power
+            price = (cumulative_power / maximum_power) ** (1.0 / demand_unit.elasticity)
+        bids.append(
+            DemandBid(
+                unit_name=demand_unit.name,
+                operator=demand_unit.operator,
+                delivery_start=delivery_start,
+                delivery_end=delivery_end,
+                volume_mwh=power * duration_hours,
+                price_eur_per_mwh=price,
+                bid_id=f"{demand_unit.name}::elastic::{timestamp}::{index + 1}",
+            )
+        )
+    return bids
 
 
 def _demand_bids_for_product(
@@ -81,36 +163,44 @@ def _demand_bids_for_product(
     delivery_start: datetime,
     delivery_end: datetime,
     maximum_bid_price: float,
+    include_elastic: bool = True,
 ) -> tuple[list[DemandBid], ExchangeSchedule | None]:
-    """Create V1-compatible local-load and optional Exchange demand orders."""
+    """Create local-load, elastic-load, and optional exchange demand orders."""
 
     duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
-    demand_bids = [
-        DemandBid(
-            unit_name=demand_unit.name,
-            operator=demand_unit.operator,
-            delivery_start=delivery_start,
-            delivery_end=delivery_end,
-            volume_mwh=_profile_power(
-                demand_profiles,
-                demand_unit.name,
-                delivery_start,
-                "demand_df.csv",
+    demand_bids: list[DemandBid] = []
+    for demand_unit in demand_units:
+        if demand_unit.is_elastic:
+            if include_elastic:
+                demand_bids.extend(
+                    _elastic_demand_bids(demand_unit, delivery_start, delivery_end)
+                )
+            continue
+        demand_bids.append(
+            DemandBid(
+                unit_name=demand_unit.name,
+                operator=demand_unit.operator,
+                delivery_start=delivery_start,
+                delivery_end=delivery_end,
+                volume_mwh=_profile_power(
+                    demand_profiles,
+                    demand_unit.name,
+                    delivery_start,
+                    "demand_df.csv",
+                )
+                * duration_hours,
+                price_eur_per_mwh=maximum_bid_price,
+                bid_id=f"{demand_unit.name}::load::{delivery_start.isoformat()}",
             )
-            * duration_hours,
-            price_eur_per_mwh=maximum_bid_price,
         )
-        for demand_unit in demand_units
-    ]
     if exchange_unit is None:
         return demand_bids, None
-
     try:
         exchange_schedule = exchange_profiles[delivery_start]
     except KeyError as exc:
         raise InputValidationError(
             "exchanges_df.csv has no complete hourly profile for "
-            f"{delivery_start.isoformat(sep=' ', timespec='minutes')}."
+            f"{_timestamp(delivery_start)}."
         ) from exc
     demand_bids.append(
         DemandBid(
@@ -121,6 +211,7 @@ def _demand_bids_for_product(
             volume_mwh=exchange_schedule.export_power_mw * duration_hours,
             price_eur_per_mwh=exchange_unit.price_export_eur_per_mwh,
             bid_type="export",
+            bid_id=f"{exchange_unit.name}::export::{delivery_start.isoformat()}",
         )
     )
     return demand_bids, exchange_schedule
@@ -133,6 +224,7 @@ def _exchange_import_offer(
     delivery_end: datetime,
 ) -> SupplyOffer:
     duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
+    identifier = f"{exchange_unit.name}::import::{delivery_start.isoformat()}"
     return SupplyOffer(
         unit_name=exchange_unit.name,
         operator=exchange_unit.operator,
@@ -142,9 +234,10 @@ def _exchange_import_offer(
         offered_power_mw=exchange_schedule.import_power_mw,
         offered_energy_mwh=exchange_schedule.import_power_mw * duration_hours,
         bid_price_eur_per_mwh=exchange_unit.price_import_eur_per_mwh,
-        # Import price is a bid priority, not an external procurement cost.
         marginal_cost_eur_per_mwh=0.0,
         offer_type="import",
+        offer_id=identifier,
+        bid_id=identifier,
     )
 
 
@@ -171,12 +264,12 @@ def _naive_price_forecasts(
     exchange_unit: ExchangeUnit | None,
     exchange_profiles: dict[datetime, ExchangeSchedule],
 ) -> dict[datetime, float]:
-    """Calculate the internal 13-point-naïve EOM price forecast required by V2."""
+    """Calculate V2's 13-point naive EOM price forecast."""
 
     forecast_starts = {
         delivery_start + timedelta(hours=hour)
         for delivery_start, _ in products
-        for hour in range(13)
+        for hour in range(_FORECAST_HOURS + 1)
     }
     prices: dict[datetime, float] = {}
     for delivery_start in sorted(forecast_starts):
@@ -189,6 +282,7 @@ def _naive_price_forecasts(
             delivery_start=delivery_start,
             delivery_end=delivery_end,
             maximum_bid_price=settings.maximum_bid_price,
+            include_elastic=False,
         )
         offers = [
             naive_offer(
@@ -203,10 +297,7 @@ def _naive_price_forecasts(
         if exchange_unit is not None and exchange_schedule is not None:
             offers.append(
                 _exchange_import_offer(
-                    exchange_unit,
-                    exchange_schedule,
-                    delivery_start,
-                    delivery_end,
+                    exchange_unit, exchange_schedule, delivery_start, delivery_end
                 )
             )
         prices[delivery_start] = clear_pay_as_clear(
@@ -215,18 +306,93 @@ def _naive_price_forecasts(
     return prices
 
 
-def _validate_offer_prices(
-    offers: list[SupplyOffer], settings: MarketSettings
-) -> None:
+def _missing_profile_times(
+    profile: dict[datetime, object] | None, required_times: set[datetime]
+) -> list[datetime]:
+    return sorted(time for time in required_times if profile is None or time not in profile)
+
+
+def _opening_coverage_issues(
+    *,
+    opening: MarketOpening,
+    settings: MarketSettings,
+    plants: tuple[PowerPlant, ...],
+    demand_units,
+    demand_profiles: dict[str, dict[datetime, float]],
+    availability_profiles: dict[str, dict[datetime, float]],
+    exchange_unit: ExchangeUnit | None,
+    exchange_profiles: dict[datetime, ExchangeSchedule],
+    requires_price_forecast: bool,
+) -> list[str]:
+    """Return every known reason an opening cannot be quoted completely."""
+
+    issues: list[str] = []
+    delivery_times = {delivery_start for delivery_start, _ in opening.products}
+    beyond_end = [
+        (delivery_start, delivery_end)
+        for delivery_start, delivery_end in opening.products
+        if delivery_end > settings.end
+    ]
+    if beyond_end:
+        issues.append(
+            "交付时段超出仿真结束时间: "
+            + ", ".join(f"{_timestamp(start)}–{_timestamp(end)}" for start, end in beyond_end)
+        )
+    forecast_times: set[datetime] = set()
+    if requires_price_forecast:
+        forecast_times = {
+            delivery_start + timedelta(hours=offset)
+            for delivery_start in delivery_times
+            for offset in range(_FORECAST_HOURS + 1)
+        }
+    required_times = delivery_times | forecast_times
+    for demand_unit in demand_units:
+        if demand_unit.is_elastic:
+            continue
+        missing = _missing_profile_times(demand_profiles.get(demand_unit.name), required_times)
+        if missing:
+            kind = "报价预测数据" if any(time in forecast_times for time in missing) else "交付数据"
+            issues.append(
+                f"{kind}缺少 demand_df.csv/{demand_unit.name}: "
+                + ", ".join(_timestamp(time) for time in missing)
+            )
+    for plant in plants:
+        if plant.name not in availability_profiles:
+            continue
+        missing = _missing_profile_times(availability_profiles[plant.name], required_times)
+        if missing:
+            kind = "报价预测数据" if any(time in forecast_times for time in missing) else "交付数据"
+            issues.append(
+                f"{kind}缺少 availability_df.csv/{plant.name}: "
+                + ", ".join(_timestamp(time) for time in missing)
+            )
+    if exchange_unit is not None:
+        missing = _missing_profile_times(exchange_profiles, required_times)
+        if missing:
+            kind = "报价预测数据" if any(time in forecast_times for time in missing) else "交付数据"
+            issues.append(
+                f"{kind}缺少 exchanges_df.csv: "
+                + ", ".join(_timestamp(time) for time in missing)
+            )
+    return issues
+
+
+def _validate_offer_prices(offers: list[SupplyOffer], settings: MarketSettings) -> None:
     for offer in offers:
-        if not (
-            settings.minimum_bid_price
-            <= offer.bid_price_eur_per_mwh
-            <= settings.maximum_bid_price
-        ):
+        if not settings.minimum_bid_price <= offer.bid_price_eur_per_mwh <= settings.maximum_bid_price:
             raise InputValidationError(
                 f"Bid price for {offer.identifier!r} "
                 f"({offer.bid_price_eur_per_mwh:.6f} EUR/MWh) is outside "
+                "the configured bid-price limits."
+            )
+
+
+def _validate_demand_prices(demand_bids: list[DemandBid], settings: MarketSettings) -> None:
+    for bid in demand_bids:
+        if not settings.minimum_bid_price <= bid.price_eur_per_mwh <= settings.maximum_bid_price:
+            raise InputValidationError(
+                f"Demand bid price for {bid.identifier!r} "
+                f"({bid.price_eur_per_mwh:.6f} EUR/MWh) is outside "
                 "the configured bid-price limits."
             )
 
@@ -236,7 +402,7 @@ def _apply_startup_costs(
     plants: tuple[PowerPlant, ...],
     runtime_states: dict[str, PlantRuntimeState],
 ) -> MarketClearingResult:
-    """Attach one complete startup cost to each formerly-off started unit."""
+    """Attach one startup cost to a formerly-off, accepted runtime plant."""
 
     plants_by_name = {plant.name: plant for plant in plants}
     accepted_by_plant: dict[str, float] = defaultdict(float)
@@ -244,17 +410,14 @@ def _apply_startup_costs(
         if cleared.offer.offer_type == "power_plant":
             accepted_by_plant[cleared.offer.unit_name] += cleared.accepted_energy_mwh
     started_names = {
-        name
-        for name, state in runtime_states.items()
+        name for name, state in runtime_states.items()
         if not state.is_running and accepted_by_plant[name] > _POWER_TOLERANCE_MW
     }
     if not started_names:
         return market_result
-
     has_inflexible_offer = {
-        cleared.offer.unit_name
-        for cleared in market_result.offers
-        if cleared.offer.offer_segment == "inflexible"
+        cleared.offer.unit_name for cleared in market_result.offers
+        if cleared.offer.offer_segment in {"inflexible", "block_inflexible"}
     }
     applied_names: set[str] = set()
     cleared_offers = []
@@ -266,7 +429,7 @@ def _apply_startup_costs(
             and offer.unit_name not in applied_names
             and offer.offer_type == "power_plant"
             and (
-                offer.offer_segment == "inflexible"
+                offer.offer_segment in {"inflexible", "block_inflexible"}
                 or offer.unit_name not in has_inflexible_offer
             )
         ):
@@ -291,6 +454,7 @@ def _apply_startup_costs(
         offers=tuple(cleared_offers),
         demand_bids=market_result.demand_bids,
         marginal_unit_name=market_result.marginal_unit_name,
+        pricing_method=market_result.pricing_method,
     )
 
 
@@ -309,135 +473,197 @@ def _record_runtime_states(
         )
 
 
-def simulate(
-    input_dir: str | Path,
-    scenario: str = "base",
-) -> SimulationResult:
+def _validate_strategy_configuration(
+    settings: MarketSettings,
+    plants: tuple[PowerPlant, ...],
+) -> None:
+    """Reject linked-bid configurations before availability or bidding is read."""
+
+    linked_plants = [
+        plant.name
+        for plant in plants
+        if plant.bidding_strategy == "powerplant_energy_heuristic_linked"
+    ]
+    if not linked_plants:
+        return
+    if settings.market_mechanism != "complex_clearing":
+        raise InputValidationError(
+            "powerplant_energy_heuristic_linked requires "
+            "market_mechanism: complex_clearing."
+        )
+    missing_fields = sorted(_LINKED_REQUIRED_FIELDS - settings.additional_fields)
+    if missing_fields:
+        raise InputValidationError(
+            "powerplant_energy_heuristic_linked requires "
+            "markets_config.EOM.additional_fields to include: "
+            + ", ".join(missing_fields)
+            + "."
+        )
+
+
+def _offers_for_opening(
+    *,
+    opening: MarketOpening,
+    plants: tuple[PowerPlant, ...],
+    runtime_states: dict[str, PlantRuntimeState],
+    availability_profiles: dict[str, dict[datetime, float]],
+    marginal_costs: dict[str, float],
+    price_forecasts: dict[datetime, float],
+    exchange_unit: ExchangeUnit | None,
+    exchange_schedules: dict[datetime, ExchangeSchedule | None],
+) -> list[SupplyOffer]:
+    """Build an entire opening using its common gate-closure state snapshot."""
+
+    offers: list[SupplyOffer] = []
+    for plant in plants:
+        available_powers = {
+            delivery_start: _available_power(plant, delivery_start, availability_profiles)
+            for delivery_start, _ in opening.products
+        }
+        marginal_cost = marginal_costs[plant.name]
+        if plant.bidding_strategy == "powerplant_energy_naive":
+            offers.extend(
+                naive_offer(plant, start, end, available_powers[start], marginal_cost)
+                for start, end in opening.products
+            )
+        elif plant.bidding_strategy == "powerplant_energy_heuristic_flexable":
+            for start, end in opening.products:
+                offers.extend(
+                    heuristic_flexible_offers(
+                        plant,
+                        runtime_states[plant.name],
+                        start,
+                        end,
+                        available_powers[start],
+                        marginal_cost,
+                        price_forecasts,
+                    )
+                )
+        else:
+            offers.extend(
+                heuristic_block_offers(
+                    plant, runtime_states[plant.name], opening.products,
+                    available_powers, marginal_cost, price_forecasts,
+                    opening.opening_time,
+                    linked=(plant.bidding_strategy == "powerplant_energy_heuristic_linked"),
+                )
+            )
+    if exchange_unit is not None:
+        for delivery_start, delivery_end in opening.products:
+            schedule = exchange_schedules[delivery_start]
+            assert schedule is not None
+            offers.append(_exchange_import_offer(
+                exchange_unit, schedule, delivery_start, delivery_end
+            ))
+    return offers
+
+
+def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
     """Calculate one V1- or V2-compatible scenario without writing files."""
 
     input_path = Path(input_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
     plants = load_powerplants(input_path / "powerplant_units.csv")
+    _validate_strategy_configuration(settings, plants)
     demand_units = load_demand_units(input_path / "demand_units.csv")
     fuel_prices = load_fuel_prices(input_path / "fuel_prices_df.csv")
     validate_fuel_coverage(plants, fuel_prices)
-    demand_profiles = load_hourly_demand_profiles(
-        input_path / "demand_df.csv", demand_units
-    )
-    availability_profiles = load_hourly_availability_profiles(
-        input_path / "availability_df.csv", plants
-    )
+    demand_profiles = load_hourly_demand_profiles(input_path / "demand_df.csv", demand_units)
+    availability_profiles = load_hourly_availability_profiles(input_path / "availability_df.csv", plants)
 
     exchange_unit = None
     exchange_profiles: dict[datetime, ExchangeSchedule] = {}
     if settings.exchange_units_file is not None:
         exchange_unit = load_exchange_unit(input_path / settings.exchange_units_file)
-        existing_names = {plant.name for plant in plants} | {
-            demand_unit.name for demand_unit in demand_units
-        }
+        existing_names = {plant.name for plant in plants} | {unit.name for unit in demand_units}
         if exchange_unit.name in existing_names:
             raise InputValidationError(
                 f"Exchange name {exchange_unit.name!r} must not duplicate another unit name."
             )
-        for label, price in (
-            ("import", exchange_unit.price_import_eur_per_mwh),
-            ("export", exchange_unit.price_export_eur_per_mwh),
-        ):
+        for label, price in (("import", exchange_unit.price_import_eur_per_mwh), ("export", exchange_unit.price_export_eur_per_mwh)):
             if not settings.minimum_bid_price <= price <= settings.maximum_bid_price:
                 raise InputValidationError(
-                    f"Exchange {label} price ({price:.6f} EUR/MWh) is outside "
-                    "the configured bid-price limits."
+                    f"Exchange {label} price ({price:.6f} EUR/MWh) is outside the configured bid-price limits."
                 )
-        exchange_profiles = load_hourly_exchange_profiles(
-            input_path / "exchanges_df.csv", exchange_unit
-        )
+        exchange_profiles = load_hourly_exchange_profiles(input_path / "exchanges_df.csv", exchange_unit)
 
     marginal_costs = {plant.name: plant.marginal_cost(fuel_prices) for plant in plants}
     for plant in plants:
         marginal_cost = marginal_costs[plant.name]
         if not settings.minimum_bid_price <= marginal_cost <= settings.maximum_bid_price:
             raise InputValidationError(
-                f"Marginal cost for {plant.name!r} ({marginal_cost:.6f} EUR/MWh) "
-                "is outside the configured bid-price limits."
+                f"Marginal cost for {plant.name!r} ({marginal_cost:.6f} EUR/MWh) is outside the configured bid-price limits."
             )
 
-    products = delivery_products(settings)
-    heuristic_plants = tuple(
-        plant
-        for plant in plants
-        if plant.bidding_strategy == "powerplant_energy_heuristic_flexable"
-    )
+    runtime_plants = tuple(plant for plant in plants if plant.bidding_strategy != "powerplant_energy_naive")
+    requires_price_forecast = any(plant.min_power_mw > _POWER_TOLERANCE_MW for plant in runtime_plants)
+    valid_openings: list[MarketOpening] = []
+    for opening in market_openings(settings):
+        issues = _opening_coverage_issues(
+            opening=opening, settings=settings, plants=plants,
+            demand_units=demand_units, demand_profiles=demand_profiles,
+            availability_profiles=availability_profiles, exchange_unit=exchange_unit,
+            exchange_profiles=exchange_profiles,
+            requires_price_forecast=requires_price_forecast,
+        )
+        if issues:
+            warnings.warn(
+                f"跳过市场开放 {_timestamp(opening.opening_time)}：" + "; ".join(issues),
+                RuntimeWarning, stacklevel=2,
+            )
+            continue
+        valid_openings.append(opening)
+
     price_forecasts: dict[datetime, float] = {}
-    if heuristic_plants:
+    if requires_price_forecast:
         price_forecasts = _naive_price_forecasts(
-            products=products,
-            settings=settings,
-            plants=plants,
-            marginal_costs=marginal_costs,
-            availability_profiles=availability_profiles,
-            demand_units=demand_units,
-            demand_profiles=demand_profiles,
-            exchange_unit=exchange_unit,
+            products=[product for opening in valid_openings for product in opening.products],
+            settings=settings, plants=plants, marginal_costs=marginal_costs,
+            availability_profiles=availability_profiles, demand_units=demand_units,
+            demand_profiles=demand_profiles, exchange_unit=exchange_unit,
             exchange_profiles=exchange_profiles,
         )
-    runtime_states = {
-        plant.name: PlantRuntimeState.initially_off(plant) for plant in heuristic_plants
-    }
+    runtime_states = {plant.name: PlantRuntimeState.initially_off(plant) for plant in runtime_plants}
 
     results: list[MarketClearingResult] = []
-    for delivery_start, delivery_end in products:
-        demand_bids, exchange_schedule = _demand_bids_for_product(
-            demand_units=demand_units,
-            demand_profiles=demand_profiles,
-            exchange_unit=exchange_unit,
-            exchange_profiles=exchange_profiles,
-            delivery_start=delivery_start,
-            delivery_end=delivery_end,
-            maximum_bid_price=settings.maximum_bid_price,
+    for opening in valid_openings:
+        all_demand_bids: list[DemandBid] = []
+        exchange_schedules: dict[datetime, ExchangeSchedule | None] = {}
+        for delivery_start, delivery_end in opening.products:
+            demand_bids, schedule = _demand_bids_for_product(
+                demand_units=demand_units, demand_profiles=demand_profiles,
+                exchange_unit=exchange_unit, exchange_profiles=exchange_profiles,
+                delivery_start=delivery_start, delivery_end=delivery_end,
+                maximum_bid_price=settings.maximum_bid_price,
+            )
+            all_demand_bids.extend(demand_bids)
+            exchange_schedules[delivery_start] = schedule
+        _validate_demand_prices(all_demand_bids, settings)
+        offers = _offers_for_opening(
+            opening=opening, plants=plants, runtime_states=runtime_states,
+            availability_profiles=availability_profiles, marginal_costs=marginal_costs,
+            price_forecasts=price_forecasts, exchange_unit=exchange_unit,
+            exchange_schedules=exchange_schedules,
         )
-        offers: list[SupplyOffer] = []
-        for plant in plants:
-            available_power = _available_power(
-                plant, delivery_start, availability_profiles
-            )
-            marginal_cost = marginal_costs[plant.name]
-            if plant.bidding_strategy == "powerplant_energy_naive":
-                offers.append(
-                    naive_offer(
-                        plant,
-                        delivery_start,
-                        delivery_end,
-                        available_power,
-                        marginal_cost,
-                    )
-                )
-            else:
-                offers.extend(
-                    heuristic_flexible_offers(
-                        plant,
-                        runtime_states[plant.name],
-                        delivery_start,
-                        delivery_end,
-                        available_power,
-                        marginal_cost,
-                        price_forecasts,
-                    )
-                )
-        if exchange_unit is not None and exchange_schedule is not None:
-            offers.append(
-                _exchange_import_offer(
-                    exchange_unit,
-                    exchange_schedule,
-                    delivery_start,
-                    delivery_end,
-                )
-            )
         _validate_offer_prices(offers, settings)
-        market_result = clear_pay_as_clear(demand_bids, offers)
-        market_result = _apply_startup_costs(market_result, plants, runtime_states)
-        _record_runtime_states(market_result, runtime_states)
-        results.append(market_result)
-
+        if settings.market_mechanism == "complex_clearing":
+            opening_results = clear_complex_opening(all_demand_bids, offers)
+        else:
+            if any(offer.bid_type != "SB" for offer in offers):
+                raise InputValidationError(
+                    "Block and linked EOM strategies require market_mechanism: complex_clearing."
+                )
+            opening_results = tuple(
+                clear_pay_as_clear(
+                    [bid for bid in all_demand_bids if (bid.delivery_start, bid.delivery_end) == (start, end)],
+                    [offer for offer in offers if (offer.delivery_start, offer.delivery_end) == (start, end)],
+                )
+                for start, end in opening.products
+            )
+        for market_result in sorted(opening_results, key=lambda result: result.delivery_start):
+            market_result = _apply_startup_costs(market_result, plants, runtime_states)
+            _record_runtime_states(market_result, runtime_states)
+            results.append(market_result)
     return SimulationResult(settings=settings, market_results=tuple(results))
 
 

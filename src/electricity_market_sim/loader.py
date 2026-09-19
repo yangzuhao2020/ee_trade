@@ -90,6 +90,8 @@ def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
         if strategy not in {
             "powerplant_energy_naive",
             "powerplant_energy_heuristic_flexable",
+            "powerplant_energy_heuristic_block",
+            "powerplant_energy_heuristic_linked",
         }:
             raise InputValidationError(
                 f"{path.name}, row {row_number}: unsupported bidding_EOM strategy "
@@ -144,7 +146,7 @@ def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
 
 
 def load_demand_units(path: Path) -> tuple[DemandUnit, ...]:
-    """Read inelastic demand units from `demand_units.csv`."""
+    """Read EOM demand participants and ignore rows belonging only to CRM."""
 
     rows = _read_rows(path)
     units: list[DemandUnit] = []
@@ -154,18 +156,70 @@ def load_demand_units(path: Path) -> tuple[DemandUnit, ...]:
         if name in names:
             raise InputValidationError(f"{path.name}: duplicate demand unit name {name!r}.")
         names.add(name)
-        strategy = _require(row, "bidding_EOM", path, row_number)
-        if strategy != "demand_energy_naive":
+        raw_strategy = row.get("bidding_EOM")
+        strategy = raw_strategy.strip() if raw_strategy else ""
+        # CRM-only participants intentionally have no EOM strategy.
+        if not strategy:
+            continue
+        if strategy not in {
+            "demand_energy_naive",
+            "demand_energy_heuristic_elastic",
+        }:
             raise InputValidationError(
-                f"{path.name}, row {row_number}: only 'demand_energy_naive' is supported."
+                f"{path.name}, row {row_number}: unsupported bidding_EOM strategy "
+                f"{strategy!r}."
             )
-        units.append(
-            DemandUnit(
-                name=name,
-                operator=_require(row, "unit_operator", path, row_number),
-                profile_column=name,
+        operator = _require(row, "unit_operator", path, row_number)
+        if strategy == "demand_energy_naive":
+            units.append(
+                DemandUnit(
+                    name=name,
+                    operator=operator,
+                    bidding_strategy=strategy,
+                    profile_column=name,
+                )
             )
+            continue
+
+        elasticity = _float(row, "elasticity", path, row_number)
+        elasticity_model = _require(row, "elasticity_model", path, row_number)
+        max_price = _float(row, "max_price", path, row_number)
+        num_bids_raw = _float(row, "num_bids", path, row_number)
+        if not num_bids_raw.is_integer():
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: num_bids must be an integer."
+            )
+        unit = DemandUnit(
+            name=name,
+            operator=operator,
+            bidding_strategy=strategy,
+            max_power_mw=_float(row, "max_power", path, row_number),
+            elasticity=elasticity,
+            elasticity_model=elasticity_model,
+            max_price_eur_per_mwh=max_price,
+            num_bids=int(num_bids_raw),
         )
+        if unit.max_power_mw is None or unit.max_power_mw <= 0:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: elastic max_power must be positive."
+            )
+        if unit.elasticity is None or unit.elasticity >= 0:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: elasticity must be negative."
+            )
+        if unit.elasticity_model != "isoelastic":
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: only 'isoelastic' is supported."
+            )
+        if unit.max_price_eur_per_mwh is None or unit.max_price_eur_per_mwh <= 0:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: max_price must be positive."
+            )
+        if unit.num_bids is None or unit.num_bids < 2:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: num_bids must be at least 2."
+            )
+        units.append(unit)
     return tuple(units)
 
 
@@ -252,14 +306,15 @@ def load_hourly_demand_profiles(
         reader = csv.DictReader(file)
         if not reader.fieldnames or "datetime" not in reader.fieldnames:
             raise InputValidationError(f"{path.name} must include a 'datetime' column.")
-        missing = [unit.profile_column for unit in demand_units if unit.profile_column not in reader.fieldnames]
+        profiled_units = [unit for unit in demand_units if unit.profile_column is not None]
+        missing = [unit.profile_column for unit in profiled_units if unit.profile_column not in reader.fieldnames]
         if missing:
             raise InputValidationError(
                 f"{path.name} is missing demand profile columns: {', '.join(missing)}."
             )
 
         buckets: dict[str, dict[datetime, list[float]]] = {
-            unit.name: defaultdict(list) for unit in demand_units
+            unit.name: defaultdict(list) for unit in profiled_units
         }
         seen_timestamps: set[datetime] = set()
         for row_number, row in enumerate(reader, start=2):
@@ -270,7 +325,7 @@ def load_hourly_demand_profiles(
                 )
             seen_timestamps.add(timestamp)
             bucket = _hour_start(timestamp)
-            for unit in demand_units:
+            for unit in profiled_units:
                 value = _float(row, unit.profile_column, path, row_number)
                 if value < 0:
                     raise InputValidationError(

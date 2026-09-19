@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from math import isclose, isfinite
 
@@ -20,7 +20,7 @@ _ENERGY_TOLERANCE_MWH = 1e-7
 
 @dataclass(frozen=True)
 class MarketSettings:
-    """The subset of YAML market settings supported by version one."""
+    """The EOM settings shared by simple and complex V2 market openings."""
 
     start: datetime
     end: datetime
@@ -35,14 +35,34 @@ class MarketSettings:
     market_mechanism: str
     market_id: str = "EOM"
     exchange_units_file: str | None = None
+    additional_fields: frozenset[str] = field(default_factory=frozenset)
+
+
+@dataclass(frozen=True)
+class MarketOpening:
+    """All delivery products offered together at one market opening."""
+
+    opening_time: datetime
+    products: tuple[tuple[datetime, datetime], ...]
+
 
 @dataclass(frozen=True)
 class DemandUnit:
-    """An inflexible demand participant backed by one CSV profile column."""
+    """An EOM demand participant, optionally generated from elasticity inputs."""
 
     name: str
     operator: str
-    profile_column: str
+    bidding_strategy: str = "demand_energy_naive"
+    profile_column: str | None = None
+    max_power_mw: float | None = None
+    elasticity: float | None = None
+    elasticity_model: str | None = None
+    max_price_eur_per_mwh: float | None = None
+    num_bids: int | None = None
+
+    @property
+    def is_elastic(self) -> bool:
+        return self.bidding_strategy == "demand_energy_heuristic_elastic"
 
 
 @dataclass(frozen=True)
@@ -111,6 +131,13 @@ class DemandBid:
     volume_mwh: float
     price_eur_per_mwh: float
     bid_type: str = "local_load"
+    bid_id: str | None = None
+
+    @property
+    def identifier(self) -> str:
+        """Return a stable order identifier for detailed demand reporting."""
+
+        return self.bid_id or self.unit_name
 
 
 @dataclass(frozen=True)
@@ -131,12 +158,38 @@ class SupplyOffer:
     # physical-unit identifier; ``offer_id`` identifies one market order.
     offer_id: str | None = None
     offer_segment: str = "single"
+    # Complex-clearing metadata. ``offer_id`` identifies one product leg;
+    # ``bid_id`` identifies a potentially multi-product market order.
+    bid_id: str | None = None
+    bid_type: str = "SB"
+    min_acceptance_ratio: float = 0.0
+    parent_bid_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Enforce the deliberately narrow V2 minimum-acceptance contract."""
+
+        if self.bid_type not in {"SB", "BB", "LB"}:
+            raise ValueError(f"Unsupported bid_type {self.bid_type!r}.")
+        if not isfinite(self.min_acceptance_ratio):
+            raise ValueError("min_acceptance_ratio must be finite.")
+        if self.bid_type == "BB" and self.min_acceptance_ratio != 1.0:
+            raise ValueError("Version two supports BB orders only with MAR=1.")
+        if self.bid_type in {"SB", "LB"} and self.min_acceptance_ratio != 0.0:
+            raise ValueError(
+                "Version two supports SB and LB orders only with MAR=0."
+            )
 
     @property
     def identifier(self) -> str:
         """Return the unique order key, retaining V1's unit-name default."""
 
         return self.offer_id or self.unit_name
+
+    @property
+    def complex_identifier(self) -> str:
+        """Return the order identity shared by legs of a block bid."""
+
+        return self.bid_id or self.identifier
 
 
 @dataclass(frozen=True)
@@ -215,6 +268,7 @@ class MarketClearingResult:
     offers: tuple[ClearedSupplyOffer, ...]
     demand_bids: tuple[ClearedDemandBid, ...]
     marginal_unit_name: str | None
+    pricing_method: str = "merit_order"
 
     def __post_init__(self) -> None:
         """Guard the physical and financial quantities used by reporting and plots."""
@@ -343,8 +397,10 @@ class MarketClearingResult:
                 "Unfulfilled export must equal the unmet export demand energy."
             )
 
+        if self.pricing_method not in {"merit_order", "dual"}:
+            raise ValueError("pricing_method must be merit_order or dual.")
         offer_names_set = {cleared.offer.unit_name for cleared in self.offers}
-        if self.cleared_energy_mwh > _ENERGY_TOLERANCE_MWH:
+        if self.pricing_method == "merit_order" and self.cleared_energy_mwh > _ENERGY_TOLERANCE_MWH:
             if self.marginal_unit_name is None:
                 raise ValueError("A cleared market must identify its marginal unit.")
             if self.marginal_unit_name not in offer_names_set:
@@ -365,7 +421,7 @@ class MarketClearingResult:
                 raise ValueError(
                     "The marginal unit must have an accepted offer at the clearing price."
                 )
-        elif self.marginal_unit_name is not None:
+        elif self.pricing_method == "merit_order" and self.marginal_unit_name is not None:
             raise ValueError("An uncleared market cannot have a marginal unit.")
 
     @property

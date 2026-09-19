@@ -52,15 +52,21 @@ def _parse_datetime(value: Any, field_name: str) -> datetime:
         ) from exc
 
 
-def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSettings:
-    """Read a supported scenario and reject incompatible market designs."""
+def _parse_additional_fields(eom: dict[str, Any]) -> frozenset[str]:
+    """Read optional ASSUME order metadata fields without silently discarding them."""
 
-    supported_scenarios = {"base", "base_with_exchanges"}
-    if scenario not in supported_scenarios:
+    raw_fields = eom.get("additional_fields", [])
+    if not isinstance(raw_fields, list) or any(
+        not isinstance(value, str) or not value.strip() for value in raw_fields
+    ):
         raise InputValidationError(
-            "Version one supports only 'base' or 'base_with_exchanges'; "
-            f"received scenario {scenario!r}."
+            "markets_config.EOM.additional_fields must be a list of non-empty strings."
         )
+    return frozenset(value.strip() for value in raw_fields)
+
+
+def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSettings:
+    """Read one scenario's EOM settings, including V2 complex openings."""
     if not config_path.is_file():
         raise InputValidationError(f"Missing configuration file: {config_path}")
 
@@ -91,6 +97,13 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
     eom = markets["EOM"]
     if not isinstance(eom, dict):
         raise InputValidationError("markets_config.EOM must be a mapping.")
+    additional_fields = _parse_additional_fields(eom)
+    if "start_date" in eom:
+        market_start = _parse_datetime(
+            eom["start_date"], "markets_config.EOM.start_date"
+        )
+    else:
+        market_start = _parse_datetime(data["start_date"], "start_date")
 
     products = eom.get("products")
     if not isinstance(products, list) or len(products) != 1 or not isinstance(products[0], dict):
@@ -99,7 +112,7 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
 
     try:
         settings = MarketSettings(
-            start=_parse_datetime(data["start_date"], "start_date"),
+            start=market_start,
             end=_parse_datetime(data["end_date"], "end_date"),
             time_step=parse_duration(data["time_step"], "time_step"),
             opening_frequency=parse_duration(
@@ -119,6 +132,7 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
             minimum_bid_price=float(eom["minimum_bid_price"]),
             market_mechanism=str(eom["market_mechanism"]),
             exchange_units_file=exchange_units_file,
+            additional_fields=additional_fields,
         )
     except KeyError as exc:
         raise InputValidationError(f"Missing required configuration field: {exc.args[0]}") from exc
@@ -129,16 +143,18 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
         raise InputValidationError("end_date must be later than start_date.")
     if settings.time_step != timedelta(hours=1):
         raise InputValidationError("Version one supports only time_step: 1h.")
-    if settings.opening_frequency != timedelta(hours=1):
-        raise InputValidationError("Version one supports hourly market openings only.")
-    if settings.opening_duration != timedelta(hours=1):
-        raise InputValidationError("Version one requires opening_duration: 1h.")
-    if settings.product_duration != timedelta(hours=1) or settings.product_count != 1:
-        raise InputValidationError("Version one supports exactly one 1-hour product per opening.")
-    if settings.first_delivery != timedelta(hours=1):
-        raise InputValidationError("Version one requires first_delivery: 1h.")
-    if settings.market_mechanism != "pay_as_clear":
-        raise InputValidationError("Version one supports only market_mechanism: pay_as_clear.")
+    if settings.opening_frequency <= timedelta(0):
+        raise InputValidationError("EOM opening_frequency must be positive.")
+    if settings.opening_duration <= timedelta(0):
+        raise InputValidationError("EOM opening_duration must be positive.")
+    if settings.product_duration != timedelta(hours=1):
+        raise InputValidationError("Version two supports only 1-hour EOM products.")
+    if settings.product_count <= 0:
+        raise InputValidationError("EOM product count must be positive.")
+    if settings.market_mechanism not in {"pay_as_clear", "complex_clearing"}:
+        raise InputValidationError(
+            "EOM market_mechanism must be pay_as_clear or complex_clearing."
+        )
     if settings.minimum_bid_price > settings.maximum_bid_price:
         raise InputValidationError("minimum_bid_price cannot exceed maximum_bid_price.")
     if scenario == "base" and settings.exchange_units_file is not None:
