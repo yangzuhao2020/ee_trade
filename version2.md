@@ -346,6 +346,14 @@ $$
 - 市场出清后，才决定是否真的充电或放电。
 
 在 `storage_energy_heuristic_flexable` 中，默认计算当前时刻前后约 12 小时(12小时是本平台选定的预测窗口)价格预测的平均值：$$\bar{p} = \operatorname{mean}(p_{t-12h},\ \ldots,\ p_t,\ \ldots,\ p_{t+12h})$$
+
+仿真起止边界按照 ASSUME 的方式处理：当完整的前后各 12 小时窗口超出价格预测序列范围时，将窗口截断到已有预测范围，即
+$$
+t_{\mathrm{window,start}}=\max(t-12h,\ t_{\mathrm{forecast,start}}),\qquad
+t_{\mathrm{window,end}}=\min(t+12h,\ t_{\mathrm{forecast,end}}).
+$$
+边界窗口可以少于 25 个小时点，不因缺少仿真开始前或结束后的预测数据而跳过开市；但截断后窗口内部需要使用的数据若缺失，仍跳过该次开市并报告数据缺口。
+
 - 当前预测价格较高，SOC 允许放电，策略提交：
 	- 正功率报价；
 	- 作为供给方卖电；
@@ -358,6 +366,29 @@ $$
 	- 最大功率受到充电功率、SOC 和爬坡约束。
 	
 	充电报价：$$p_{\text{charge}} = \bar{p}\,\eta_c$$
+
+`additional_cost_charge` 和 `additional_cost_discharge` 不进入储能报价价格。这里与 ASSUME 保持一致：报价阶段只考虑预测均价和充放电效率；市场出清后，再按照实际成交电量计算附加成本。
+
+若充电成交电量和放电成交电量分别为 $E_{\text{charge}}$、$E_{\text{discharge}}$，则：
+$$
+C_{\text{additional,charge}}
+=E_{\text{charge}}\,c_{\text{additional,charge}},
+$$
+$$
+C_{\text{additional,discharge}}
+=E_{\text{discharge}}\,c_{\text{additional,discharge}}.
+$$
+
+其中成交电量均按非负数计算。储能净现金流为：
+$$
+\text{net cash flow}
+=E_{\text{discharge}}p_{\text{clear}}
+-E_{\text{charge}}p_{\text{clear}}
+-C_{\text{additional,charge}}
+-C_{\text{additional,discharge}}.
+$$
+
+因此，附加成本会降低储能最终利润，但不会改变该储能订单的申报价，也不会仅因为这项成本而改变市场出清顺序。
 
 例如：**预测均价为 50 EUR/MWh 的例子**”：预测均价为 50，且已分别提交充电单或放电单，市场价格本身不能决定储能报哪种单。43 是充电买单的最高愿付价，55.56 是放电卖单的最低愿售价。预测价决定**报哪种单**，实际出清决定**是否成交**；
 

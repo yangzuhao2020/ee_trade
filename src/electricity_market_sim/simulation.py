@@ -91,17 +91,6 @@ def market_openings(settings: MarketSettings) -> list[MarketOpening]:
     return openings
 
 
-def delivery_products(settings: MarketSettings) -> list[tuple[datetime, datetime]]:
-    """Return complete in-horizon products, retained for the public V1 helper."""
-
-    return [
-        product
-        for opening in market_openings(settings)
-        if all(delivery_end <= settings.end for _, delivery_end in opening.products)
-        for product in opening.products
-    ]
-
-
 def _timestamp(value: datetime) -> str:
     return value.isoformat(sep=" ", timespec="minutes")
 
@@ -323,7 +312,7 @@ def _missing_profile_times(
     return sorted(time for time in required_times if profile is None or time not in profile)
 
 
-def _opening_coverage(
+def _opening_coverage_issues(
     *,
     opening: MarketOpening,
     settings: MarketSettings,
@@ -335,11 +324,10 @@ def _opening_coverage(
     exchange_profiles: dict[datetime, ExchangeSchedule],
     requires_price_forecast: bool,
     requires_storage_price_forecast: bool = False,
-) -> tuple[list[str], bool]:
-    """Return coverage issues and whether they only concern pre-start history."""
+) -> list[str]:
+    """Return every known reason an opening cannot be quoted completely."""
 
     issues: list[str] = []
-    only_initial_forecast_history_missing = True
     delivery_times = {delivery_start for delivery_start, _ in opening.products}
     beyond_end = [
         (delivery_start, delivery_end)
@@ -347,7 +335,6 @@ def _opening_coverage(
         if delivery_end > settings.end
     ]
     if beyond_end:
-        only_initial_forecast_history_missing = False
         issues.append(
             "交付时段超出仿真结束时间: "
             + ", ".join(f"{_timestamp(start)}–{_timestamp(end)}" for start, end in beyond_end)
@@ -364,11 +351,13 @@ def _opening_coverage(
             delivery_start + timedelta(hours=offset)
             for delivery_start in delivery_times
             for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1)
+            if settings.start
+            <= delivery_start + timedelta(hours=offset)
+            <= settings.end
         }
     required_times = delivery_times | forecast_times
 
     def add_missing_issue(source: str, missing: list[datetime]) -> None:
-        nonlocal only_initial_forecast_history_missing
         if not missing:
             return
         kind = "报价预测数据" if any(time in forecast_times for time in missing) else "交付数据"
@@ -376,10 +365,6 @@ def _opening_coverage(
             f"{kind}缺少 {source}: "
             + ", ".join(_timestamp(time) for time in missing)
         )
-        if not all(
-            time < settings.start and time in forecast_times for time in missing
-        ):
-            only_initial_forecast_history_missing = False
 
     for demand_unit in demand_units:
         if demand_unit.is_elastic:
@@ -394,36 +379,6 @@ def _opening_coverage(
     if exchange_unit is not None:
         missing = _missing_profile_times(exchange_profiles, required_times)
         add_missing_issue("exchanges_df.csv", missing)
-    return issues, bool(issues) and only_initial_forecast_history_missing
-
-
-def _opening_coverage_issues(
-    *,
-    opening: MarketOpening,
-    settings: MarketSettings,
-    plants: tuple[PowerPlant, ...],
-    demand_units,
-    demand_profiles: dict[str, dict[datetime, float]],
-    availability_profiles: dict[str, dict[datetime, float]],
-    exchange_unit: ExchangeUnit | None,
-    exchange_profiles: dict[datetime, ExchangeSchedule],
-    requires_price_forecast: bool,
-    requires_storage_price_forecast: bool = False,
-) -> list[str]:
-    """Return every known reason an opening cannot be quoted completely."""
-
-    issues, _ = _opening_coverage(
-        opening=opening,
-        settings=settings,
-        plants=plants,
-        demand_units=demand_units,
-        demand_profiles=demand_profiles,
-        availability_profiles=availability_profiles,
-        exchange_unit=exchange_unit,
-        exchange_profiles=exchange_profiles,
-        requires_price_forecast=requires_price_forecast,
-        requires_storage_price_forecast=requires_storage_price_forecast,
-    )
     return issues
 
 
@@ -682,6 +637,8 @@ def _storage_orders_for_opening(
     storages: tuple[StorageUnit, ...],
     initial_energies_mwh: dict[str, float],
     price_forecasts: dict[datetime, float],
+    forecast_start: datetime,
+    forecast_end: datetime,
 ) -> tuple[
     list[DemandBid],
     list[SupplyOffer],
@@ -699,6 +656,8 @@ def _storage_orders_for_opening(
             initial_energy,
             opening.products,
             price_forecasts,
+            forecast_start=forecast_start,
+            forecast_end=forecast_end,
         )
         charge_bids.extend(charges)
         discharge_offers.extend(discharges)
@@ -885,6 +844,8 @@ def _clear_opening(
                 storages=storages,
                 initial_energies_mwh=storage_initial_energies_mwh,
                 price_forecasts=price_forecasts,
+                forecast_start=settings.start,
+                forecast_end=settings.end,
             )
         )
         all_demand_bids.extend(storage_bids)
@@ -988,7 +949,7 @@ def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
     requires_storage_price_forecast = bool(storages)
     valid_openings: list[MarketOpening] = []
     for opening in market_openings(settings):
-        issues, only_initial_forecast_history_missing = _opening_coverage(
+        issues = _opening_coverage_issues(
             opening=opening, settings=settings, plants=plants,
             demand_units=demand_units, demand_profiles=demand_profiles,
             availability_profiles=availability_profiles, exchange_unit=exchange_unit,
@@ -997,13 +958,12 @@ def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
             requires_storage_price_forecast=requires_storage_price_forecast,
         )
         if issues:
-            if not only_initial_forecast_history_missing:
-                warnings.warn(
-                    f"跳过市场开放 {_timestamp(opening.opening_time)}："
-                    + "; ".join(issues),
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+            warnings.warn(
+                f"跳过市场开放 {_timestamp(opening.opening_time)}："
+                + "; ".join(issues),
+                RuntimeWarning,
+                stacklevel=2,
+            )
             continue
         valid_openings.append(opening)
 
@@ -1021,6 +981,9 @@ def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
                     forecast_starts.update(
                         delivery_start + timedelta(hours=offset)
                         for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1)
+                        if settings.start
+                        <= delivery_start + timedelta(hours=offset)
+                        <= settings.end
                     )
         price_forecasts = _naive_price_forecasts(
             products=[product for opening in valid_openings for product in opening.products],

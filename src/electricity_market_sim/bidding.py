@@ -71,9 +71,6 @@ class StorageRuntimeState:
     def from_initial_soc(cls, storage: StorageUnit) -> StorageRuntimeState:
         return cls(energy_mwh=storage.initial_energy_mwh)
 
-    def soc(self, storage: StorageUnit) -> float:
-        return self.energy_mwh / storage.capacity_mwh
-
     def energy_after_dispatch(
         self,
         storage: StorageUnit,
@@ -122,23 +119,34 @@ def storage_heuristic_orders(
     initial_energy_mwh: float,
     products: tuple[tuple[datetime, datetime], ...],
     price_forecast: dict[datetime, float],
+    *,
+    forecast_start: datetime | None = None,
+    forecast_end: datetime | None = None,
 ) -> tuple[list[DemandBid], list[SupplyOffer]]:
     """Build mutually exclusive hourly charge or discharge orders.
 
     The reference energy trajectory assumes that every submitted order clears in
     full.  It is used only to size sensible bids.  Complex clearing separately
-    constrains the trajectory formed by the *accepted* quantities.
+    constrains the trajectory formed by the *accepted* quantities.  At the
+    simulation boundaries the centered price window is truncated to the
+    available forecast interval, matching ASSUME's boundary treatment.
     """
 
     charge_bids: list[DemandBid] = []
     discharge_offers: list[SupplyOffer] = []
     reference_energy = initial_energy_mwh
+    available_start = forecast_start or min(price_forecast)
+    available_end = forecast_end or max(price_forecast)
     for delivery_start, delivery_end in products:
         duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
-        window = [
-            price_forecast[delivery_start + timedelta(hours=offset)]
+        window_times = [
+            delivery_start + timedelta(hours=offset)
             for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1)
+            if available_start
+            <= delivery_start + timedelta(hours=offset)
+            <= available_end
         ]
+        window = [price_forecast[time] for time in window_times]
         average_price = sum(window) / len(window)
         current_price = price_forecast[delivery_start]
         timestamp = delivery_start.isoformat()
@@ -150,10 +158,9 @@ def storage_heuristic_orders(
                 headroom_mwh / storage.efficiency_charge,
             )
             if charge_energy_mwh > _POWER_TOLERANCE_MW:
-                bid_price = (
-                    average_price * storage.efficiency_charge
-                    - storage.additional_cost_charge_eur_per_mwh
-                )
+                # Match ASSUME's storage heuristic: additional charging costs
+                # affect realised profit, but not the submitted bid price.
+                bid_price = average_price * storage.efficiency_charge
                 charge_bids.append(
                     DemandBid(
                         unit_name=storage.name,
@@ -179,10 +186,9 @@ def storage_heuristic_orders(
                 available_internal_mwh * storage.efficiency_discharge,
             )
             if discharge_energy_mwh > _POWER_TOLERANCE_MW:
-                bid_price = (
-                    average_price / storage.efficiency_discharge
-                    + storage.additional_cost_discharge_eur_per_mwh
-                )
+                # Match ASSUME's storage heuristic: additional discharging
+                # costs are settled after dispatch rather than marked up here.
+                bid_price = average_price / storage.efficiency_discharge
                 identifier = f"{storage.name}::discharge::{timestamp}"
                 discharge_offers.append(
                     SupplyOffer(
