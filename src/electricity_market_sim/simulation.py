@@ -10,10 +10,12 @@ import warnings
 
 from .bidding import (
     PlantRuntimeState,
+    StorageRuntimeState,
     available_power_mw,
     heuristic_block_offers,
     heuristic_flexible_offers,
     naive_offer,
+    storage_heuristic_orders,
 )
 from .clearing import clear_complex_opening, clear_pay_as_clear
 from .config import load_market_settings
@@ -26,6 +28,7 @@ from .loader import (
     load_hourly_demand_profiles,
     load_hourly_exchange_profiles,
     load_powerplants,
+    load_storage_units,
     validate_fuel_coverage,
 )
 from .models import (
@@ -38,6 +41,9 @@ from .models import (
     MarketSettings,
     PowerPlant,
     SimulationResult,
+    StorageClearingContext,
+    StorageDispatchResult,
+    StorageUnit,
     SupplyOffer,
 )
 from .reporting import write_results
@@ -266,14 +272,16 @@ def _naive_price_forecasts(
     demand_profiles: dict[str, dict[datetime, float]],
     exchange_unit: ExchangeUnit | None,
     exchange_profiles: dict[datetime, ExchangeSchedule],
+    forecast_starts: set[datetime] | None = None,
 ) -> dict[datetime, float]:
-    """Calculate V2's 13-point naive EOM price forecast."""
+    """Calculate naïve EOM prices needed by plant and storage strategies."""
 
-    forecast_starts = {
-        delivery_start + timedelta(hours=hour)
-        for delivery_start, _ in products
-        for hour in range(_FORECAST_HOURS + 1)
-    }
+    if forecast_starts is None:
+        forecast_starts = {
+            delivery_start + timedelta(hours=hour)
+            for delivery_start, _ in products
+            for hour in range(_FORECAST_HOURS + 1)
+        }
     prices: dict[datetime, float] = {}
     for delivery_start in sorted(forecast_starts):
         delivery_end = delivery_start + settings.product_duration
@@ -315,6 +323,80 @@ def _missing_profile_times(
     return sorted(time for time in required_times if profile is None or time not in profile)
 
 
+def _opening_coverage(
+    *,
+    opening: MarketOpening,
+    settings: MarketSettings,
+    plants: tuple[PowerPlant, ...],
+    demand_units,
+    demand_profiles: dict[str, dict[datetime, float]],
+    availability_profiles: dict[str, dict[datetime, float]],
+    exchange_unit: ExchangeUnit | None,
+    exchange_profiles: dict[datetime, ExchangeSchedule],
+    requires_price_forecast: bool,
+    requires_storage_price_forecast: bool = False,
+) -> tuple[list[str], bool]:
+    """Return coverage issues and whether they only concern pre-start history."""
+
+    issues: list[str] = []
+    only_initial_forecast_history_missing = True
+    delivery_times = {delivery_start for delivery_start, _ in opening.products}
+    beyond_end = [
+        (delivery_start, delivery_end)
+        for delivery_start, delivery_end in opening.products
+        if delivery_end > settings.end
+    ]
+    if beyond_end:
+        only_initial_forecast_history_missing = False
+        issues.append(
+            "交付时段超出仿真结束时间: "
+            + ", ".join(f"{_timestamp(start)}–{_timestamp(end)}" for start, end in beyond_end)
+        )
+    forecast_times: set[datetime] = set()
+    if requires_price_forecast:
+        forecast_times |= {
+            delivery_start + timedelta(hours=offset)
+            for delivery_start in delivery_times
+            for offset in range(_FORECAST_HOURS + 1)
+        }
+    if requires_storage_price_forecast:
+        forecast_times |= {
+            delivery_start + timedelta(hours=offset)
+            for delivery_start in delivery_times
+            for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1)
+        }
+    required_times = delivery_times | forecast_times
+
+    def add_missing_issue(source: str, missing: list[datetime]) -> None:
+        nonlocal only_initial_forecast_history_missing
+        if not missing:
+            return
+        kind = "报价预测数据" if any(time in forecast_times for time in missing) else "交付数据"
+        issues.append(
+            f"{kind}缺少 {source}: "
+            + ", ".join(_timestamp(time) for time in missing)
+        )
+        if not all(
+            time < settings.start and time in forecast_times for time in missing
+        ):
+            only_initial_forecast_history_missing = False
+
+    for demand_unit in demand_units:
+        if demand_unit.is_elastic:
+            continue
+        missing = _missing_profile_times(demand_profiles.get(demand_unit.name), required_times)
+        add_missing_issue(f"demand_df.csv/{demand_unit.name}", missing)
+    for plant in plants:
+        if plant.name not in availability_profiles:
+            continue
+        missing = _missing_profile_times(availability_profiles[plant.name], required_times)
+        add_missing_issue(f"availability_df.csv/{plant.name}", missing)
+    if exchange_unit is not None:
+        missing = _missing_profile_times(exchange_profiles, required_times)
+        add_missing_issue("exchanges_df.csv", missing)
+    return issues, bool(issues) and only_initial_forecast_history_missing
+
+
 def _opening_coverage_issues(
     *,
     opening: MarketOpening,
@@ -326,57 +408,22 @@ def _opening_coverage_issues(
     exchange_unit: ExchangeUnit | None,
     exchange_profiles: dict[datetime, ExchangeSchedule],
     requires_price_forecast: bool,
+    requires_storage_price_forecast: bool = False,
 ) -> list[str]:
     """Return every known reason an opening cannot be quoted completely."""
 
-    issues: list[str] = []
-    delivery_times = {delivery_start for delivery_start, _ in opening.products}
-    beyond_end = [
-        (delivery_start, delivery_end)
-        for delivery_start, delivery_end in opening.products
-        if delivery_end > settings.end
-    ]
-    if beyond_end:
-        issues.append(
-            "交付时段超出仿真结束时间: "
-            + ", ".join(f"{_timestamp(start)}–{_timestamp(end)}" for start, end in beyond_end)
-        )
-    forecast_times: set[datetime] = set()
-    if requires_price_forecast:
-        forecast_times = {
-            delivery_start + timedelta(hours=offset)
-            for delivery_start in delivery_times
-            for offset in range(_FORECAST_HOURS + 1)
-        }
-    required_times = delivery_times | forecast_times
-    for demand_unit in demand_units:
-        if demand_unit.is_elastic:
-            continue
-        missing = _missing_profile_times(demand_profiles.get(demand_unit.name), required_times)
-        if missing:
-            kind = "报价预测数据" if any(time in forecast_times for time in missing) else "交付数据"
-            issues.append(
-                f"{kind}缺少 demand_df.csv/{demand_unit.name}: "
-                + ", ".join(_timestamp(time) for time in missing)
-            )
-    for plant in plants:
-        if plant.name not in availability_profiles:
-            continue
-        missing = _missing_profile_times(availability_profiles[plant.name], required_times)
-        if missing:
-            kind = "报价预测数据" if any(time in forecast_times for time in missing) else "交付数据"
-            issues.append(
-                f"{kind}缺少 availability_df.csv/{plant.name}: "
-                + ", ".join(_timestamp(time) for time in missing)
-            )
-    if exchange_unit is not None:
-        missing = _missing_profile_times(exchange_profiles, required_times)
-        if missing:
-            kind = "报价预测数据" if any(time in forecast_times for time in missing) else "交付数据"
-            issues.append(
-                f"{kind}缺少 exchanges_df.csv: "
-                + ", ".join(_timestamp(time) for time in missing)
-            )
+    issues, _ = _opening_coverage(
+        opening=opening,
+        settings=settings,
+        plants=plants,
+        demand_units=demand_units,
+        demand_profiles=demand_profiles,
+        availability_profiles=availability_profiles,
+        exchange_unit=exchange_unit,
+        exchange_profiles=exchange_profiles,
+        requires_price_forecast=requires_price_forecast,
+        requires_storage_price_forecast=requires_storage_price_forecast,
+    )
     return issues
 
 
@@ -507,6 +554,227 @@ def _validate_strategy_configuration(
         )
 
 
+def _validate_storage_configuration(
+    settings: MarketSettings,
+    storages: tuple[StorageUnit, ...],
+) -> None:
+    """Validate the clearing assumptions used by the storage implementation."""
+
+    if not storages:
+        return
+
+    product_horizon = settings.product_duration * settings.product_count
+    if settings.opening_frequency < product_horizon:
+        raise InputValidationError(
+            "Storage market openings must not overlap: EOM opening_frequency "
+            f"({settings.opening_frequency}) must be at least the complete "
+            f"product horizon ({product_horizon}). Overlapping storage "
+            "commitments are not supported yet."
+        )
+
+    if (
+        settings.product_count > 1
+        and settings.market_mechanism != "complex_clearing"
+    ):
+        raise InputValidationError(
+            "Storage participating in a multi-product opening requires "
+            "market_mechanism: complex_clearing so accepted quantities obey "
+            "cross-period SOC constraints."
+        )
+
+
+def _storage_market_quantities(
+    market_result: MarketClearingResult,
+    storage_name: str,
+) -> tuple[float, float, float | None, float, float, float | None]:
+    """Return offered/accepted charge and discharge data for one product."""
+
+    charge_orders = [
+        cleared
+        for cleared in market_result.demand_bids
+        if cleared.bid.unit_name == storage_name
+        and cleared.bid.demand_type == "storage_charge"
+    ]
+    discharge_orders = [
+        cleared
+        for cleared in market_result.offers
+        if cleared.offer.unit_name == storage_name
+        and cleared.offer.offer_type == "storage_discharge"
+    ]
+    offered_charge = sum(item.bid.volume_mwh for item in charge_orders)
+    accepted_charge = sum(item.accepted_energy_mwh for item in charge_orders)
+    offered_discharge = sum(
+        item.offer.offered_energy_mwh for item in discharge_orders
+    )
+    accepted_discharge = sum(
+        item.accepted_energy_mwh for item in discharge_orders
+    )
+    charge_price = (
+        charge_orders[0].bid.price_eur_per_mwh if charge_orders else None
+    )
+    discharge_price = (
+        discharge_orders[0].offer.bid_price_eur_per_mwh
+        if discharge_orders
+        else None
+    )
+    return (
+        offered_charge,
+        accepted_charge,
+        charge_price,
+        offered_discharge,
+        accepted_discharge,
+        discharge_price,
+    )
+
+
+def _project_storage_energies(
+    *,
+    opening: MarketOpening,
+    storages: tuple[StorageUnit, ...],
+    storage_states: dict[str, StorageRuntimeState],
+    scheduled_results: dict[tuple[datetime, datetime, datetime], MarketClearingResult],
+) -> dict[str, float]:
+    """Project delivered state through accepted commitments before first delivery."""
+
+    first_delivery = opening.products[0][0]
+    pending_before_delivery = sorted(
+        (
+            result
+            for result in scheduled_results.values()
+            if result.delivery_end > opening.opening_time
+            and result.delivery_end <= first_delivery
+        ),
+        key=lambda result: (result.delivery_end, result.delivery_start),
+    )
+    projected: dict[str, float] = {}
+    for storage in storages:
+        energy = storage_states[storage.name].energy_mwh
+        for market_result in pending_before_delivery:
+            (
+                _,
+                accepted_charge,
+                _,
+                _,
+                accepted_discharge,
+                _,
+            ) = _storage_market_quantities(market_result, storage.name)
+            energy += accepted_charge * storage.efficiency_charge
+            energy -= accepted_discharge / storage.efficiency_discharge
+        tolerance = 1e-7
+        if not (
+            storage.min_energy_mwh - tolerance
+            <= energy
+            <= storage.max_energy_mwh + tolerance
+        ):
+            raise InputValidationError(
+                f"Accepted commitments project storage {storage.name!r} outside "
+                f"its SOC bounds before {_timestamp(first_delivery)}."
+            )
+        projected[storage.name] = min(
+            storage.max_energy_mwh, max(storage.min_energy_mwh, energy)
+        )
+    return projected
+
+
+def _storage_orders_for_opening(
+    *,
+    opening: MarketOpening,
+    storages: tuple[StorageUnit, ...],
+    initial_energies_mwh: dict[str, float],
+    price_forecasts: dict[datetime, float],
+) -> tuple[
+    list[DemandBid],
+    list[SupplyOffer],
+    tuple[StorageClearingContext, ...],
+]:
+    """Generate storage orders and matching physical clearing contexts."""
+
+    charge_bids: list[DemandBid] = []
+    discharge_offers: list[SupplyOffer] = []
+    contexts: list[StorageClearingContext] = []
+    for storage in storages:
+        initial_energy = initial_energies_mwh[storage.name]
+        charges, discharges = storage_heuristic_orders(
+            storage,
+            initial_energy,
+            opening.products,
+            price_forecasts,
+        )
+        charge_bids.extend(charges)
+        discharge_offers.extend(discharges)
+        contexts.append(
+            StorageClearingContext(
+                unit_name=storage.name,
+                initial_energy_mwh=initial_energy,
+                min_energy_mwh=storage.min_energy_mwh,
+                max_energy_mwh=storage.max_energy_mwh,
+                efficiency_charge=storage.efficiency_charge,
+                efficiency_discharge=storage.efficiency_discharge,
+            )
+        )
+    return charge_bids, discharge_offers, tuple(contexts)
+
+
+def _record_storage_states(
+    market_result: MarketClearingResult,
+    storages: tuple[StorageUnit, ...],
+    storage_states: dict[str, StorageRuntimeState],
+) -> list[StorageDispatchResult]:
+    """Apply delivered storage dispatch and produce auditable SOC records."""
+
+    opening_time = market_result.opening_time or market_result.delivery_start
+    records: list[StorageDispatchResult] = []
+    for storage in storages:
+        (
+            offered_charge,
+            accepted_charge,
+            charge_price,
+            offered_discharge,
+            accepted_discharge,
+            discharge_price,
+        ) = _storage_market_quantities(market_result, storage.name)
+        before, after = storage_states[storage.name].record_dispatch(
+            storage, accepted_charge, accepted_discharge
+        )
+        records.append(
+            StorageDispatchResult(
+                opening_time=opening_time,
+                delivery_start=market_result.delivery_start,
+                delivery_end=market_result.delivery_end,
+                unit_name=storage.name,
+                operator=storage.operator,
+                technology=storage.technology,
+                energy_before_mwh=before,
+                energy_after_mwh=after,
+                capacity_mwh=storage.capacity_mwh,
+                offered_charge_mwh=offered_charge,
+                accepted_charge_mwh=accepted_charge,
+                charge_bid_price_eur_per_mwh=charge_price,
+                offered_discharge_mwh=offered_discharge,
+                accepted_discharge_mwh=accepted_discharge,
+                discharge_bid_price_eur_per_mwh=discharge_price,
+                clearing_price_eur_per_mwh=(
+                    market_result.clearing_price_eur_per_mwh
+                ),
+                charge_payment_eur=(
+                    accepted_charge * market_result.clearing_price_eur_per_mwh
+                ),
+                discharge_revenue_eur=(
+                    accepted_discharge * market_result.clearing_price_eur_per_mwh
+                ),
+                additional_charge_cost_eur=(
+                    accepted_charge
+                    * storage.additional_cost_charge_eur_per_mwh
+                ),
+                additional_discharge_cost_eur=(
+                    accepted_discharge
+                    * storage.additional_cost_discharge_eur_per_mwh
+                ),
+            )
+        )
+    return records
+
+
 def _offers_for_opening(
     *,
     opening: MarketOpening,
@@ -577,6 +845,8 @@ def _clear_opening(
     price_forecasts: dict[datetime, float],
     exchange_unit: ExchangeUnit | None,
     exchange_profiles: dict[datetime, ExchangeSchedule],
+    storages: tuple[StorageUnit, ...] = (),
+    storage_initial_energies_mwh: dict[str, float] | None = None,
 ) -> tuple[MarketClearingResult, ...]:
     """Quote and clear one opening from its gate-closure state snapshot."""
 
@@ -594,7 +864,6 @@ def _clear_opening(
         )
         all_demand_bids.extend(demand_bids)
         exchange_schedules[delivery_start] = schedule
-    _validate_demand_prices(all_demand_bids, settings)
 
     offers = _offers_for_opening(
         opening=opening,
@@ -606,9 +875,29 @@ def _clear_opening(
         exchange_unit=exchange_unit,
         exchange_schedules=exchange_schedules,
     )
+    storage_contexts: tuple[StorageClearingContext, ...] = ()
+    if storages:
+        if storage_initial_energies_mwh is None:
+            raise ValueError("Storage initial energies are required for storage bids.")
+        storage_bids, storage_offers, storage_contexts = (
+            _storage_orders_for_opening(
+                opening=opening,
+                storages=storages,
+                initial_energies_mwh=storage_initial_energies_mwh,
+                price_forecasts=price_forecasts,
+            )
+        )
+        all_demand_bids.extend(storage_bids)
+        offers.extend(storage_offers)
+
+    _validate_demand_prices(all_demand_bids, settings)
     _validate_offer_prices(offers, settings)
     if settings.market_mechanism == "complex_clearing":
-        return clear_complex_opening(all_demand_bids, offers)
+        return clear_complex_opening(
+            all_demand_bids,
+            offers,
+            storage_contexts=storage_contexts,
+        )
     if any(offer.bid_type != "SB" for offer in offers):
         raise InputValidationError(
             "Block and linked EOM strategies require market_mechanism: "
@@ -638,7 +927,27 @@ def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
     plants = load_powerplants(input_path / "powerplant_units.csv")
     _validate_strategy_configuration(settings, plants)
+    storages = load_storage_units(input_path / "storage_units.csv")
+    _validate_storage_configuration(settings, storages)
     demand_units = load_demand_units(input_path / "demand_units.csv")
+    participant_names = [
+        *(plant.name for plant in plants),
+        *(storage.name for storage in storages),
+        *(unit.name for unit in demand_units),
+    ]
+    if len(participant_names) != len(set(participant_names)):
+        duplicates = sorted(
+            {
+                name
+                for name in participant_names
+                if participant_names.count(name) > 1
+            }
+        )
+        raise InputValidationError(
+            "Participant names must be unique across plants, storage, and demand: "
+            + ", ".join(duplicates)
+            + "."
+        )
     fuel_prices = load_fuel_prices(input_path / "fuel_prices_df.csv")
     validate_fuel_coverage(plants, fuel_prices)
     demand_profiles = load_hourly_demand_profiles(input_path / "demand_df.csv", demand_units)
@@ -648,7 +957,11 @@ def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
     exchange_profiles: dict[datetime, ExchangeSchedule] = {}
     if settings.exchange_units_file is not None:
         exchange_unit = load_exchange_unit(input_path / settings.exchange_units_file)
-        existing_names = {plant.name for plant in plants} | {unit.name for unit in demand_units}
+        existing_names = (
+            {plant.name for plant in plants}
+            | {storage.name for storage in storages}
+            | {unit.name for unit in demand_units}
+        )
         if exchange_unit.name in existing_names:
             raise InputValidationError(
                 f"Exchange name {exchange_unit.name!r} must not duplicate another unit name."
@@ -669,34 +982,59 @@ def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
             )
 
     runtime_plants = tuple(plant for plant in plants if plant.bidding_strategy != "powerplant_energy_naive")
-    requires_price_forecast = any(plant.min_power_mw > _POWER_TOLERANCE_MW for plant in runtime_plants)
+    requires_price_forecast = any(
+        plant.min_power_mw > _POWER_TOLERANCE_MW for plant in runtime_plants
+    )
+    requires_storage_price_forecast = bool(storages)
     valid_openings: list[MarketOpening] = []
     for opening in market_openings(settings):
-        issues = _opening_coverage_issues(
+        issues, only_initial_forecast_history_missing = _opening_coverage(
             opening=opening, settings=settings, plants=plants,
             demand_units=demand_units, demand_profiles=demand_profiles,
             availability_profiles=availability_profiles, exchange_unit=exchange_unit,
             exchange_profiles=exchange_profiles,
             requires_price_forecast=requires_price_forecast,
+            requires_storage_price_forecast=requires_storage_price_forecast,
         )
         if issues:
-            warnings.warn(
-                f"跳过市场开放 {_timestamp(opening.opening_time)}：" + "; ".join(issues),
-                RuntimeWarning, stacklevel=2,
-            )
+            if not only_initial_forecast_history_missing:
+                warnings.warn(
+                    f"跳过市场开放 {_timestamp(opening.opening_time)}："
+                    + "; ".join(issues),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             continue
         valid_openings.append(opening)
 
     price_forecasts: dict[datetime, float] = {}
-    if requires_price_forecast:
+    if requires_price_forecast or requires_storage_price_forecast:
+        forecast_starts: set[datetime] = set()
+        for opening in valid_openings:
+            for delivery_start, _ in opening.products:
+                if requires_price_forecast:
+                    forecast_starts.update(
+                        delivery_start + timedelta(hours=offset)
+                        for offset in range(_FORECAST_HOURS + 1)
+                    )
+                if requires_storage_price_forecast:
+                    forecast_starts.update(
+                        delivery_start + timedelta(hours=offset)
+                        for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1)
+                    )
         price_forecasts = _naive_price_forecasts(
             products=[product for opening in valid_openings for product in opening.products],
             settings=settings, plants=plants, marginal_costs=marginal_costs,
             availability_profiles=availability_profiles, demand_units=demand_units,
             demand_profiles=demand_profiles, exchange_unit=exchange_unit,
             exchange_profiles=exchange_profiles,
+            forecast_starts=forecast_starts,
         )
     runtime_states = {plant.name: PlantRuntimeState.initially_off(plant) for plant in runtime_plants}
+    storage_states = {
+        storage.name: StorageRuntimeState.from_initial_soc(storage)
+        for storage in storages
+    }
 
     # Clearing is a forward market event; its products are not dispatched at
     # gate closure.  Keep cleared products on a physical-time queue so a later
@@ -712,6 +1050,7 @@ def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
     pending_starts: dict[datetime, list[ScheduledProductKey]] = defaultdict(list)
     pending_ends: dict[datetime, list[ScheduledProductKey]] = defaultdict(list)
     results: list[MarketClearingResult] = []
+    storage_results: list[StorageDispatchResult] = []
 
     while openings_by_time or pending_starts or pending_ends:
         event_time = min(
@@ -722,8 +1061,19 @@ def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
         # that opens now.  Only these completed deliveries may affect its bids.
         for key in pending_ends.pop(event_time, []):
             _record_runtime_states(scheduled_results[key], runtime_states)
+            storage_results.extend(
+                _record_storage_states(
+                    scheduled_results[key], storages, storage_states
+                )
+            )
 
         for opening in openings_by_time.pop(event_time, []):
+            storage_initial_energies = _project_storage_energies(
+                opening=opening,
+                storages=storages,
+                storage_states=storage_states,
+                scheduled_results=scheduled_results,
+            )
             opening_results = _clear_opening(
                 opening=opening,
                 settings=settings,
@@ -736,6 +1086,8 @@ def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
                 price_forecasts=price_forecasts,
                 exchange_unit=exchange_unit,
                 exchange_profiles=exchange_profiles,
+                storages=storages,
+                storage_initial_energies_mwh=storage_initial_energies,
             )
             for market_result in opening_results:
                 market_result = replace(
@@ -767,6 +1119,16 @@ def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
                 key=lambda result: (
                     result.delivery_start,
                     result.opening_time or result.delivery_start,
+                ),
+            )
+        ),
+        storage_results=tuple(
+            sorted(
+                storage_results,
+                key=lambda result: (
+                    result.delivery_start,
+                    result.opening_time,
+                    result.unit_name,
                 ),
             )
         ),

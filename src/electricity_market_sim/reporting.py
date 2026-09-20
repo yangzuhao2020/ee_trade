@@ -307,6 +307,71 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 }
             )
 
+    storage_rows = []
+    for storage_result in simulation_result.storage_results:
+        duration_hours = (
+            storage_result.delivery_end - storage_result.delivery_start
+        ).total_seconds() / 3600
+        storage_rows.append(
+            {
+                "opening_id": storage_result.opening_time.isoformat(),
+                "opening_time": _timestamp(storage_result.opening_time),
+                "delivery_start": _timestamp(storage_result.delivery_start),
+                "delivery_end": _timestamp(storage_result.delivery_end),
+                "unit_name": storage_result.unit_name,
+                "unit_operator": storage_result.operator,
+                "technology": storage_result.technology,
+                "energy_before_mwh": _number(storage_result.energy_before_mwh),
+                "energy_after_mwh": _number(storage_result.energy_after_mwh),
+                "soc_before": _number(storage_result.soc_before),
+                "soc_after": _number(storage_result.soc_after),
+                "offered_charge_power_mw": _number(
+                    storage_result.offered_charge_mwh / duration_hours
+                ),
+                "offered_charge_mwh": _number(storage_result.offered_charge_mwh),
+                "accepted_charge_power_mw": _number(
+                    storage_result.accepted_charge_mwh / duration_hours
+                ),
+                "accepted_charge_mwh": _number(storage_result.accepted_charge_mwh),
+                "charge_bid_price_eur_per_mwh": (
+                    ""
+                    if storage_result.charge_bid_price_eur_per_mwh is None
+                    else _number(storage_result.charge_bid_price_eur_per_mwh)
+                ),
+                "offered_discharge_power_mw": _number(
+                    storage_result.offered_discharge_mwh / duration_hours
+                ),
+                "offered_discharge_mwh": _number(
+                    storage_result.offered_discharge_mwh
+                ),
+                "accepted_discharge_power_mw": _number(
+                    storage_result.accepted_discharge_mwh / duration_hours
+                ),
+                "accepted_discharge_mwh": _number(
+                    storage_result.accepted_discharge_mwh
+                ),
+                "discharge_bid_price_eur_per_mwh": (
+                    ""
+                    if storage_result.discharge_bid_price_eur_per_mwh is None
+                    else _number(storage_result.discharge_bid_price_eur_per_mwh)
+                ),
+                "clearing_price_eur_per_mwh": _number(
+                    storage_result.clearing_price_eur_per_mwh
+                ),
+                "charge_payment_eur": _number(storage_result.charge_payment_eur),
+                "discharge_revenue_eur": _number(
+                    storage_result.discharge_revenue_eur
+                ),
+                "additional_charge_cost_eur": _number(
+                    storage_result.additional_charge_cost_eur
+                ),
+                "additional_discharge_cost_eur": _number(
+                    storage_result.additional_discharge_cost_eur
+                ),
+                "net_cash_flow_eur": _number(storage_result.net_cash_flow_eur),
+            }
+        )
+
     _write_rows(
         output_dir / "market_results.csv",
         [
@@ -430,6 +495,40 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "exchange_market_cash_flow_eur",
             ],
             exchange_rows,
+        )
+    if storage_rows:
+        _write_rows(
+            output_dir / "storage_results.csv",
+            [
+                "opening_id",
+                "opening_time",
+                "delivery_start",
+                "delivery_end",
+                "unit_name",
+                "unit_operator",
+                "technology",
+                "energy_before_mwh",
+                "energy_after_mwh",
+                "soc_before",
+                "soc_after",
+                "offered_charge_power_mw",
+                "offered_charge_mwh",
+                "accepted_charge_power_mw",
+                "accepted_charge_mwh",
+                "charge_bid_price_eur_per_mwh",
+                "offered_discharge_power_mw",
+                "offered_discharge_mwh",
+                "accepted_discharge_power_mw",
+                "accepted_discharge_mwh",
+                "discharge_bid_price_eur_per_mwh",
+                "clearing_price_eur_per_mwh",
+                "charge_payment_eur",
+                "discharge_revenue_eur",
+                "additional_charge_cost_eur",
+                "additional_discharge_cost_eur",
+                "net_cash_flow_eur",
+            ],
+            storage_rows,
         )
     if any(row["offer_segment"] != "single" for row in offer_rows):
         _write_rows(

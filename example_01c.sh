@@ -9,7 +9,7 @@ Usage:
   ./example_01c.sh [SCENARIO|all] [simulator options]
 
 Examples:
-  ./example_01c.sh --no-plots
+  ./example_01c.sh --no-plots            # defaults to eom_only
   ./example_01c.sh all --no-plots
   ./example_01c.sh eom_only --no-plots
 
@@ -32,7 +32,7 @@ if [[ ! -f "$config_file" ]]; then
   exit 2
 fi
 
-scenario_selector="all"
+scenario_selector="eom_only"
 if (($# > 0)) && [[ "$1" != --* ]]; then
   scenario_selector="$1"
   shift

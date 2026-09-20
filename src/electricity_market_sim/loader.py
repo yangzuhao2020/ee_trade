@@ -9,13 +9,13 @@ from math import isfinite
 from pathlib import Path
 
 from .errors import InputValidationError
-from .models import DemandUnit, ExchangeSchedule, ExchangeUnit, PowerPlant
+from .models import DemandUnit, ExchangeSchedule, ExchangeUnit, PowerPlant, StorageUnit
 
 
 def _read_rows(path: Path) -> list[dict[str, str]]:
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
-    with path.open(encoding="utf-8", newline="") as file:
+    with path.open(encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
         if not reader.fieldnames:
             raise InputValidationError(f"{path} must contain a header row.")
@@ -143,6 +143,124 @@ def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
             )
         plants.append(plant)
     return tuple(plants)
+
+
+def load_storage_units(path: Path) -> tuple[StorageUnit, ...]:
+    """Read optional V2 storage participants from ``storage_units.csv``."""
+
+    if not path.is_file():
+        return ()
+
+    rows = _read_rows(path)
+    storages: list[StorageUnit] = []
+    names: set[str] = set()
+    for row_number, row in enumerate(rows, start=2):
+        name = _require(row, "name", path, row_number)
+        if name in names:
+            raise InputValidationError(
+                f"{path.name}: duplicate storage unit name {name!r}."
+            )
+        names.add(name)
+
+        strategy = _require(row, "bidding_EOM", path, row_number)
+        if strategy != "storage_energy_heuristic_flexable":
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: unsupported bidding_EOM strategy "
+                f"{strategy!r}."
+            )
+
+        min_soc = _float(row, "min_soc", path, row_number)
+        max_soc = _float(row, "max_soc", path, row_number)
+        storage = StorageUnit(
+            name=name,
+            operator=_require(row, "unit_operator", path, row_number),
+            technology=_require(row, "technology", path, row_number),
+            bidding_strategy=strategy,
+            max_power_charge_mw=_float(
+                row, "max_power_charge", path, row_number
+            ),
+            max_power_discharge_mw=_float(
+                row, "max_power_discharge", path, row_number
+            ),
+            efficiency_charge=_float(
+                row, "efficiency_charge", path, row_number
+            ),
+            efficiency_discharge=_float(
+                row, "efficiency_discharge", path, row_number
+            ),
+            min_soc=min_soc,
+            max_soc=max_soc,
+            capacity_mwh=_float(row, "capacity", path, row_number),
+            initial_soc=_optional_float(
+                row, "initial_soc", min_soc, path, row_number
+            ),
+            additional_cost_charge_eur_per_mwh=_float(
+                row, "additional_cost_charge", path, row_number
+            ),
+            additional_cost_discharge_eur_per_mwh=_float(
+                row, "additional_cost_discharge", path, row_number
+            ),
+            natural_inflow_mw=_optional_float(
+                row, "natural_inflow", 0.0, path, row_number
+            ),
+        )
+
+        if storage.max_power_charge_mw < 0:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: max_power_charge cannot be negative."
+            )
+        if storage.max_power_discharge_mw < 0:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: max_power_discharge cannot be negative."
+            )
+        if (
+            storage.max_power_charge_mw == 0
+            and storage.max_power_discharge_mw == 0
+        ):
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: at least one storage power limit "
+                "must be positive."
+            )
+        if not 0 < storage.efficiency_charge <= 1:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: efficiency_charge must be in (0, 1]."
+            )
+        if not 0 < storage.efficiency_discharge <= 1:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: efficiency_discharge must be in (0, 1]."
+            )
+        if not 0 <= storage.min_soc <= storage.max_soc <= 1:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: SOC limits must satisfy "
+                "0 <= min_soc <= max_soc <= 1."
+            )
+        if not storage.min_soc <= storage.initial_soc <= storage.max_soc:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: initial_soc must satisfy "
+                "min_soc <= initial_soc <= max_soc."
+            )
+        if storage.capacity_mwh <= 0:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: capacity must be positive."
+            )
+        if storage.additional_cost_charge_eur_per_mwh < 0:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: additional_cost_charge "
+                "cannot be negative."
+            )
+        if storage.additional_cost_discharge_eur_per_mwh < 0:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: additional_cost_discharge "
+                "cannot be negative."
+            )
+        if storage.natural_inflow_mw != 0:
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: non-zero natural_inflow is not "
+                "supported in version two."
+            )
+        storages.append(storage)
+
+    return tuple(storages)
 
 
 def load_demand_units(path: Path) -> tuple[DemandUnit, ...]:

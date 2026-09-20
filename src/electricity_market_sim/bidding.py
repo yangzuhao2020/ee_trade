@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
-from .models import PowerPlant, SupplyOffer
+from .models import DemandBid, PowerPlant, StorageUnit, SupplyOffer
 
 _POWER_TOLERANCE_MW = 1e-9
 _FORECAST_HOURS = 12
@@ -55,6 +55,159 @@ class PlantRuntimeState:
             self.down_time_hours = 0.0
         else:
             self.down_time_hours += duration_hours
+
+
+@dataclass
+class StorageRuntimeState:
+    """The delivered physical energy of one storage unit.
+
+    Future accepted products are kept by the simulation scheduler and projected
+    separately.  This state changes only when a delivery period has ended.
+    """
+
+    energy_mwh: float
+
+    @classmethod
+    def from_initial_soc(cls, storage: StorageUnit) -> StorageRuntimeState:
+        return cls(energy_mwh=storage.initial_energy_mwh)
+
+    def soc(self, storage: StorageUnit) -> float:
+        return self.energy_mwh / storage.capacity_mwh
+
+    def energy_after_dispatch(
+        self,
+        storage: StorageUnit,
+        accepted_charge_mwh: float,
+        accepted_discharge_mwh: float,
+    ) -> float:
+        """Return the next internal energy using grid-side accepted quantities."""
+
+        return (
+            self.energy_mwh
+            + accepted_charge_mwh * storage.efficiency_charge
+            - accepted_discharge_mwh / storage.efficiency_discharge
+        )
+
+    def record_dispatch(
+        self,
+        storage: StorageUnit,
+        accepted_charge_mwh: float,
+        accepted_discharge_mwh: float,
+    ) -> tuple[float, float]:
+        """Apply one delivered product and return its before/after energy."""
+
+        before = self.energy_mwh
+        after = self.energy_after_dispatch(
+            storage, accepted_charge_mwh, accepted_discharge_mwh
+        )
+        tolerance = 1e-7
+        if after < storage.min_energy_mwh - tolerance:
+            raise ValueError(
+                f"Storage {storage.name!r} dispatch falls below min_soc: "
+                f"{after:.9f} MWh < {storage.min_energy_mwh:.9f} MWh."
+            )
+        if after > storage.max_energy_mwh + tolerance:
+            raise ValueError(
+                f"Storage {storage.name!r} dispatch exceeds max_soc: "
+                f"{after:.9f} MWh > {storage.max_energy_mwh:.9f} MWh."
+            )
+        self.energy_mwh = min(
+            storage.max_energy_mwh, max(storage.min_energy_mwh, after)
+        )
+        return before, self.energy_mwh
+
+
+def storage_heuristic_orders(
+    storage: StorageUnit,
+    initial_energy_mwh: float,
+    products: tuple[tuple[datetime, datetime], ...],
+    price_forecast: dict[datetime, float],
+) -> tuple[list[DemandBid], list[SupplyOffer]]:
+    """Build mutually exclusive hourly charge or discharge orders.
+
+    The reference energy trajectory assumes that every submitted order clears in
+    full.  It is used only to size sensible bids.  Complex clearing separately
+    constrains the trajectory formed by the *accepted* quantities.
+    """
+
+    charge_bids: list[DemandBid] = []
+    discharge_offers: list[SupplyOffer] = []
+    reference_energy = initial_energy_mwh
+    for delivery_start, delivery_end in products:
+        duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
+        window = [
+            price_forecast[delivery_start + timedelta(hours=offset)]
+            for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1)
+        ]
+        average_price = sum(window) / len(window)
+        current_price = price_forecast[delivery_start]
+        timestamp = delivery_start.isoformat()
+
+        if current_price < average_price:
+            headroom_mwh = max(0.0, storage.max_energy_mwh - reference_energy)
+            charge_energy_mwh = min(
+                storage.max_power_charge_mw * duration_hours,
+                headroom_mwh / storage.efficiency_charge,
+            )
+            if charge_energy_mwh > _POWER_TOLERANCE_MW:
+                bid_price = (
+                    average_price * storage.efficiency_charge
+                    - storage.additional_cost_charge_eur_per_mwh
+                )
+                charge_bids.append(
+                    DemandBid(
+                        unit_name=storage.name,
+                        operator=storage.operator,
+                        delivery_start=delivery_start,
+                        delivery_end=delivery_end,
+                        volume_mwh=charge_energy_mwh,
+                        price_eur_per_mwh=bid_price,
+                        bid_type="storage_charge",
+                        bid_id=f"{storage.name}::charge::{timestamp}",
+                        demand_type="storage_charge",
+                    )
+                )
+                reference_energy += (
+                    charge_energy_mwh * storage.efficiency_charge
+                )
+        elif current_price > average_price:
+            available_internal_mwh = max(
+                0.0, reference_energy - storage.min_energy_mwh
+            )
+            discharge_energy_mwh = min(
+                storage.max_power_discharge_mw * duration_hours,
+                available_internal_mwh * storage.efficiency_discharge,
+            )
+            if discharge_energy_mwh > _POWER_TOLERANCE_MW:
+                bid_price = (
+                    average_price / storage.efficiency_discharge
+                    + storage.additional_cost_discharge_eur_per_mwh
+                )
+                identifier = f"{storage.name}::discharge::{timestamp}"
+                discharge_offers.append(
+                    SupplyOffer(
+                        unit_name=storage.name,
+                        operator=storage.operator,
+                        technology=storage.technology,
+                        delivery_start=delivery_start,
+                        delivery_end=delivery_end,
+                        offered_power_mw=discharge_energy_mwh / duration_hours,
+                        offered_energy_mwh=discharge_energy_mwh,
+                        bid_price_eur_per_mwh=bid_price,
+                        marginal_cost_eur_per_mwh=(
+                            storage.additional_cost_discharge_eur_per_mwh
+                        ),
+                        offer_type="storage_discharge",
+                        offer_id=identifier,
+                        offer_segment="storage_discharge",
+                        bid_id=identifier,
+                    )
+                )
+                reference_energy -= (
+                    discharge_energy_mwh / storage.efficiency_discharge
+                )
+
+    return charge_bids, discharge_offers
 
 
 def available_power_mw(

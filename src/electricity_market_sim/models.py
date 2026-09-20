@@ -121,6 +121,39 @@ class PowerPlant:
 
 
 @dataclass(frozen=True)
+class StorageUnit:
+    """A storage participant and the physical limits used by its EOM strategy."""
+
+    name: str
+    operator: str
+    technology: str
+    bidding_strategy: str
+    max_power_charge_mw: float
+    max_power_discharge_mw: float
+    efficiency_charge: float
+    efficiency_discharge: float
+    min_soc: float
+    max_soc: float
+    capacity_mwh: float
+    initial_soc: float
+    additional_cost_charge_eur_per_mwh: float
+    additional_cost_discharge_eur_per_mwh: float
+    natural_inflow_mw: float = 0.0
+
+    @property
+    def min_energy_mwh(self) -> float:
+        return self.min_soc * self.capacity_mwh
+
+    @property
+    def max_energy_mwh(self) -> float:
+        return self.max_soc * self.capacity_mwh
+
+    @property
+    def initial_energy_mwh(self) -> float:
+        return self.initial_soc * self.capacity_mwh
+
+
+@dataclass(frozen=True)
 class DemandBid:
     """A buy order. Its volume is always a non-negative energy quantity."""
 
@@ -138,18 +171,37 @@ class DemandBid:
     demand_type: str | None = None
 
     def __post_init__(self) -> None:
-        if self.bid_type not in {"local_load", "export"}:
-            raise ValueError("Demand bids must be local_load or export bids.")
+        if self.bid_type not in {"local_load", "export", "storage_charge"}:
+            raise ValueError(
+                "Demand bids must be local_load, export, or storage_charge bids."
+            )
         demand_type = self.demand_type
         if demand_type is None:
-            demand_type = "export" if self.bid_type == "export" else "inelastic_load"
+            if self.bid_type == "export":
+                demand_type = "export"
+            elif self.bid_type == "storage_charge":
+                demand_type = "storage_charge"
+            else:
+                demand_type = "inelastic_load"
             object.__setattr__(self, "demand_type", demand_type)
-        if demand_type not in {"inelastic_load", "elastic_load", "export"}:
+        if demand_type not in {
+            "inelastic_load",
+            "elastic_load",
+            "export",
+            "storage_charge",
+        }:
             raise ValueError(
-                "demand_type must be inelastic_load, elastic_load, or export."
+                "demand_type must be inelastic_load, elastic_load, export, "
+                "or storage_charge."
             )
         if (self.bid_type == "export") != (demand_type == "export"):
             raise ValueError("Export demand bids must use demand_type='export'.")
+        if (self.bid_type == "storage_charge") != (
+            demand_type == "storage_charge"
+        ):
+            raise ValueError(
+                "Storage charge bids must use demand_type='storage_charge'."
+            )
 
     @property
     def identifier(self) -> str:
@@ -347,10 +399,13 @@ class MarketClearingResult:
                 "unit names must be unique when no offer_id is supplied."
             )
         if any(
-            cleared.offer.offer_type not in {"power_plant", "import"}
+            cleared.offer.offer_type
+            not in {"power_plant", "import", "storage_discharge"}
             for cleared in self.offers
         ):
-            raise ValueError("Supply offers must be power_plant or import offers.")
+            raise ValueError(
+                "Supply offers must be power_plant, import, or storage_discharge offers."
+            )
 
         requested_demand = sum(cleared.bid.volume_mwh for cleared in self.demand_bids)
         if not isclose(
@@ -587,3 +642,59 @@ class SimulationResult:
 
     settings: MarketSettings
     market_results: tuple[MarketClearingResult, ...]
+    storage_results: tuple[StorageDispatchResult, ...] = ()
+
+
+@dataclass(frozen=True)
+class StorageClearingContext:
+    """Physical storage data required by one joint complex-clearing opening."""
+
+    unit_name: str
+    initial_energy_mwh: float
+    min_energy_mwh: float
+    max_energy_mwh: float
+    efficiency_charge: float
+    efficiency_discharge: float
+
+
+@dataclass(frozen=True)
+class StorageDispatchResult:
+    """One storage unit's accepted dispatch and SOC transition for one product."""
+
+    opening_time: datetime
+    delivery_start: datetime
+    delivery_end: datetime
+    unit_name: str
+    operator: str
+    technology: str
+    energy_before_mwh: float
+    energy_after_mwh: float
+    capacity_mwh: float
+    offered_charge_mwh: float
+    accepted_charge_mwh: float
+    charge_bid_price_eur_per_mwh: float | None
+    offered_discharge_mwh: float
+    accepted_discharge_mwh: float
+    discharge_bid_price_eur_per_mwh: float | None
+    clearing_price_eur_per_mwh: float
+    charge_payment_eur: float
+    discharge_revenue_eur: float
+    additional_charge_cost_eur: float
+    additional_discharge_cost_eur: float
+
+    @property
+    def soc_before(self) -> float:
+        return self.energy_before_mwh / self.capacity_mwh
+
+    @property
+    def soc_after(self) -> float:
+        return self.energy_after_mwh / self.capacity_mwh
+
+    @property
+    def net_cash_flow_eur(self) -> float:
+        return (
+            self.discharge_revenue_eur
+            - self.charge_payment_eur
+            - self.additional_charge_cost_eur
+            - self.additional_discharge_cost_eur
+        )
