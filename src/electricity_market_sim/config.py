@@ -141,19 +141,46 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
 
     if settings.end <= settings.start:
         raise InputValidationError("end_date must be later than start_date.")
-    if settings.time_step != timedelta(hours=1):
-        raise InputValidationError("Version one supports only time_step: 1h.")
+    is_pay_as_bid = settings.market_mechanism == "pay_as_bid"
+    if not is_pay_as_bid and settings.time_step != timedelta(hours=1):
+        raise InputValidationError("Version one and two support only time_step: 1h.")
     if settings.opening_frequency <= timedelta(0):
         raise InputValidationError("EOM opening_frequency must be positive.")
     if settings.opening_duration <= timedelta(0):
         raise InputValidationError("EOM opening_duration must be positive.")
-    if settings.product_duration != timedelta(hours=1):
+    if not is_pay_as_bid and settings.product_duration != timedelta(hours=1):
         raise InputValidationError("Version two supports only 1-hour EOM products.")
+    if is_pay_as_bid and settings.product_duration != settings.time_step:
+        raise InputValidationError(
+            "pay_as_bid requires product duration to equal the scenario time_step."
+        )
     if settings.product_count <= 0:
         raise InputValidationError("EOM product count must be positive.")
-    if settings.market_mechanism not in {"pay_as_clear", "complex_clearing"}:
+    if is_pay_as_bid:
+        if settings.time_step != timedelta(minutes=15):
+            raise InputValidationError(
+                "Version three pay_as_bid requires a 15-minute time_step."
+            )
+        if settings.opening_frequency != timedelta(hours=24):
+            raise InputValidationError(
+                "Version three pay_as_bid requires a 24-hour opening_frequency."
+            )
+        if settings.first_delivery != timedelta(minutes=15):
+            raise InputValidationError(
+                "Version three pay_as_bid requires first_delivery: 15min."
+            )
+        if settings.product_count > 96:
+            raise InputValidationError(
+                "Version three pay_as_bid supports at most 96 products per opening."
+            )
+    if settings.market_mechanism not in {
+        "pay_as_clear",
+        "complex_clearing",
+        "pay_as_bid",
+    }:
         raise InputValidationError(
-            "EOM market_mechanism must be pay_as_clear or complex_clearing."
+            "EOM market_mechanism must be pay_as_clear, complex_clearing, "
+            "or pay_as_bid."
         )
     if settings.minimum_bid_price > settings.maximum_bid_price:
         raise InputValidationError("minimum_bid_price cannot exceed maximum_bid_price.")

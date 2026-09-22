@@ -14,8 +14,19 @@ from __future__ import annotations
 from collections import defaultdict
 
 import numpy as np
-from scipy.optimize import Bounds, LinearConstraint, linprog, milp
 
+try:
+    from scipy.optimize import Bounds, LinearConstraint, linprog, milp
+except (ImportError, AttributeError) as exc:  # pragma: no cover - environment dependent
+    Bounds = None
+    LinearConstraint = None
+    linprog = None
+    milp = None
+    _SCIPY_IMPORT_ERROR: Exception | None = exc
+else:
+    _SCIPY_IMPORT_ERROR = None
+
+from .errors import InputValidationError
 from .models import (
     ClearedDemandBid,
     ClearedSupplyOffer,
@@ -23,10 +34,20 @@ from .models import (
     MarketClearingResult,
     StorageClearingContext,
     SupplyOffer,
+    Trade,
 )
 
 
 _EPSILON = 1e-9
+
+
+def _require_complex_optimizer() -> None:
+    if any(tool is None for tool in (Bounds, LinearConstraint, linprog, milp)):
+        detail = f": {_SCIPY_IMPORT_ERROR}" if _SCIPY_IMPORT_ERROR else ""
+        raise InputValidationError(
+            "Complex market clearing requires SciPy optimization support "
+            f"(milp and linprog){detail}."
+        )
 
 
 def clear_pay_as_clear(
@@ -150,6 +171,130 @@ def clear_pay_as_clear(
     )
 
 
+def clear_pay_as_bid(
+    demand_bids: list[DemandBid], supply_offers: list[SupplyOffer]
+) -> MarketClearingResult:
+    """Clear one product and settle every match at the seller's offer price."""
+
+    if not demand_bids and not supply_offers:
+        raise ValueError("Cannot clear an empty market.")
+    products = {
+        (bid.delivery_start, bid.delivery_end) for bid in demand_bids
+    } | {(offer.delivery_start, offer.delivery_end) for offer in supply_offers}
+    if len(products) != 1:
+        raise ValueError("All bids and offers passed to one clearing must share a product.")
+    delivery_start, delivery_end = products.pop()
+
+    bid_ids = [bid.identifier for bid in demand_bids]
+    offer_ids = [offer.identifier for offer in supply_offers]
+    if len(bid_ids) != len(set(bid_ids)):
+        raise ValueError("Demand bid identifiers must be unique within a product.")
+    if len(offer_ids) != len(set(offer_ids)):
+        raise ValueError("Supply offer identifiers must be unique within a product.")
+
+    ordered_bids = sorted(
+        demand_bids,
+        key=lambda bid: (-bid.price_eur_per_mwh, bid.unit_name, bid.identifier),
+    )
+    ordered_offers = sorted(
+        supply_offers,
+        key=lambda offer: (
+            offer.bid_price_eur_per_mwh,
+            offer.unit_name,
+            offer.identifier,
+        ),
+    )
+    remaining_bids = {bid.identifier: bid.volume_mwh for bid in ordered_bids}
+    remaining_offers = {
+        offer.identifier: offer.offered_energy_mwh for offer in ordered_offers
+    }
+    accepted_bids: dict[str, float] = defaultdict(float)
+    accepted_offers: dict[str, float] = defaultdict(float)
+    payments_by_bid: dict[str, float] = defaultdict(float)
+    trades: list[Trade] = []
+
+    bid_index = 0
+    offer_index = 0
+    while bid_index < len(ordered_bids) and offer_index < len(ordered_offers):
+        bid = ordered_bids[bid_index]
+        offer = ordered_offers[offer_index]
+        if offer.bid_price_eur_per_mwh > bid.price_eur_per_mwh + _EPSILON:
+            break
+        quantity = min(
+            remaining_bids[bid.identifier],
+            remaining_offers[offer.identifier],
+        )
+        if quantity > _EPSILON:
+            trade = Trade(
+                delivery_start=delivery_start,
+                delivery_end=delivery_end,
+                buyer_name=bid.unit_name,
+                buyer_bid_id=bid.identifier,
+                seller_name=offer.unit_name,
+                seller_offer_id=offer.identifier,
+                trade_energy_mwh=quantity,
+                trade_price_eur_per_mwh=offer.bid_price_eur_per_mwh,
+            )
+            trades.append(trade)
+            accepted_bids[bid.identifier] += quantity
+            accepted_offers[offer.identifier] += quantity
+            payments_by_bid[bid.identifier] += trade.payment_eur
+            remaining_bids[bid.identifier] -= quantity
+            remaining_offers[offer.identifier] -= quantity
+        if remaining_bids[bid.identifier] <= _EPSILON:
+            bid_index += 1
+        if remaining_offers[offer.identifier] <= _EPSILON:
+            offer_index += 1
+
+    cleared_offers = tuple(
+        ClearedSupplyOffer(
+            offer=offer,
+            accepted_energy_mwh=accepted_offers[offer.identifier],
+            clearing_price_eur_per_mwh=(
+                offer.bid_price_eur_per_mwh
+                if accepted_offers[offer.identifier] > _EPSILON
+                else 0.0
+            ),
+        )
+        for offer in supply_offers
+    )
+    cleared_demands = tuple(
+        ClearedDemandBid(
+            bid=bid,
+            accepted_energy_mwh=accepted_bids[bid.identifier],
+            clearing_price_eur_per_mwh=(
+                payments_by_bid[bid.identifier] / accepted_bids[bid.identifier]
+                if accepted_bids[bid.identifier] > _EPSILON
+                else 0.0
+            ),
+        )
+        for bid in demand_bids
+    )
+    cleared_energy = sum(trade.trade_energy_mwh for trade in trades)
+    return MarketClearingResult(
+        delivery_start=delivery_start,
+        delivery_end=delivery_end,
+        requested_demand_mwh=sum(bid.volume_mwh for bid in demand_bids),
+        cleared_energy_mwh=cleared_energy,
+        unserved_load_mwh=sum(
+            cleared.unserved_energy_mwh
+            for cleared in cleared_demands
+            if cleared.bid.demand_type == "inelastic_load"
+        ),
+        unfulfilled_export_mwh=sum(
+            cleared.unserved_energy_mwh
+            for cleared in cleared_demands
+            if cleared.bid.bid_type == "export"
+        ),
+        clearing_price_eur_per_mwh=None,
+        offers=cleared_offers,
+        demand_bids=cleared_demands,
+        marginal_unit_name=None,
+        pricing_method="pay_as_bid",
+        trades=tuple(trades),
+    )
+
+
 def clear_complex_opening(
     demand_bids: list[DemandBid],
     supply_offers: list[SupplyOffer],
@@ -162,6 +307,8 @@ def clear_complex_opening(
     balance-constraint duals of the resulting LP, then remove exactly one
     lowest-surplus accepted BB or linked family and repeat when necessary.
     """
+
+    _require_complex_optimizer()
 
     products = tuple(
         sorted(

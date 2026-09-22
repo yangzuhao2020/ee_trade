@@ -1,4 +1,5 @@
 examples
 outputs
-tests
+tests/*
+!tests/test_v3_trading.py
 *.pyc

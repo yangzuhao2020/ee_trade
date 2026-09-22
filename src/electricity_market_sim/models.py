@@ -59,6 +59,7 @@ class DemandUnit:
     elasticity_model: str | None = None
     max_price_eur_per_mwh: float | None = None
     num_bids: int | None = None
+    price_eur_per_mwh: float | None = None
 
     @property
     def is_elastic(self) -> bool:
@@ -171,6 +172,12 @@ class DemandBid:
     demand_type: str | None = None
 
     def __post_init__(self) -> None:
+        if self.delivery_end <= self.delivery_start:
+            raise ValueError("A demand bid must have a positive delivery duration.")
+        if not isfinite(self.volume_mwh) or self.volume_mwh < 0:
+            raise ValueError("Demand bid volume must be a non-negative finite value.")
+        if not isfinite(self.price_eur_per_mwh):
+            raise ValueError("Demand bid price must be finite.")
         if self.bid_type not in {"local_load", "export", "storage_charge"}:
             raise ValueError(
                 "Demand bids must be local_load, export, or storage_charge bids."
@@ -187,12 +194,13 @@ class DemandBid:
         if demand_type not in {
             "inelastic_load",
             "elastic_load",
+            "household_load",
             "export",
             "storage_charge",
         }:
             raise ValueError(
-                "demand_type must be inelastic_load, elastic_load, export, "
-                "or storage_charge."
+                "demand_type must be inelastic_load, elastic_load, household_load, "
+                "export, or storage_charge."
             )
         if (self.bid_type == "export") != (demand_type == "export"):
             raise ValueError("Export demand bids must use demand_type='export'.")
@@ -208,6 +216,10 @@ class DemandBid:
         """Return a stable order identifier for detailed demand reporting."""
 
         return self.bid_id or self.unit_name
+
+    @property
+    def side(self) -> str:
+        return "buy"
 
 
 @dataclass(frozen=True)
@@ -238,6 +250,16 @@ class SupplyOffer:
     def __post_init__(self) -> None:
         """Enforce the deliberately narrow V2 minimum-acceptance contract."""
 
+        if self.delivery_end <= self.delivery_start:
+            raise ValueError("A supply offer must have a positive delivery duration.")
+        if not isfinite(self.offered_power_mw) or self.offered_power_mw < 0:
+            raise ValueError("Offered power must be a non-negative finite value.")
+        if not isfinite(self.offered_energy_mwh) or self.offered_energy_mwh < 0:
+            raise ValueError("Offered energy must be a non-negative finite value.")
+        if not isfinite(self.bid_price_eur_per_mwh):
+            raise ValueError("Supply offer price must be finite.")
+        if not isfinite(self.marginal_cost_eur_per_mwh):
+            raise ValueError("Supply marginal cost must be finite.")
         if self.bid_type not in {"SB", "BB", "LB"}:
             raise ValueError(f"Unsupported bid_type {self.bid_type!r}.")
         if not isfinite(self.min_acceptance_ratio):
@@ -260,6 +282,10 @@ class SupplyOffer:
         """Return the order identity shared by legs of a block bid."""
 
         return self.bid_id or self.identifier
+
+    @property
+    def side(self) -> str:
+        return "sell"
 
 
 @dataclass(frozen=True)
@@ -325,6 +351,32 @@ class ClearedDemandBid:
 
 
 @dataclass(frozen=True)
+class Trade:
+    """One immutable buyer-seller match in a pay-as-bid product."""
+
+    delivery_start: datetime
+    delivery_end: datetime
+    buyer_name: str
+    buyer_bid_id: str
+    seller_name: str
+    seller_offer_id: str
+    trade_energy_mwh: float
+    trade_price_eur_per_mwh: float
+
+    def __post_init__(self) -> None:
+        if self.delivery_end <= self.delivery_start:
+            raise ValueError("A trade must have a positive delivery duration.")
+        if self.trade_energy_mwh <= 0:
+            raise ValueError("Trade energy must be positive.")
+        if not isfinite(self.trade_price_eur_per_mwh):
+            raise ValueError("Trade price must be finite.")
+
+    @property
+    def payment_eur(self) -> float:
+        return self.trade_energy_mwh * self.trade_price_eur_per_mwh
+
+
+@dataclass(frozen=True)
 class MarketClearingResult:
     """One delivery product's cleared market state."""
 
@@ -334,12 +386,13 @@ class MarketClearingResult:
     cleared_energy_mwh: float
     unserved_load_mwh: float
     unfulfilled_export_mwh: float
-    clearing_price_eur_per_mwh: float
+    clearing_price_eur_per_mwh: float | None
     offers: tuple[ClearedSupplyOffer, ...]
     demand_bids: tuple[ClearedDemandBid, ...]
     marginal_unit_name: str | None
     pricing_method: str = "merit_order"
     opening_time: datetime | None = None
+    trades: tuple[Trade, ...] = ()
 
     def __post_init__(self) -> None:
         """Guard the physical and financial quantities used by reporting and plots."""
@@ -348,7 +401,12 @@ class MarketClearingResult:
             raise ValueError("A market product must have a positive delivery duration.")
         if self.opening_time is not None and self.opening_time > self.delivery_start:
             raise ValueError("A market opening cannot occur after delivery starts.")
-        if not isfinite(self.clearing_price_eur_per_mwh):
+        if self.pricing_method == "pay_as_bid":
+            if self.clearing_price_eur_per_mwh is not None:
+                raise ValueError("Pay-as-bid markets do not have one clearing price.")
+        elif self.clearing_price_eur_per_mwh is None or not isfinite(
+            self.clearing_price_eur_per_mwh
+        ):
             raise ValueError("The clearing price must be finite.")
         if any(
             value < -_ENERGY_TOLERANCE_MWH
@@ -382,7 +440,7 @@ class MarketClearingResult:
             for cleared in self.demand_bids
         ):
             raise ValueError("Accepted energy must be between zero and the submitted volume.")
-        if any(
+        if self.pricing_method != "pay_as_bid" and any(
             not isclose(
                 cleared.clearing_price_eur_per_mwh,
                 self.clearing_price_eur_per_mwh,
@@ -468,8 +526,11 @@ class MarketClearingResult:
                 "Unfulfilled export must equal the unmet export demand energy."
             )
 
-        if self.pricing_method not in {"merit_order", "dual"}:
-            raise ValueError("pricing_method must be merit_order or dual.")
+        if self.pricing_method not in {"merit_order", "dual", "pay_as_bid"}:
+            raise ValueError("pricing_method must be merit_order, dual, or pay_as_bid.")
+
+        if self.pricing_method == "pay_as_bid":
+            self._validate_pay_as_bid_trades()
         offer_names_set = {cleared.offer.unit_name for cleared in self.offers}
         if self.pricing_method == "merit_order" and self.cleared_energy_mwh > _ENERGY_TOLERANCE_MWH:
             if self.marginal_unit_name is None:
@@ -633,7 +694,204 @@ class MarketClearingResult:
 
     @property
     def transaction_value_eur(self) -> float:
+        if self.pricing_method == "pay_as_bid":
+            return sum(trade.payment_eur for trade in self.trades)
+        assert self.clearing_price_eur_per_mwh is not None
         return self.cleared_energy_mwh * self.clearing_price_eur_per_mwh
+
+    @property
+    def average_trade_price_eur_per_mwh(self) -> float | None:
+        if not self.trades:
+            return None
+        return sum(trade.payment_eur for trade in self.trades) / sum(
+            trade.trade_energy_mwh for trade in self.trades
+        )
+
+    def _validate_pay_as_bid_trades(self) -> None:
+        """Reconcile immutable trades with accepted order quantities and prices."""
+
+        if any(
+            trade.delivery_start != self.delivery_start
+            or trade.delivery_end != self.delivery_end
+            for trade in self.trades
+        ):
+            raise ValueError("All trades must share the market product.")
+        trade_energy = sum(trade.trade_energy_mwh for trade in self.trades)
+        if not isclose(
+            trade_energy,
+            self.cleared_energy_mwh,
+            rel_tol=0.0,
+            abs_tol=_ENERGY_TOLERANCE_MWH,
+        ):
+            raise ValueError("Trade energy must equal cleared market energy.")
+
+        offers = {cleared.offer.identifier: cleared for cleared in self.offers}
+        bids = {cleared.bid.identifier: cleared for cleared in self.demand_bids}
+        traded_by_offer: dict[str, float] = {}
+        traded_by_bid: dict[str, float] = {}
+        payment_by_bid: dict[str, float] = {}
+        for trade in self.trades:
+            if trade.seller_offer_id not in offers:
+                raise ValueError(f"Unknown seller offer {trade.seller_offer_id!r}.")
+            if trade.buyer_bid_id not in bids:
+                raise ValueError(f"Unknown buyer bid {trade.buyer_bid_id!r}.")
+            offer = offers[trade.seller_offer_id].offer
+            bid = bids[trade.buyer_bid_id].bid
+            if trade.seller_name != offer.unit_name or trade.buyer_name != bid.unit_name:
+                raise ValueError("Trade participant names must match their order IDs.")
+            if not isclose(
+                trade.trade_price_eur_per_mwh,
+                offer.bid_price_eur_per_mwh,
+                rel_tol=0.0,
+                abs_tol=_ENERGY_TOLERANCE_MWH,
+            ):
+                raise ValueError("Pay-as-bid trade price must equal the seller offer price.")
+            if trade.trade_price_eur_per_mwh > bid.price_eur_per_mwh + _ENERGY_TOLERANCE_MWH:
+                raise ValueError("A trade price cannot exceed the buyer bid price.")
+            traded_by_offer[trade.seller_offer_id] = (
+                traded_by_offer.get(trade.seller_offer_id, 0.0)
+                + trade.trade_energy_mwh
+            )
+            traded_by_bid[trade.buyer_bid_id] = (
+                traded_by_bid.get(trade.buyer_bid_id, 0.0)
+                + trade.trade_energy_mwh
+            )
+            payment_by_bid[trade.buyer_bid_id] = (
+                payment_by_bid.get(trade.buyer_bid_id, 0.0) + trade.payment_eur
+            )
+
+        for identifier, cleared in offers.items():
+            accepted = traded_by_offer.get(identifier, 0.0)
+            if not isclose(
+                accepted,
+                cleared.accepted_energy_mwh,
+                rel_tol=0.0,
+                abs_tol=_ENERGY_TOLERANCE_MWH,
+            ):
+                raise ValueError("Trade quantities must reconcile to seller acceptance.")
+            expected_price = (
+                cleared.offer.bid_price_eur_per_mwh
+                if accepted > _ENERGY_TOLERANCE_MWH
+                else 0.0
+            )
+            if not isclose(
+                cleared.clearing_price_eur_per_mwh,
+                expected_price,
+                rel_tol=0.0,
+                abs_tol=_ENERGY_TOLERANCE_MWH,
+            ):
+                raise ValueError(
+                    "A pay-as-bid seller must settle at its own offer price."
+                )
+        for identifier, cleared in bids.items():
+            accepted = traded_by_bid.get(identifier, 0.0)
+            if not isclose(
+                accepted,
+                cleared.accepted_energy_mwh,
+                rel_tol=0.0,
+                abs_tol=_ENERGY_TOLERANCE_MWH,
+            ):
+                raise ValueError("Trade quantities must reconcile to buyer acceptance.")
+            if not isclose(
+                payment_by_bid.get(identifier, 0.0),
+                cleared.payment_eur,
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            ):
+                raise ValueError("Trade payments must reconcile to buyer payment.")
+
+
+@dataclass(frozen=True)
+class HouseholdUnit:
+    """One building participant with a heat pump and an internal battery."""
+
+    name: str
+    operator: str
+    node: str
+    bidding_strategy: str
+    objective: str
+    flexibility_measure: str
+    cost_tolerance_percent: float
+    is_prosumer: bool
+    fixed_power_mw: float
+    heat_pump_max_power_mw: float
+    heat_pump_min_power_mw: float
+    heat_pump_ramp_up_mw: float
+    heat_pump_ramp_down_mw: float
+    cop: float
+    battery_capacity_mwh: float
+    battery_min_soc: float
+    battery_max_soc: float
+    battery_initial_soc: float
+    battery_efficiency_charge: float
+    battery_efficiency_discharge: float
+    battery_max_charge_power_mw: float
+    battery_max_discharge_power_mw: float
+    battery_ramp_up_mw: float
+    battery_ramp_down_mw: float
+    battery_loss_rate: float = 0.0
+    bid_price_eur_per_mwh: float = 3000.0
+
+    @property
+    def initial_energy_mwh(self) -> float:
+        return self.battery_capacity_mwh * self.battery_initial_soc
+
+    @property
+    def min_energy_mwh(self) -> float:
+        return self.battery_capacity_mwh * self.battery_min_soc
+
+    @property
+    def max_energy_mwh(self) -> float:
+        return self.battery_capacity_mwh * self.battery_max_soc
+
+
+@dataclass(frozen=True)
+class HouseholdPlan:
+    """A household's forecast-based schedule for one delivery product."""
+
+    delivery_start: datetime
+    delivery_end: datetime
+    unit_name: str
+    forecast_price_eur_per_mwh: float
+    heat_demand_mw_th: float
+    fixed_power_mw: float
+    planned_grid_power_mw: float
+    planned_heat_pump_power_mw: float
+    planned_battery_charge_power_mw: float
+    planned_battery_discharge_power_mw: float
+    planned_soc_after: float
+
+
+@dataclass(frozen=True)
+class HouseholdDispatchResult:
+    """Actual building operation after the corresponding buy order clears."""
+
+    opening_time: datetime
+    delivery_start: datetime
+    delivery_end: datetime
+    unit_name: str
+    forecast_price_eur_per_mwh: float
+    heat_demand_mw_th: float
+    fixed_power_mw: float
+    planned_grid_power_mw: float
+    heat_pump_power_mw: float
+    battery_charge_power_mw: float
+    battery_discharge_power_mw: float
+    soc_before: float
+    soc_after: float
+    unmet_electricity_mwh: float
+    unmet_heat_mwh_th: float
+
+
+@dataclass(frozen=True)
+class HouseholdFlexibilityResult:
+    """Cost-tolerant grid-power bounds for one planned household product."""
+
+    delivery_start: datetime
+    delivery_end: datetime
+    unit_name: str
+    minimum_grid_power_mw: float
+    maximum_grid_power_mw: float
 
 
 @dataclass(frozen=True)
@@ -643,6 +901,8 @@ class SimulationResult:
     settings: MarketSettings
     market_results: tuple[MarketClearingResult, ...]
     storage_results: tuple[StorageDispatchResult, ...] = ()
+    household_results: tuple[HouseholdDispatchResult, ...] = ()
+    household_flexibility_results: tuple[HouseholdFlexibilityResult, ...] = ()
 
 
 @dataclass(frozen=True)

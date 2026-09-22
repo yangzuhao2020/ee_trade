@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import csv
 from collections import defaultdict
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 from .models import SimulationResult
+
+
+_SETTLEMENT_QUANTUM = Decimal("0.000000000001")
 
 
 def _timestamp(value: datetime) -> str:
@@ -17,6 +21,24 @@ def _timestamp(value: datetime) -> str:
 
 def _number(value: float) -> str:
     return f"{value:.6f}"
+
+
+def _optional_number(value: float | None) -> str:
+    return "" if value is None else _number(value)
+
+
+def _settlement_decimal(value: float) -> Decimal:
+    return Decimal(str(value)).quantize(
+        _SETTLEMENT_QUANTUM,
+        rounding=ROUND_HALF_UP,
+    )
+
+
+def _settlement_number(value: Decimal) -> str:
+    return format(
+        value.quantize(_SETTLEMENT_QUANTUM, rounding=ROUND_HALF_UP),
+        "f",
+    )
 
 
 def _write_rows(path: Path, fields: list[str], rows: Iterable[dict[str, str]]) -> None:
@@ -39,6 +61,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
     unit_rows = []
     offer_rows = []
     demand_rows = []
+    trade_rows = []
     exchange_rows = []
     operator_totals: dict[str, dict[str, float]] = defaultdict(
         lambda: {
@@ -51,6 +74,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         }
     )
     for market_result in sorted_results:
+        reported_payments_by_bid: dict[str, Decimal] = defaultdict(Decimal)
         opening_time = market_result.opening_time or market_result.delivery_start
         opening_id = opening_time.isoformat()
         duration_hours = (
@@ -104,8 +128,11 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "exchange_market_cash_flow_eur": _number(
                     market_result.exchange_cash_flow_eur
                 ),
-                "clearing_price_eur_per_mwh": _number(
+                "clearing_price_eur_per_mwh": _optional_number(
                     market_result.clearing_price_eur_per_mwh
+                ),
+                "average_trade_price_eur_per_mwh": _optional_number(
+                    market_result.average_trade_price_eur_per_mwh
                 ),
                 "pricing_method": market_result.pricing_method,
                 "total_transaction_value_eur": _number(
@@ -113,6 +140,28 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 ),
             }
         )
+        for trade in market_result.trades:
+            reported_energy = _settlement_decimal(trade.trade_energy_mwh)
+            reported_price = _settlement_decimal(trade.trade_price_eur_per_mwh)
+            reported_payment = (reported_energy * reported_price).quantize(
+                _SETTLEMENT_QUANTUM,
+                rounding=ROUND_HALF_UP,
+            )
+            reported_payments_by_bid[trade.buyer_bid_id] += reported_payment
+            trade_rows.append(
+                {
+                    "delivery_start": _timestamp(trade.delivery_start),
+                    "delivery_end": _timestamp(trade.delivery_end),
+                    "opening_id": opening_id,
+                    "buyer_name": trade.buyer_name,
+                    "buyer_bid_id": trade.buyer_bid_id,
+                    "seller_name": trade.seller_name,
+                    "seller_offer_id": trade.seller_offer_id,
+                    "trade_energy_mwh": _settlement_number(reported_energy),
+                    "trade_price_eur_per_mwh": _settlement_number(reported_price),
+                    "payment_eur": _settlement_number(reported_payment),
+                }
+            )
         for cleared in market_result.demand_bids:
             demand_rows.append(
                 {
@@ -123,6 +172,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     "unit_name": cleared.bid.unit_name,
                     "unit_operator": cleared.bid.operator,
                     "bid_id": cleared.bid.identifier,
+                    "side": cleared.bid.side,
                     "bid_type": cleared.bid.bid_type,
                     "demand_type": cleared.bid.demand_type or "",
                     "bid_price_eur_per_mwh": _number(
@@ -134,7 +184,13 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     "clearing_price_eur_per_mwh": _number(
                         cleared.clearing_price_eur_per_mwh
                     ),
-                    "payment_eur": _number(cleared.payment_eur),
+                    "payment_eur": (
+                        _settlement_number(
+                            reported_payments_by_bid[cleared.bid.identifier]
+                        )
+                        if market_result.pricing_method == "pay_as_bid"
+                        else _number(cleared.payment_eur)
+                    ),
                 }
             )
         powerplant_offers = [
@@ -154,6 +210,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     "unit_operator": offer.operator,
                     "technology": offer.technology,
                     "offer_id": offer.identifier,
+                    "side": offer.side,
                     "bid_id": offer.complex_identifier,
                     "bid_type": offer.bid_type,
                     "min_acceptance_ratio": _number(offer.min_acceptance_ratio),
@@ -224,6 +281,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     "unit_name": unit_name,
                     "unit_operator": first_offer.operator,
                     "technology": first_offer.technology,
+                    "side": first_offer.side,
                     "marginal_cost_eur_per_mwh": _number(
                         first_offer.marginal_cost_eur_per_mwh
                     ),
@@ -234,7 +292,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     "offered_energy_mwh": _number(offered_energy_mwh),
                     "accepted_power_mw": _number(accepted_power_mw),
                     "accepted_energy_mwh": _number(accepted_energy_mwh),
-                    "clearing_price_eur_per_mwh": _number(
+                    "clearing_price_eur_per_mwh": _optional_number(
                         market_result.clearing_price_eur_per_mwh
                     ),
                     "revenue_eur": _number(revenue_eur),
@@ -372,6 +430,42 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             }
         )
 
+    household_rows = [
+        {
+            "delivery_start": _timestamp(result.delivery_start),
+            "delivery_end": _timestamp(result.delivery_end),
+            "unit_name": result.unit_name,
+            "forecast_price_eur_per_mwh": _number(
+                result.forecast_price_eur_per_mwh
+            ),
+            "heat_demand_mw_th": _number(result.heat_demand_mw_th),
+            "fixed_power_mw": _number(result.fixed_power_mw),
+            "planned_grid_power_mw": _number(result.planned_grid_power_mw),
+            "heat_pump_power_mw": _number(result.heat_pump_power_mw),
+            "battery_charge_power_mw": _number(
+                result.battery_charge_power_mw
+            ),
+            "battery_discharge_power_mw": _number(
+                result.battery_discharge_power_mw
+            ),
+            "soc_before": _number(result.soc_before),
+            "soc_after": _number(result.soc_after),
+            "unmet_electricity_mwh": _number(result.unmet_electricity_mwh),
+            "unmet_heat_mwh_th": _number(result.unmet_heat_mwh_th),
+        }
+        for result in simulation_result.household_results
+    ]
+    flexibility_rows = [
+        {
+            "delivery_start": _timestamp(result.delivery_start),
+            "delivery_end": _timestamp(result.delivery_end),
+            "unit_name": result.unit_name,
+            "minimum_grid_power_mw": _number(result.minimum_grid_power_mw),
+            "maximum_grid_power_mw": _number(result.maximum_grid_power_mw),
+        }
+        for result in simulation_result.household_flexibility_results
+    ]
+
     _write_rows(
         output_dir / "market_results.csv",
         [
@@ -400,6 +494,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "net_exchange_mwh",
             "exchange_market_cash_flow_eur",
             "clearing_price_eur_per_mwh",
+            "average_trade_price_eur_per_mwh",
             "pricing_method",
             "total_transaction_value_eur",
         ],
@@ -415,6 +510,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "unit_name",
             "unit_operator",
             "bid_id",
+            "side",
             "bid_type",
             "demand_type",
             "bid_price_eur_per_mwh",
@@ -426,6 +522,23 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         ],
         demand_rows,
     )
+    if simulation_result.settings.market_mechanism == "pay_as_bid" or trade_rows:
+        _write_rows(
+            output_dir / "trade_results.csv",
+            [
+                "delivery_start",
+                "delivery_end",
+                "opening_id",
+                "buyer_name",
+                "buyer_bid_id",
+                "seller_name",
+                "seller_offer_id",
+                "trade_energy_mwh",
+                "trade_price_eur_per_mwh",
+                "payment_eur",
+            ],
+            trade_rows,
+        )
     _write_rows(
         output_dir / "unit_results.csv",
         [
@@ -436,6 +549,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "unit_name",
             "unit_operator",
             "technology",
+            "side",
             "marginal_cost_eur_per_mwh",
             "bid_price_eur_per_mwh",
             "offered_power_mw",
@@ -542,6 +656,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "unit_operator",
                 "technology",
                 "offer_id",
+                "side",
                 "bid_id",
                 "bid_type",
                 "min_acceptance_ratio",
@@ -562,4 +677,36 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "profit_eur",
             ],
             offer_rows,
+        )
+    if simulation_result.settings.market_mechanism == "pay_as_bid" or household_rows:
+        _write_rows(
+            output_dir / "household_results.csv",
+            [
+                "delivery_start",
+                "delivery_end",
+                "unit_name",
+                "forecast_price_eur_per_mwh",
+                "heat_demand_mw_th",
+                "fixed_power_mw",
+                "planned_grid_power_mw",
+                "heat_pump_power_mw",
+                "battery_charge_power_mw",
+                "battery_discharge_power_mw",
+                "soc_before",
+                "soc_after",
+                "unmet_electricity_mwh",
+                "unmet_heat_mwh_th",
+            ],
+            household_rows,
+        )
+        _write_rows(
+            output_dir / "household_flexibility_results.csv",
+            [
+                "delivery_start",
+                "delivery_end",
+                "unit_name",
+                "minimum_grid_power_mw",
+                "maximum_grid_power_mw",
+            ],
+            flexibility_rows,
         )

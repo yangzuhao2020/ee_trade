@@ -7,9 +7,17 @@ from collections import defaultdict
 from datetime import datetime
 from math import isfinite
 from pathlib import Path
+import warnings
 
 from .errors import InputValidationError
-from .models import DemandUnit, ExchangeSchedule, ExchangeUnit, PowerPlant, StorageUnit
+from .models import (
+    DemandUnit,
+    ExchangeSchedule,
+    ExchangeUnit,
+    HouseholdUnit,
+    PowerPlant,
+    StorageUnit,
+)
 
 
 def _read_rows(path: Path) -> list[dict[str, str]]:
@@ -289,12 +297,16 @@ def load_demand_units(path: Path) -> tuple[DemandUnit, ...]:
             )
         operator = _require(row, "unit_operator", path, row_number)
         if strategy == "demand_energy_naive":
+            price = _optional_float(
+                row, "price", float("nan"), path, row_number
+            )
             units.append(
                 DemandUnit(
                     name=name,
                     operator=operator,
                     bidding_strategy=strategy,
                     profile_column=name,
+                    price_eur_per_mwh=(price if isfinite(price) else None),
                 )
             )
             continue
@@ -339,6 +351,333 @@ def load_demand_units(path: Path) -> tuple[DemandUnit, ...]:
             )
         units.append(unit)
     return tuple(units)
+
+
+def _first_nonempty(
+    rows: list[tuple[int, dict[str, str]]],
+    column: str,
+    path: Path,
+    *,
+    required: bool = True,
+) -> str | None:
+    values = {
+        row.get(column, "").strip()
+        for _, row in rows
+        if row.get(column, "").strip()
+    }
+    if len(values) > 1:
+        raise InputValidationError(
+            f"{path.name}: rows for one building disagree on {column!r}."
+        )
+    if not values:
+        if required:
+            raise InputValidationError(
+                f"{path.name}: building field {column!r} is not configured."
+            )
+        return None
+    return values.pop()
+
+
+def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
+    """Merge heat-pump and battery rows into building-level V3 participants."""
+
+    if not path.is_file():
+        return ()
+    raw_rows = _read_rows(path)
+    grouped: dict[str, list[tuple[int, dict[str, str]]]] = defaultdict(list)
+    for row_number, row in enumerate(raw_rows, start=2):
+        grouped[_require(row, "name", path, row_number)].append((row_number, row))
+
+    households: list[HouseholdUnit] = []
+    for name, rows in sorted(grouped.items()):
+        by_technology: dict[str, tuple[int, dict[str, str]]] = {}
+        for row_number, row in rows:
+            technology = _require(row, "technology", path, row_number)
+            if technology in by_technology:
+                raise InputValidationError(
+                    f"{path.name}: building {name!r} has duplicate {technology!r} rows."
+                )
+            by_technology[technology] = (row_number, row)
+        missing = {"heat_pump", "generic_storage"} - by_technology.keys()
+        if missing:
+            raise InputValidationError(
+                f"{path.name}: building {name!r} is missing device rows: "
+                + ", ".join(sorted(missing))
+                + "."
+            )
+        unsupported = by_technology.keys() - {"heat_pump", "generic_storage"}
+        if unsupported:
+            raise InputValidationError(
+                f"{path.name}: building {name!r} has unsupported devices: "
+                + ", ".join(sorted(unsupported))
+                + "."
+            )
+
+        heat_number, heat = by_technology["heat_pump"]
+        battery_number, battery = by_technology["generic_storage"]
+        strategy = _first_nonempty(rows, "bidding_EOM", path)
+        if strategy != "household_energy_optimization":
+            raise InputValidationError(
+                f"{path.name}: building {name!r} uses unsupported bidding_EOM "
+                f"{strategy!r}."
+            )
+        prosumer_raw = (_first_nonempty(
+            rows, "is_prosumer", path, required=False
+        ) or "No").lower()
+        if prosumer_raw not in {"yes", "no"}:
+            raise InputValidationError(
+                f"{path.name}: building {name!r} is_prosumer must be Yes or No."
+            )
+        cost_tolerance_raw = _first_nonempty(rows, "cost_tolerance", path) or "0"
+        try:
+            cost_tolerance = float(cost_tolerance_raw)
+        except ValueError as exc:
+            raise InputValidationError(
+                f"{path.name}: building {name!r} cost_tolerance must be numeric, "
+                f"got {cost_tolerance_raw!r}."
+            ) from exc
+        if not isfinite(cost_tolerance) or cost_tolerance < 0:
+            raise InputValidationError(
+                f"{path.name}: building {name!r} cost_tolerance must be a "
+                "non-negative finite value."
+            )
+        heat_min_operating_time = _optional_float(
+            heat, "min_operating_time", 0.0, path, heat_number
+        )
+        if heat_min_operating_time != 0:
+            raise InputValidationError(
+                f"{path.name}: building {name!r} non-zero heat-pump "
+                "min_operating_time is not supported in version three."
+            )
+
+        household = HouseholdUnit(
+            name=name,
+            operator=_first_nonempty(rows, "unit_operator", path) or "",
+            node=_first_nonempty(rows, "node", path) or "",
+            bidding_strategy=strategy,
+            objective=_first_nonempty(rows, "objective", path) or "",
+            flexibility_measure=_first_nonempty(
+                rows, "flexibility_measure", path
+            ) or "",
+            cost_tolerance_percent=cost_tolerance,
+            is_prosumer=prosumer_raw == "yes",
+            fixed_power_mw=0.0,
+            heat_pump_max_power_mw=_float(
+                heat, "max_power", path, heat_number
+            ),
+            heat_pump_min_power_mw=_float(
+                heat, "min_power", path, heat_number
+            ),
+            heat_pump_ramp_up_mw=_float(heat, "ramp_up", path, heat_number),
+            heat_pump_ramp_down_mw=_float(
+                heat, "ramp_down", path, heat_number
+            ),
+            cop=_float(heat, "cop", path, heat_number),
+            battery_capacity_mwh=_float(
+                battery, "capacity", path, battery_number
+            ),
+            battery_min_soc=_float(battery, "min_soc", path, battery_number),
+            battery_max_soc=_optional_float(
+                battery, "max_soc", 1.0, path, battery_number
+            ),
+            battery_initial_soc=_float(
+                battery, "initial_soc", path, battery_number
+            ),
+            battery_efficiency_charge=_float(
+                battery, "efficiency_charge", path, battery_number
+            ),
+            battery_efficiency_discharge=_float(
+                battery, "efficiency_discharge", path, battery_number
+            ),
+            battery_max_charge_power_mw=_float(
+                battery, "max_charging_rate", path, battery_number
+            ),
+            battery_max_discharge_power_mw=_float(
+                battery, "max_discharging_rate", path, battery_number
+            ),
+            battery_ramp_up_mw=_float(
+                battery, "ramp_up", path, battery_number
+            ),
+            battery_ramp_down_mw=_float(
+                battery, "ramp_down", path, battery_number
+            ),
+            battery_loss_rate=_optional_float(
+                battery, "storage_loss_rate", 0.0, path, battery_number
+            ),
+        )
+        if household.objective != "min_variable_cost":
+            raise InputValidationError(
+                f"{path.name}: building {name!r} objective must be min_variable_cost."
+            )
+        if household.flexibility_measure != "cost_based_load_shift":
+            raise InputValidationError(
+                f"{path.name}: building {name!r} flexibility_measure must be "
+                "cost_based_load_shift."
+            )
+        if household.is_prosumer:
+            raise InputValidationError(
+                f"{path.name}: version three currently requires is_prosumer=No."
+            )
+        if household.cop <= 0 or household.heat_pump_max_power_mw <= 0:
+            raise InputValidationError(
+                f"{path.name}: building {name!r} heat-pump limits and COP must be positive."
+            )
+        if not (
+            0
+            <= household.heat_pump_min_power_mw
+            <= household.heat_pump_max_power_mw
+        ):
+            raise InputValidationError(
+                f"{path.name}: building {name!r} has invalid heat-pump power limits."
+            )
+        if household.battery_capacity_mwh <= 0:
+            raise InputValidationError(
+                f"{path.name}: building {name!r} battery capacity must be positive."
+            )
+        if not (
+            0
+            <= household.battery_min_soc
+            <= household.battery_initial_soc
+            <= household.battery_max_soc
+            <= 1
+        ):
+            raise InputValidationError(
+                f"{path.name}: building {name!r} has invalid SOC limits."
+            )
+        if not (
+            0 < household.battery_efficiency_charge <= 1
+            and 0 < household.battery_efficiency_discharge <= 1
+        ):
+            raise InputValidationError(
+                f"{path.name}: building {name!r} battery efficiencies must be in (0, 1]."
+            )
+        if min(
+            household.battery_max_charge_power_mw,
+            household.battery_max_discharge_power_mw,
+            household.battery_ramp_up_mw,
+            household.battery_ramp_down_mw,
+        ) < 0:
+            raise InputValidationError(
+                f"{path.name}: building {name!r} battery power and ramp limits "
+                "cannot be negative."
+            )
+        if not 0 <= household.battery_loss_rate < 1:
+            raise InputValidationError(
+                f"{path.name}: building {name!r} storage_loss_rate must be in "
+                "[0, 1)."
+            )
+        households.append(household)
+    return tuple(households)
+
+
+def load_time_series_profiles(
+    path: Path,
+    required_columns: tuple[str, ...],
+    *,
+    warn_unused_columns: bool = False,
+) -> dict[str, dict[datetime, float]]:
+    """Load exact-resolution V3 profiles without hourly aggregation."""
+
+    if not path.is_file():
+        raise InputValidationError(f"Missing required input file: {path}")
+    with path.open(encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+        if not reader.fieldnames or "datetime" not in reader.fieldnames:
+            raise InputValidationError(f"{path.name} must include a 'datetime' column.")
+        missing = [column for column in required_columns if column not in reader.fieldnames]
+        if missing:
+            raise InputValidationError(
+                f"{path.name} is missing columns: {', '.join(missing)}."
+            )
+        unused = [
+            column
+            for column in reader.fieldnames
+            if column != "datetime" and column not in required_columns
+        ]
+        if warn_unused_columns and unused:
+            warnings.warn(
+                f"{path.name}: ignored unused columns: {', '.join(unused)}.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        profiles = {column: {} for column in required_columns}
+        seen: set[datetime] = set()
+        for row_number, row in enumerate(reader, start=2):
+            timestamp = _parse_datetime(row["datetime"], path, row_number)
+            if timestamp in seen:
+                raise InputValidationError(
+                    f"{path.name}, row {row_number}: duplicate timestamp "
+                    f"{timestamp.isoformat(sep=' ')}."
+                )
+            seen.add(timestamp)
+            for column in required_columns:
+                profiles[column][timestamp] = _float(
+                    row, column, path, row_number
+                )
+    return profiles
+
+
+def load_fuel_price_profiles(path: Path) -> dict[datetime, dict[str, float]]:
+    """Load time-indexed fuel and CO2 prices used by the 15-minute scenario."""
+
+    if not path.is_file():
+        raise InputValidationError(f"Missing required input file: {path}")
+    with path.open(encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+        if not reader.fieldnames or "datetime" not in reader.fieldnames:
+            raise InputValidationError(
+                f"{path.name} must include a 'datetime' column for pay_as_bid."
+            )
+        price_columns = [column for column in reader.fieldnames if column != "datetime"]
+        if "co2" not in price_columns:
+            raise InputValidationError(f"{path.name} must provide a 'co2' column.")
+        profiles: dict[datetime, dict[str, float]] = {}
+        for row_number, row in enumerate(reader, start=2):
+            timestamp = _parse_datetime(row["datetime"], path, row_number)
+            if timestamp in profiles:
+                raise InputValidationError(
+                    f"{path.name}, row {row_number}: duplicate timestamp "
+                    f"{timestamp.isoformat(sep=' ')}."
+                )
+            profiles[timestamp] = {
+                column: _float(row, column, path, row_number)
+                for column in price_columns
+            }
+    return profiles
+
+
+def load_exact_availability_profiles(
+    path: Path, plants: tuple[PowerPlant, ...]
+) -> dict[str, dict[datetime, float]]:
+    """Load exact plant-name profiles; absent plants use availability 1.0."""
+
+    if not path.is_file():
+        return {}
+    with path.open(encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+        if not reader.fieldnames or "datetime" not in reader.fieldnames:
+            raise InputValidationError(f"{path.name} must include a 'datetime' column.")
+        plant_names = {plant.name for plant in plants}
+        columns = [column for column in reader.fieldnames if column in plant_names]
+        profiles = {column: {} for column in columns}
+        seen: set[datetime] = set()
+        for row_number, row in enumerate(reader, start=2):
+            timestamp = _parse_datetime(row["datetime"], path, row_number)
+            if timestamp in seen:
+                raise InputValidationError(
+                    f"{path.name}, row {row_number}: duplicate timestamp "
+                    f"{timestamp.isoformat(sep=' ')}."
+                )
+            seen.add(timestamp)
+            for column in columns:
+                value = _float(row, column, path, row_number)
+                if not 0 <= value <= 1:
+                    raise InputValidationError(
+                        f"{path.name}, row {row_number}: availability for {column!r} "
+                        "must be between 0 and 1."
+                    )
+                profiles[column][timestamp] = value
+    return profiles
 
 
 def load_exchange_unit(path: Path) -> ExchangeUnit:
@@ -403,10 +742,15 @@ def load_fuel_prices(path: Path) -> dict[str, float]:
 def _parse_datetime(raw: str, path: Path, row_number: int) -> datetime:
     try:
         return datetime.fromisoformat(raw.strip())
-    except ValueError as exc:
+    except ValueError:
+        for date_format in ("%m/%d/%Y %H:%M", "%m/%d/%Y %H:%M:%S"):
+            try:
+                return datetime.strptime(raw.strip(), date_format)
+            except ValueError:
+                continue
         raise InputValidationError(
             f"{path.name}, row {row_number}: invalid datetime {raw!r}."
-        ) from exc
+        )
 
 
 def _hour_start(timestamp: datetime) -> datetime:
