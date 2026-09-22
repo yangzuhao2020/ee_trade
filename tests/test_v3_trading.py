@@ -29,6 +29,7 @@ from electricity_market_sim.models import (
     SimulationResult,
     SupplyOffer,
 )
+from electricity_market_sim.plotting import generate_plots
 from electricity_market_sim.reporting import write_results
 from electricity_market_sim.simulation import run_simulation
 
@@ -149,6 +150,44 @@ class PayAsBidTests(unittest.TestCase):
                 * Decimal(row["trade_price_eur_per_mwh"])
             ).quantize(Decimal("0.000000000001"))
             self.assertEqual(Decimal(row["payment_eur"]), expected_payment)
+
+    def test_pay_as_bid_plots_use_the_trade_price_path(self) -> None:
+        result = clear_pay_as_bid(
+            [self.demand("A360", 2, 3000, "household_load")],
+            [self.offer("seller-1", 1, 20), self.offer("seller-2", 1, 30)],
+        )
+        settings = MarketSettings(
+            start=self.start - timedelta(minutes=15),
+            end=self.end,
+            time_step=timedelta(minutes=15),
+            opening_frequency=timedelta(days=1),
+            opening_duration=timedelta(minutes=15),
+            product_duration=timedelta(minutes=15),
+            product_count=1,
+            first_delivery=timedelta(minutes=15),
+            maximum_bid_price=3000,
+            minimum_bid_price=-500,
+            market_mechanism="pay_as_bid",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            paths = generate_plots(
+                SimulationResult(settings=settings, market_results=(result,)),
+                Path(temporary_directory),
+            )
+
+            self.assertEqual(
+                {path.name for path in paths},
+                {
+                    "market_overview.png",
+                    "market_summary.png",
+                    "dispatch_by_unit.png",
+                    "operator_profit.png",
+                    "pay_as_bid_first_product.png",
+                },
+            )
+            for path in paths:
+                self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
 
 class HouseholdTradingTests(unittest.TestCase):

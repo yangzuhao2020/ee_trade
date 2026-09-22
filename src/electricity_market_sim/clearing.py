@@ -27,15 +27,15 @@ else:
     _SCIPY_IMPORT_ERROR = None
 
 from .errors import InputValidationError
-from .models import (
+from .market_models import (
     ClearedDemandBid,
     ClearedSupplyOffer,
     DemandBid,
     MarketClearingResult,
-    StorageClearingContext,
     SupplyOffer,
     Trade,
 )
+from .models import MarketSettings, StorageClearingContext
 
 
 _EPSILON = 1e-9
@@ -48,6 +48,42 @@ def _require_complex_optimizer() -> None:
             "Complex market clearing requires SciPy optimization support "
             f"(milp and linprog){detail}."
         )
+
+
+def validate_offer_prices(
+    offers: list[SupplyOffer], settings: MarketSettings
+) -> None:
+    """Reject supply prices outside the configured market limits."""
+
+    for offer in offers:
+        if not (
+            settings.minimum_bid_price
+            <= offer.bid_price_eur_per_mwh
+            <= settings.maximum_bid_price
+        ):
+            raise InputValidationError(
+                f"Bid price for {offer.identifier!r} "
+                f"({offer.bid_price_eur_per_mwh:.6f} EUR/MWh) is outside "
+                "the configured bid-price limits."
+            )
+
+
+def validate_demand_prices(
+    demand_bids: list[DemandBid], settings: MarketSettings
+) -> None:
+    """Reject demand prices outside the configured market limits."""
+
+    for bid in demand_bids:
+        if not (
+            settings.minimum_bid_price
+            <= bid.price_eur_per_mwh
+            <= settings.maximum_bid_price
+        ):
+            raise InputValidationError(
+                f"Demand bid price for {bid.identifier!r} "
+                f"({bid.price_eur_per_mwh:.6f} EUR/MWh) is outside "
+                "the configured bid-price limits."
+            )
 
 
 def clear_pay_as_clear(

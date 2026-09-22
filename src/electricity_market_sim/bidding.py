@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
-from .models import DemandBid, PowerPlant, StorageUnit, SupplyOffer
+from .market_models import DemandBid, SupplyOffer
+from .models import PowerPlant, StorageUnit
 
 _POWER_TOLERANCE_MW = 1e-9
 _FORECAST_HOURS = 12
