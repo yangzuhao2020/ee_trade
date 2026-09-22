@@ -6,15 +6,15 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from .bidding import naive_offer
-from .clearing import clear_pay_as_bid, validate_demand_prices, validate_offer_prices
-from .errors import InputValidationError
-from .household import (
+from ..bidding import naive_offer
+from ..clearing import clear_pay_as_bid, validate_demand_prices, validate_offer_prices
+from ..errors import InputValidationError
+from ..household import (
     dispatch_household,
     evaluate_household_flexibility,
     optimize_household,
 )
-from .loader import (
+from ..inputs import (
     load_demand_units,
     load_exact_availability_profiles,
     load_fuel_price_profiles,
@@ -22,8 +22,8 @@ from .loader import (
     load_powerplants,
     load_time_series_profiles,
 )
-from .market_models import DemandBid, MarketClearingResult, SupplyOffer
-from .models import MarketOpening, MarketSettings, SimulationResult
+from ..market_models import DemandBid, MarketClearingResult, SupplyOffer
+from ..models import MarketOpening, MarketSettings, SimulationResult
 
 
 _POWER_TOLERANCE_MW = 1e-9

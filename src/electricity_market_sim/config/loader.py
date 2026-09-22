@@ -9,8 +9,8 @@ from typing import Any
 
 import yaml
 
-from .errors import InputValidationError
-from .models import MarketSettings
+from ..errors import InputValidationError
+from ..models import MarketSettings
 
 
 _DURATION_PATTERN = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>min|m|h|d)$")

@@ -26,8 +26,8 @@ except (ImportError, AttributeError) as exc:  # pragma: no cover - environment d
 else:
     _SCIPY_IMPORT_ERROR = None
 
-from .errors import InputValidationError
-from .market_models import (
+from ..errors import InputValidationError
+from ..market_models import (
     ClearedDemandBid,
     ClearedSupplyOffer,
     DemandBid,
@@ -35,7 +35,7 @@ from .market_models import (
     SupplyOffer,
     Trade,
 )
-from .models import MarketSettings, StorageClearingContext
+from ..models import MarketSettings, StorageClearingContext
 
 
 _EPSILON = 1e-9

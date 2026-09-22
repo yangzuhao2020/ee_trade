@@ -17,7 +17,7 @@ from electricity_market_sim.household import (
     optimize_household,
 )
 from electricity_market_sim.errors import InputValidationError
-from electricity_market_sim.loader import (
+from electricity_market_sim.inputs import (
     load_household_units,
     load_time_series_profiles,
 )
