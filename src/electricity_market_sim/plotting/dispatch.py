@@ -9,16 +9,38 @@ from pathlib import Path
 from ..models import StorageDispatchResult
 from .common import (
     _ENERGY_TOLERANCE_MWH,
+    _UNIT_COLORS,
     _annotate_no_supply,
     _format_time_axis,
     _save_figure,
 )
 
+_MAX_DISPLAYED_DISPATCH_UNITS = 10
+_MAX_DISPLAYED_OPERATORS = 20
 
-def _plot_dispatch_by_unit(pyplot, dates, results, unit_colors, path: Path) -> Path:
+
+def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
     times = [market.delivery_start for market in results]
-    unit_names = sorted(unit_colors)
-    power_by_unit = {name: [] for name in unit_names}
+    accepted_energy_by_unit: dict[str, float] = defaultdict(float)
+    for market in results:
+        for cleared in market.offers:
+            accepted_energy_by_unit[cleared.offer.unit_name] += (
+                cleared.accepted_energy_mwh
+            )
+    ranked_units = sorted(
+        (
+            name
+            for name, energy in accepted_energy_by_unit.items()
+            if energy > _ENERGY_TOLERANCE_MWH
+        ),
+        key=lambda name: (-accepted_energy_by_unit[name], name),
+    )
+    unit_names = ranked_units[:_MAX_DISPLAYED_DISPATCH_UNITS]
+    other_unit_names = set(ranked_units[_MAX_DISPLAYED_DISPATCH_UNITS:])
+    series_names = [*unit_names]
+    if other_unit_names:
+        series_names.append("Other accepted supply")
+    power_by_unit = {name: [] for name in series_names}
     demand_power: list[float] = []
     marginal_times = []
     marginal_y_positions: list[float] = []
@@ -27,24 +49,41 @@ def _plot_dispatch_by_unit(pyplot, dates, results, unit_colors, path: Path) -> P
         accepted_power: dict[str, float] = defaultdict(float)
         for cleared in market.offers:
             accepted_power[cleared.offer.unit_name] += cleared.accepted_power_mw
+        if other_unit_names:
+            accepted_power["Other accepted supply"] = sum(
+                accepted_power.get(name, 0.0) for name in other_unit_names
+            )
         cumulative_power = 0.0
-        for name in unit_names:
+        for name in series_names:
             unit_power = accepted_power.get(name, 0.0)
             power_by_unit[name].append(unit_power)
-            if name == market.marginal_unit_name and unit_power > _ENERGY_TOLERANCE_MWH:
-                # Place the marker inside the marginal unit's own stacked band.
+            contains_marginal_unit = name == market.marginal_unit_name or (
+                name == "Other accepted supply"
+                and market.marginal_unit_name in other_unit_names
+            )
+            if contains_marginal_unit and unit_power > _ENERGY_TOLERANCE_MWH:
+                # Place the marker inside the displayed band containing the
+                # marginal unit, including the aggregate band when necessary.
                 marginal_times.append(market.delivery_start)
                 marginal_y_positions.append(cumulative_power + unit_power / 2)
             cumulative_power += unit_power
         demand_power.append(market.cleared_power_mw)
 
     figure, axis = pyplot.subplots(figsize=(16, 7.5))
-    if unit_names:
+    if series_names:
+        series_colors = [
+            (
+                "#9CA3AF"
+                if name == "Other accepted supply"
+                else _UNIT_COLORS[index % len(_UNIT_COLORS)]
+            )
+            for index, name in enumerate(series_names)
+        ]
         axis.stackplot(
             times,
-            *(power_by_unit[name] for name in unit_names),
-            labels=unit_names,
-            colors=[unit_colors[name] for name in unit_names],
+            *(power_by_unit[name] for name in series_names),
+            labels=series_names,
+            colors=series_colors,
             alpha=0.78,
             step="mid",
         )
@@ -80,11 +119,17 @@ def _plot_dispatch_by_unit(pyplot, dates, results, unit_colors, path: Path) -> P
             label="Marginal unit",
             zorder=5,
         )
-    axis.set_title("Accepted dispatch by unit")
+    title = "Accepted dispatch by unit"
+    if other_unit_names:
+        title += (
+            f" — {_MAX_DISPLAYED_DISPATCH_UNITS} largest units and "
+            f"{len(other_unit_names)} aggregated"
+        )
+    axis.set_title(title)
     axis.set_ylabel("Power (MW)")
     axis.set_xlabel("Delivery start")
     axis.grid(axis="y", alpha=0.25)
-    axis.legend(loc="upper left", ncol=min(3, len(unit_names) + 2))
+    axis.legend(loc="upper left", ncol=3, fontsize=8)
     _format_time_axis(axis, dates)
     figure.tight_layout()
     return _save_figure(pyplot, figure, path)
@@ -106,9 +151,33 @@ def _plot_operator_profit(
         profits[storage.operator] += storage.net_cash_flow_eur
 
     displayed_profits = {
-        operator: (0.0 if abs(value) <= 1e-6 else value)
-        for operator, value in profits.items()
+        operator: value for operator, value in profits.items() if abs(value) > 1e-6
     }
+    ranked_operators = sorted(
+        displayed_profits,
+        key=lambda operator: (-abs(displayed_profits[operator]), operator),
+    )
+    omitted_operators = ranked_operators[_MAX_DISPLAYED_OPERATORS:]
+    displayed_profits = {
+        operator: displayed_profits[operator]
+        for operator in ranked_operators[:_MAX_DISPLAYED_OPERATORS]
+    }
+    omitted_positive = sum(
+        profits[operator] for operator in omitted_operators if profits[operator] > 0
+    )
+    omitted_negative = sum(
+        profits[operator] for operator in omitted_operators if profits[operator] < 0
+    )
+    positive_count = sum(profits[operator] > 0 for operator in omitted_operators)
+    negative_count = sum(profits[operator] < 0 for operator in omitted_operators)
+    if positive_count:
+        displayed_profits[f"Other positive operators ({positive_count})"] = (
+            omitted_positive
+        )
+    if negative_count:
+        displayed_profits[f"Other negative operators ({negative_count})"] = (
+            omitted_negative
+        )
     operators = sorted(
         displayed_profits,
         key=lambda operator: (displayed_profits[operator], operator),
@@ -116,36 +185,32 @@ def _plot_operator_profit(
     values = [displayed_profits[operator] for operator in operators]
     colors = ["#54A24B" if value >= 0 else "#E45756" for value in values]
 
-    figure, axis = pyplot.subplots(figsize=(10, max(4.5, len(operators) * 0.8 + 1.5)))
+    figure, axis = pyplot.subplots(
+        figsize=(10, min(13.5, max(4.5, len(operators) * 0.55 + 1.5)))
+    )
     bars = axis.barh(operators, values, color=colors)
     axis.axvline(0, color="#1F1F1F", linewidth=0.8)
     axis.set_title("Cumulative generation and storage result by operator")
     axis.set_xlabel("Profit / net cash flow (EUR)")
     axis.grid(axis="x", alpha=0.25)
     if not operators:
-        _annotate_no_supply(axis, "No generation or storage results")
+        _annotate_no_supply(axis, "No non-zero generation or storage results")
     maximum_magnitude = max((abs(value) for value in values), default=0.0)
-    label_offset = 0.0
     if operators:
         if maximum_magnitude <= 1e-6:
             axis.set_xlim(-1.0, 1.0)
-            label_offset = 0.03
         else:
-            label_offset = maximum_magnitude * 0.02
             lower = min([0.0, *values]) - maximum_magnitude * 0.08
             upper = max([0.0, *values]) + maximum_magnitude * 0.08
             axis.set_xlim(lower, upper)
     for bar, value in zip(bars, values):
-        horizontal_alignment = "left" if value >= 0 else "right"
-        x_position = (
-            value + label_offset if value >= 0 else value - label_offset
-        )
-        axis.text(
-            x_position,
-            bar.get_y() + bar.get_height() / 2,
+        axis.annotate(
             f"{value:,.0f}",
+            xy=(value, bar.get_y() + bar.get_height() / 2),
+            xytext=(4, 0),
+            textcoords="offset points",
             va="center",
-            ha=horizontal_alignment,
+            ha="left",
             fontsize=9,
         )
     figure.tight_layout()
@@ -156,7 +221,6 @@ def _plot_storage_dispatch(
     pyplot,
     dates,
     storage_results: tuple[StorageDispatchResult, ...],
-    unit_colors: dict[str, str],
     path: Path,
 ) -> Path:
     """Plot delivered storage power and the resulting physical SOC trajectory."""
@@ -164,6 +228,12 @@ def _plot_storage_dispatch(
     by_unit: dict[str, list[StorageDispatchResult]] = defaultdict(list)
     for storage in storage_results:
         by_unit[storage.unit_name].append(storage)
+    storage_names = sorted(by_unit)
+    storage_color_map = pyplot.get_cmap("turbo")
+    storage_colors = {
+        name: storage_color_map(index / max(1, len(storage_names) - 1))
+        for index, name in enumerate(storage_names)
+    }
 
     figure, (soc_axis, power_axis) = pyplot.subplots(
         2,
@@ -172,12 +242,12 @@ def _plot_storage_dispatch(
         sharex=True,
         gridspec_kw={"height_ratios": (1.1, 1)},
     )
-    for unit_name in sorted(by_unit):
+    for unit_name in storage_names:
         rows = sorted(
             by_unit[unit_name],
             key=lambda storage: (storage.delivery_start, storage.opening_time),
         )
-        color = unit_colors[unit_name]
+        color = storage_colors[unit_name]
         soc_times: list[datetime] = []
         soc_values: list[float] = []
         net_power: list[float] = []
@@ -191,11 +261,7 @@ def _plot_storage_dispatch(
             soc_times.append(row.delivery_end)
             soc_values.append(row.soc_after * 100)
             net_power.append(
-                (
-                    row.accepted_discharge_mwh
-                    - row.accepted_charge_mwh
-                )
-                / duration_hours
+                (row.accepted_discharge_mwh - row.accepted_charge_mwh) / duration_hours
             )
 
         soc_axis.plot(
@@ -209,8 +275,7 @@ def _plot_storage_dispatch(
         for row, power in zip(rows, net_power, strict=True):
             if (
                 not contiguous_chunks
-                or contiguous_chunks[-1][-1][0].delivery_end
-                != row.delivery_start
+                or contiguous_chunks[-1][-1][0].delivery_end != row.delivery_start
             ):
                 contiguous_chunks.append([])
             contiguous_chunks[-1].append((row, power))
@@ -228,17 +293,15 @@ def _plot_storage_dispatch(
                 label=unit_name if index == 0 else None,
             )
 
-    soc_axis.set_title("Storage dispatch and state of charge")
+    figure.suptitle("Storage dispatch and state of charge")
     soc_axis.set_ylabel("SOC (%)")
     soc_axis.set_ylim(0, 100)
     soc_axis.grid(axis="y", alpha=0.25)
-    soc_axis.legend(loc="upper right", ncol=min(3, len(by_unit)))
 
     power_axis.axhline(0, color="#1F1F1F", linewidth=0.8)
     power_axis.set_ylabel("Net power (MW)")
     power_axis.set_xlabel("Delivery start")
     power_axis.grid(axis="y", alpha=0.25)
-    power_axis.legend(loc="upper right", ncol=min(3, len(by_unit)))
     power_axis.text(
         0.01,
         0.03,
@@ -248,5 +311,16 @@ def _plot_storage_dispatch(
         color="#555555",
     )
     _format_time_axis(power_axis, dates)
-    figure.tight_layout()
+    handles, labels = soc_axis.get_legend_handles_labels()
+    figure.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.965),
+        ncol=min(6, len(storage_names)),
+        fontsize=8,
+    )
+    legend_rows = (len(storage_names) + 5) // 6
+    top = max(0.70, 0.91 - max(0, legend_rows - 1) * 0.035)
+    figure.tight_layout(rect=(0, 0, 1, top))
     return _save_figure(pyplot, figure, path)

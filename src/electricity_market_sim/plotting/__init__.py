@@ -13,6 +13,7 @@ from .dispatch import (
     _plot_operator_profit,
     _plot_storage_dispatch,
 )
+from .industry import _plot_industry_dispatch
 from .market import (
     _plot_first_merit_order,
     _plot_first_pay_as_bid_order_book,
@@ -25,7 +26,6 @@ from .opening import (
     _remove_stale_opening_plots,
     _select_opening_results,
 )
-
 
 # Keep the stable package-level API intentionally small; chart implementations
 # live in focused modules and are imported by this orchestration entry point.
@@ -76,7 +76,6 @@ def generate_plots(
                 pyplot,
                 dates,
                 results,
-                unit_colors,
                 plot_directory / "dispatch_by_unit.png",
             ),
             _plot_operator_profit(
@@ -93,21 +92,45 @@ def generate_plots(
                     pyplot,
                     dates,
                     storage_results,
-                    unit_colors,
                     storage_plot_path,
                 )
             )
         else:
             storage_plot_path.unlink(missing_ok=True)
+        industry_plot_path = plot_directory / "industry_dispatch.png"
+        if result.industry_results:
+            paths.append(
+                _plot_industry_dispatch(
+                    pyplot,
+                    dates,
+                    tuple(
+                        sorted(
+                            result.industry_results,
+                            key=lambda industry: (
+                                industry.delivery_start,
+                                industry.unit_name,
+                            ),
+                        )
+                    ),
+                    tuple(
+                        sorted(
+                            result.industry_flexibility_results,
+                            key=lambda flexibility: (
+                                flexibility.delivery_start,
+                                flexibility.unit_name,
+                            ),
+                        )
+                    ),
+                    industry_plot_path,
+                )
+            )
+        else:
+            industry_plot_path.unlink(missing_ok=True)
         if result.settings.market_mechanism == "complex_clearing":
             # A directory may have been rendered by an older version which
             # incorrectly treated complex clearing as a simple merit order.
-            (plot_directory / "merit_order_first_product.png").unlink(
-                missing_ok=True
-            )
-            (plot_directory / "pay_as_bid_first_product.png").unlink(
-                missing_ok=True
-            )
+            (plot_directory / "merit_order_first_product.png").unlink(missing_ok=True)
+            (plot_directory / "pay_as_bid_first_product.png").unlink(missing_ok=True)
             opening_results = _select_opening_results(results, opening_time)
             selected_opening_time = (
                 opening_results[0].opening_time or opening_results[0].delivery_start
@@ -140,9 +163,7 @@ def generate_plots(
             )
         elif result.settings.market_mechanism == "pay_as_bid":
             _remove_stale_opening_plots(plot_directory / "openings")
-            (plot_directory / "merit_order_first_product.png").unlink(
-                missing_ok=True
-            )
+            (plot_directory / "merit_order_first_product.png").unlink(missing_ok=True)
             paths.append(
                 _plot_first_pay_as_bid_order_book(
                     pyplot,
@@ -153,9 +174,7 @@ def generate_plots(
             )
         else:
             _remove_stale_opening_plots(plot_directory / "openings")
-            (plot_directory / "pay_as_bid_first_product.png").unlink(
-                missing_ok=True
-            )
+            (plot_directory / "pay_as_bid_first_product.png").unlink(missing_ok=True)
             paths.append(
                 _plot_first_merit_order(
                     pyplot,

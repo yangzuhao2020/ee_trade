@@ -54,15 +54,21 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
     times = [market.delivery_start for market in results]
     prices, price_label = _market_price_series(results)
     requested_demand = [market.requested_demand_mwh for market in results]
-    cleared_inelastic = [
-        market.cleared_inelastic_demand_mwh for market in results
-    ]
+    cleared_inelastic = [market.cleared_inelastic_demand_mwh for market in results]
     cleared_elastic = [market.cleared_elastic_demand_mwh for market in results]
     cleared_household = [
         sum(
             demand.accepted_energy_mwh
             for demand in market.demand_bids
             if demand.bid.demand_type == "household_load"
+        )
+        for market in results
+    ]
+    cleared_industrial = [
+        sum(
+            demand.accepted_energy_mwh
+            for demand in market.demand_bids
+            if demand.bid.demand_type == "industrial_load"
         )
         for market in results
     ]
@@ -76,14 +82,20 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
     ]
     cleared_export = [market.cleared_export_mwh for market in results]
     unserved_load = [market.unserved_load_mwh for market in results]
-    unaccepted_elastic = [
-        market.unaccepted_elastic_demand_mwh for market in results
-    ]
+    unaccepted_elastic = [market.unaccepted_elastic_demand_mwh for market in results]
     unaccepted_household = [
         sum(
             demand.unserved_energy_mwh
             for demand in market.demand_bids
             if demand.bid.demand_type == "household_load"
+        )
+        for market in results
+    ]
+    unaccepted_industrial = [
+        sum(
+            demand.unserved_energy_mwh
+            for demand in market.demand_bids
+            if demand.bid.demand_type == "industrial_load"
         )
         for market in results
     ]
@@ -139,15 +151,28 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
         alpha=0.35,
         label="Accepted household load",
     )
-    cleared_local = [
-        with_household + elastic
-        for with_household, elastic in zip(
-            cleared_with_household, cleared_elastic
+    cleared_with_industrial = [
+        with_household + industrial
+        for with_household, industrial in zip(
+            cleared_with_household, cleared_industrial
         )
     ]
     demand_axis.fill_between(
         times,
         cleared_with_household,
+        cleared_with_industrial,
+        step="mid",
+        color="#D4A72C",
+        alpha=0.35,
+        label="Accepted industrial load",
+    )
+    cleared_local = [
+        with_industrial + elastic
+        for with_industrial, elastic in zip(cleared_with_industrial, cleared_elastic)
+    ]
+    demand_axis.fill_between(
+        times,
+        cleared_with_industrial,
         cleared_local,
         step="mid",
         color="#54A24B",
@@ -155,8 +180,7 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
         label="Accepted elastic demand",
     )
     cleared_with_storage = [
-        local + storage
-        for local, storage in zip(cleared_local, cleared_storage)
+        local + storage for local, storage in zip(cleared_local, cleared_storage)
     ]
     demand_axis.fill_between(
         times,
@@ -218,6 +242,14 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
     )
     unaccepted_axis.step(
         times,
+        unaccepted_industrial,
+        where="mid",
+        color="#D4A72C",
+        linewidth=1.0,
+        label="Unaccepted industrial load",
+    )
+    unaccepted_axis.step(
+        times,
         unaccepted_storage,
         where="mid",
         color="#B279A2",
@@ -251,8 +283,7 @@ def _plot_market_summary(pyplot, dates, results, path: Path) -> Path:
 
     times = [market.delivery_start for market in results]
     cleared_supply_gw = [
-        market.cleared_energy_mwh / market.duration_hours / 1_000
-        for market in results
+        market.cleared_energy_mwh / market.duration_hours / 1_000 for market in results
     ]
     cleared_demand_gw = [
         sum(demand.accepted_power_mw for demand in market.demand_bids) / 1_000
@@ -261,7 +292,7 @@ def _plot_market_summary(pyplot, dates, results, path: Path) -> Path:
     prices, price_label = _market_price_series(results)
 
     figure = pyplot.figure(figsize=(16, 9))
-    grid = figure.add_gridspec(2, 1, height_ratios=(5, 1.25), hspace=0.12)
+    grid = figure.add_gridspec(2, 1, height_ratios=(5, 1.25), hspace=0.32)
     axis = figure.add_subplot(grid[0])
     price_axis = axis.twinx()
     table_axis = figure.add_subplot(grid[1])
@@ -352,9 +383,7 @@ def _summary_row(values: list[float], unit: str, decimals: int) -> tuple[str, st
     )
 
 
-def _plot_first_pay_as_bid_order_book(
-    pyplot, market, unit_colors, path: Path
-) -> Path:
+def _plot_first_pay_as_bid_order_book(pyplot, market, unit_colors, path: Path) -> Path:
     """Plot one pay-as-bid supply book with traded energy and its average price."""
 
     figure, axis = pyplot.subplots(figsize=(11, 6.5))
@@ -376,12 +405,13 @@ def _plot_first_pay_as_bid_order_book(
     cumulative_energy = 0.0
     accepted_label_added = False
     unaccepted_label_added = False
+    show_unit_labels = len(offers) <= 20
 
     for cleared in offers:
         offer = cleared.offer
         offered_end = cumulative_energy + offer.offered_energy_mwh
         accepted_end = cumulative_energy + cleared.accepted_energy_mwh
-        color = unit_colors[offer.unit_name]
+        color = unit_colors[offer.unit_name] if show_unit_labels else "#54A24B"
         if cleared.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH:
             axis.hlines(
                 offer.bid_price_eur_per_mwh,
@@ -399,12 +429,10 @@ def _plot_first_pay_as_bid_order_book(
                 offered_end,
                 color="#B8B8B8",
                 linewidth=4,
-                label=(
-                    "Untraded offer energy" if not unaccepted_label_added else None
-                ),
+                label=("Untraded offer energy" if not unaccepted_label_added else None),
             )
             unaccepted_label_added = True
-        if offer.offered_energy_mwh > _ENERGY_TOLERANCE_MWH:
+        if show_unit_labels and offer.offered_energy_mwh > _ENERGY_TOLERANCE_MWH:
             axis.text(
                 (cumulative_energy + offered_end) / 2,
                 offer.bid_price_eur_per_mwh + label_offset,
@@ -414,6 +442,18 @@ def _plot_first_pay_as_bid_order_book(
                 fontsize=9,
             )
         cumulative_energy = offered_end
+
+    if not show_unit_labels:
+        axis.text(
+            0.99,
+            0.02,
+            f"{len(offers)} offers; unit labels omitted",
+            transform=axis.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            color="#555555",
+        )
 
     axis.axvline(
         market.requested_demand_mwh,
@@ -470,12 +510,16 @@ def _plot_first_merit_order(pyplot, market, unit_colors, path: Path) -> Path:
     )
     cumulative_energy = 0.0
     label_offset = max(market.clearing_price_eur_per_mwh * 0.035, 1.0)
+    accepted_label_added = False
+    unaccepted_label_added = False
+    show_unit_labels = len(offers) <= 20
+    marginal_point: tuple[float, float] | None = None
 
     for cleared in offers:
         offer = cleared.offer
         offered_end = cumulative_energy + offer.offered_energy_mwh
         accepted_end = cumulative_energy + cleared.accepted_energy_mwh
-        color = unit_colors[offer.unit_name]
+        color = unit_colors[offer.unit_name] if show_unit_labels else "#54A24B"
         if cleared.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH:
             axis.hlines(
                 offer.bid_price_eur_per_mwh,
@@ -483,23 +527,30 @@ def _plot_first_merit_order(pyplot, market, unit_colors, path: Path) -> Path:
                 accepted_end,
                 color=color,
                 linewidth=7,
+                label=("Accepted offer energy" if not accepted_label_added else None),
             )
-        if accepted_end < offered_end:
+            accepted_label_added = True
+        if accepted_end < offered_end - _ENERGY_TOLERANCE_MWH:
             axis.hlines(
                 offer.bid_price_eur_per_mwh,
                 accepted_end,
                 offered_end,
                 color="#B8B8B8",
                 linewidth=4,
+                label=(
+                    "Unaccepted offer energy" if not unaccepted_label_added else None
+                ),
             )
-        axis.text(
-            (cumulative_energy + offered_end) / 2,
-            offer.bid_price_eur_per_mwh + label_offset,
-            offer.unit_name,
-            ha="center",
-            va="bottom",
-            fontsize=9,
-        )
+            unaccepted_label_added = True
+        if show_unit_labels and offer.offered_energy_mwh > _ENERGY_TOLERANCE_MWH:
+            axis.text(
+                (cumulative_energy + offered_end) / 2,
+                offer.bid_price_eur_per_mwh + label_offset,
+                offer.unit_name,
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
         if (
             offer.unit_name == market.marginal_unit_name
             and cleared.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH
@@ -510,18 +561,32 @@ def _plot_first_merit_order(pyplot, market, unit_colors, path: Path) -> Path:
                 abs_tol=_ENERGY_TOLERANCE_MWH,
             )
         ):
-            axis.scatter(
-                [accepted_end],
-                [offer.bid_price_eur_per_mwh],
-                marker="D",
-                s=46,
-                color="#111111",
-                edgecolors="#FFFFFF",
-                linewidths=0.7,
-                zorder=4,
-                label="Marginal unit",
-            )
+            marginal_point = (accepted_end, offer.bid_price_eur_per_mwh)
         cumulative_energy = offered_end
+
+    if marginal_point is not None:
+        axis.scatter(
+            [marginal_point[0]],
+            [marginal_point[1]],
+            marker="D",
+            s=46,
+            color="#111111",
+            edgecolors="#FFFFFF",
+            linewidths=0.7,
+            zorder=4,
+            label=f"Marginal unit: {market.marginal_unit_name}",
+        )
+    if not show_unit_labels:
+        axis.text(
+            0.99,
+            0.02,
+            f"{len(offers)} offers; unit labels omitted",
+            transform=axis.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            color="#555555",
+        )
 
     axis.axvline(
         market.requested_demand_mwh,
@@ -537,9 +602,7 @@ def _plot_first_merit_order(pyplot, market, unit_colors, path: Path) -> Path:
         linewidth=1.3,
         label="Clearing price",
     )
-    axis.set_title(
-        "Merit order — " + market.delivery_start.strftime("%Y-%m-%d %H:%M")
-    )
+    axis.set_title("Merit order — " + market.delivery_start.strftime("%Y-%m-%d %H:%M"))
     axis.set_xlabel("Cumulative offered energy (MWh)")
     axis.set_ylabel("Bid price (EUR/MWh)")
     axis.set_xlim(0, max(cumulative_energy, market.requested_demand_mwh) * 1.03)
