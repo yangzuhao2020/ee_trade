@@ -77,11 +77,13 @@ class StorageRuntimeState:
         storage: StorageUnit,
         accepted_charge_mwh: float,
         accepted_discharge_mwh: float,
+        duration_hours: float = 1.0,
     ) -> float:
         """Return the next internal energy using grid-side accepted quantities."""
 
         return (
             self.energy_mwh
+            + storage.natural_inflow_mw * duration_hours
             + accepted_charge_mwh * storage.efficiency_charge
             - accepted_discharge_mwh / storage.efficiency_discharge
         )
@@ -91,12 +93,13 @@ class StorageRuntimeState:
         storage: StorageUnit,
         accepted_charge_mwh: float,
         accepted_discharge_mwh: float,
+        duration_hours: float = 1.0,
     ) -> tuple[float, float]:
         """Apply one delivered product and return its before/after energy."""
 
         before = self.energy_mwh
         after = self.energy_after_dispatch(
-            storage, accepted_charge_mwh, accepted_discharge_mwh
+            storage, accepted_charge_mwh, accepted_discharge_mwh, duration_hours
         )
         tolerance = 1e-7
         if after < storage.min_energy_mwh - tolerance:
@@ -104,11 +107,8 @@ class StorageRuntimeState:
                 f"Storage {storage.name!r} dispatch falls below min_soc: "
                 f"{after:.9f} MWh < {storage.min_energy_mwh:.9f} MWh."
             )
-        if after > storage.max_energy_mwh + tolerance:
-            raise ValueError(
-                f"Storage {storage.name!r} dispatch exceeds max_soc: "
-                f"{after:.9f} MWh > {storage.max_energy_mwh:.9f} MWh."
-            )
+        # Natural inflow above the available headroom is spilled. Submitted
+        # charge orders are already sized after applying that inflow.
         self.energy_mwh = min(
             storage.max_energy_mwh, max(storage.min_energy_mwh, after)
         )
@@ -140,6 +140,10 @@ def storage_heuristic_orders(
     available_end = forecast_end or max(price_forecast)
     for delivery_start, delivery_end in products:
         duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
+        reference_energy = min(
+            storage.max_energy_mwh,
+            reference_energy + storage.natural_inflow_mw * duration_hours,
+        )
         window_times = [
             delivery_start + timedelta(hours=offset)
             for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1)
@@ -307,6 +311,7 @@ def heuristic_flexible_offers(
         expected_operating_time = max(
             state.average_operating_time,
             plant.min_operating_time_hours,
+            duration_hours,
         )
         inflexible_price = marginal_cost + plant.start_cost_eur / (
             expected_operating_time * inflexible_power

@@ -98,7 +98,10 @@ def clear_pay_as_clear(
 
     if not demand_bids and not supply_offers:
         raise ValueError("Cannot clear an empty market.")
+    bid_ids = [bid.identifier for bid in demand_bids]
     offer_ids = [offer.identifier for offer in supply_offers]
+    if len(bid_ids) != len(set(bid_ids)):
+        raise ValueError("Demand bid identifiers must be unique within a product.")
     if len(offer_ids) != len(set(offer_ids)):
         raise ValueError(
             "Supply offer identifiers must be unique within a product; "
@@ -132,6 +135,7 @@ def clear_pay_as_clear(
     )
     marginal_unit_name: str | None = None
     accepted_by_demand_index = [0.0] * len(demand_bids)
+    matched_orders: list[tuple[DemandBid, SupplyOffer, float]] = []
 
     for demand_index, demand in ordered_demands:
         remaining_demand = demand.volume_mwh # 记录这个需求单还剩多少电量没满足。
@@ -144,6 +148,8 @@ def clear_pay_as_clear(
             # 取需求和供给的最小值作为成交量。
             accepted_by_offer[offer.identifier] += accepted
             accepted_by_demand_index[demand_index] += accepted
+            if accepted > _EPSILON:
+                matched_orders.append((demand, offer, accepted))
             remaining_demand -= accepted # 这个需求单还剩多少电量没满足。
             remaining_supply -= accepted # 这个供给报价还剩多少电量没成交。
             if accepted > _EPSILON:
@@ -192,6 +198,19 @@ def clear_pay_as_clear(
         for item in cleared_demands
         if item.bid.bid_type == "export"
     )
+    trades = tuple(
+        Trade(
+            delivery_start=delivery_start,
+            delivery_end=delivery_end,
+            buyer_name=demand.unit_name,
+            buyer_bid_id=demand.identifier,
+            seller_name=offer.unit_name,
+            seller_offer_id=offer.identifier,
+            trade_energy_mwh=energy,
+            trade_price_eur_per_mwh=clearing_price,
+        )
+        for demand, offer, energy in matched_orders
+    )
 
     return MarketClearingResult(
         delivery_start=delivery_start,
@@ -204,6 +223,7 @@ def clear_pay_as_clear(
         offers=cleared_offers,
         demand_bids=cleared_demands,
         marginal_unit_name=marginal_unit_name,
+        trades=trades,
     )
 
 

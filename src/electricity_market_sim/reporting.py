@@ -74,6 +74,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         }
     )
     for market_result in sorted_results:
+        reported_energy_by_bid: dict[str, Decimal] = defaultdict(Decimal)
         reported_payments_by_bid: dict[str, Decimal] = defaultdict(Decimal)
         opening_time = market_result.opening_time or market_result.delivery_start
         opening_id = opening_time.isoformat()
@@ -147,6 +148,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 _SETTLEMENT_QUANTUM,
                 rounding=ROUND_HALF_UP,
             )
+            reported_energy_by_bid[trade.buyer_bid_id] += reported_energy
             reported_payments_by_bid[trade.buyer_bid_id] += reported_payment
             trade_rows.append(
                 {
@@ -179,7 +181,13 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                         cleared.bid.price_eur_per_mwh
                     ),
                     "requested_energy_mwh": _number(cleared.bid.volume_mwh),
-                    "accepted_energy_mwh": _number(cleared.accepted_energy_mwh),
+                    "accepted_energy_mwh": (
+                        _settlement_number(
+                            reported_energy_by_bid[cleared.bid.identifier]
+                        )
+                        if market_result.trades
+                        else _number(cleared.accepted_energy_mwh)
+                    ),
                     "unaccepted_energy_mwh": _number(cleared.unserved_energy_mwh),
                     "clearing_price_eur_per_mwh": _number(
                         cleared.clearing_price_eur_per_mwh
@@ -188,7 +196,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                         _settlement_number(
                             reported_payments_by_bid[cleared.bid.identifier]
                         )
-                        if market_result.pricing_method == "pay_as_bid"
+                        if market_result.trades
                         else _number(cleared.payment_eur)
                     ),
                 }
@@ -465,6 +473,55 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         }
         for result in simulation_result.household_flexibility_results
     ]
+    industry_rows = [
+        {
+            "datetime": _timestamp(result.delivery_start),
+            "window_id": result.window_id,
+            "unit_name": result.unit_name,
+            "electrolyser_power_mw": _number(result.electrolyser_power_mw),
+            "hydrogen_output_mwh": _number(result.hydrogen_output_mwh),
+            "dri_power_mw": _number(result.dri_power_mw),
+            "dri_output_t": _number(result.dri_output_t),
+            "eaf_power_mw": _number(result.eaf_power_mw),
+            "planned_steel_output_t": _number(result.planned_steel_output_t),
+            "planned_grid_power_mw": _number(result.planned_grid_power_mw),
+            "planned_energy_mwh": _number(result.planned_energy_mwh),
+            "actual_grid_power_mw": _number(result.actual_grid_power_mw),
+            "actual_steel_output_t": _number(result.actual_steel_output_t),
+            "forecast_cost_eur": _number(result.forecast_cost_eur),
+        }
+        for result in simulation_result.industry_results
+    ]
+    industry_flexibility_rows = [
+        {
+            "datetime": _timestamp(result.delivery_start),
+            "window_id": result.window_id,
+            "unit_name": result.unit_name,
+            "baseline_power_mw": _number(result.baseline_power_mw),
+            "minimum_power_mw": _number(result.minimum_power_mw),
+            "maximum_power_mw": _number(result.maximum_power_mw),
+            "flex_up_mw": _number(result.flex_up_mw),
+            "flex_down_mw": _number(result.flex_down_mw),
+        }
+        for result in simulation_result.industry_flexibility_results
+    ]
+    industry_window_rows = [
+        {
+            "window_id": result.window_id,
+            "unit_name": result.unit_name,
+            "optimization_start": _timestamp(result.optimization_start),
+            "optimization_end": _timestamp(result.optimization_end),
+            "commit_start": _timestamp(result.commit_start),
+            "commit_end": _timestamp(result.commit_end),
+            "baseline_variable_cost_eur": _number(
+                result.baseline_variable_cost_eur
+            ),
+            "maximum_flexible_variable_cost_eur": _number(
+                result.maximum_flexible_variable_cost_eur
+            ),
+        }
+        for result in simulation_result.industry_optimization_windows
+    ]
 
     _write_rows(
         output_dir / "market_results.csv",
@@ -709,4 +766,53 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "maximum_grid_power_mw",
             ],
             flexibility_rows,
+        )
+    if industry_rows:
+        _write_rows(
+            output_dir / "industry_results.csv",
+            [
+                "datetime",
+                "window_id",
+                "unit_name",
+                "electrolyser_power_mw",
+                "hydrogen_output_mwh",
+                "dri_power_mw",
+                "dri_output_t",
+                "eaf_power_mw",
+                "planned_steel_output_t",
+                "planned_grid_power_mw",
+                "planned_energy_mwh",
+                "actual_grid_power_mw",
+                "actual_steel_output_t",
+                "forecast_cost_eur",
+            ],
+            industry_rows,
+        )
+        _write_rows(
+            output_dir / "industry_flexibility_results.csv",
+            [
+                "datetime",
+                "window_id",
+                "unit_name",
+                "baseline_power_mw",
+                "minimum_power_mw",
+                "maximum_power_mw",
+                "flex_up_mw",
+                "flex_down_mw",
+            ],
+            industry_flexibility_rows,
+        )
+        _write_rows(
+            output_dir / "industry_optimization_windows.csv",
+            [
+                "window_id",
+                "unit_name",
+                "optimization_start",
+                "optimization_end",
+                "commit_start",
+                "commit_end",
+                "baseline_variable_cost_eur",
+                "maximum_flexible_variable_cost_eur",
+            ],
+            industry_window_rows,
         )

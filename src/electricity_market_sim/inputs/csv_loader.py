@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import csv
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
 import warnings
 
 from ..errors import InputValidationError
+from ..config import parse_duration
 from ..models import (
     DemandUnit,
     ExchangeSchedule,
     ExchangeUnit,
     HouseholdUnit,
+    IndustrialDevice,
+    IndustrialUnit,
     PowerPlant,
     StorageUnit,
 )
@@ -141,9 +144,9 @@ def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
             raise InputValidationError(
                 f"{path.name}, row {row_number}: start_cost cannot be negative."
             )
-        if plant.min_operating_time_hours <= 0:
+        if plant.min_operating_time_hours < 0:
             raise InputValidationError(
-                f"{path.name}, row {row_number}: min_operating_time must be positive."
+                f"{path.name}, row {row_number}: min_operating_time cannot be negative."
             )
         if plant.min_down_time_hours < 0:
             raise InputValidationError(
@@ -261,10 +264,9 @@ def load_storage_units(path: Path) -> tuple[StorageUnit, ...]:
                 f"{path.name}, row {row_number}: additional_cost_discharge "
                 "cannot be negative."
             )
-        if storage.natural_inflow_mw != 0:
+        if storage.natural_inflow_mw < 0:
             raise InputValidationError(
-                f"{path.name}, row {row_number}: non-zero natural_inflow is not "
-                "supported in version two."
+                f"{path.name}, row {row_number}: natural_inflow cannot be negative."
             )
         storages.append(storage)
 
@@ -570,6 +572,273 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
     return tuple(households)
 
 
+def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
+    """Merge electrolyser, DRI, and EAF rows into steel-plant participants."""
+
+    if not path.is_file():
+        return ()
+    raw_rows = _read_rows(path)
+    grouped: dict[str, list[tuple[int, dict[str, str]]]] = defaultdict(list)
+    for row_number, row in enumerate(raw_rows, start=2):
+        grouped[_require(row, "name", path, row_number)].append((row_number, row))
+
+    def plant_field(
+        rows: list[tuple[int, dict[str, str]]],
+        column: str,
+        *,
+        required: bool = True,
+    ) -> str | None:
+        values = {
+            row.get(column, "").strip()
+            for _, row in rows
+            if row.get(column, "").strip()
+        }
+        if len(values) > 1:
+            raise InputValidationError(
+                f"{path.name}: rows for one steel plant disagree on {column!r}."
+            )
+        if not values:
+            if required:
+                raise InputValidationError(
+                    f"{path.name}: steel-plant field {column!r} is not configured."
+                )
+            return None
+        return values.pop()
+
+    def numeric_plant_field(
+        rows: list[tuple[int, dict[str, str]]], column: str
+    ) -> float:
+        raw = plant_field(rows, column)
+        assert raw is not None
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise InputValidationError(
+                f"{path.name}: steel-plant field {column!r} must be numeric, "
+                f"got {raw!r}."
+            ) from exc
+        if not isfinite(value):
+            raise InputValidationError(
+                f"{path.name}: steel-plant field {column!r} must be finite."
+            )
+        return value
+
+    units: list[IndustrialUnit] = []
+    for name, rows in sorted(grouped.items()):
+        by_technology: dict[str, tuple[int, dict[str, str]]] = {}
+        for row_number, row in rows:
+            technology = _require(row, "technology", path, row_number)
+            if technology in by_technology:
+                raise InputValidationError(
+                    f"{path.name}: steel plant {name!r} has duplicate "
+                    f"{technology!r} rows."
+                )
+            by_technology[technology] = (row_number, row)
+        required_devices = {"electrolyser", "dri_plant", "eaf"}
+        missing = required_devices - by_technology.keys()
+        unsupported = by_technology.keys() - required_devices
+        if missing:
+            raise InputValidationError(
+                f"{path.name}: steel plant {name!r} is missing device rows: "
+                + ", ".join(sorted(missing))
+                + "."
+            )
+        if unsupported:
+            raise InputValidationError(
+                f"{path.name}: steel plant {name!r} has unsupported devices: "
+                + ", ".join(sorted(unsupported))
+                + "."
+            )
+
+        if plant_field(rows, "unit_type") != "steel_plant":
+            raise InputValidationError(
+                f"{path.name}: industrial unit {name!r} must use unit_type=steel_plant."
+            )
+        strategy = plant_field(rows, "bidding_EOM")
+        if strategy != "industry_energy_optimization":
+            raise InputValidationError(
+                f"{path.name}: steel plant {name!r} uses unsupported bidding_EOM "
+                f"{strategy!r}."
+            )
+        objective = plant_field(rows, "objective")
+        if objective != "min_variable_cost":
+            raise InputValidationError(
+                f"{path.name}: steel plant {name!r} objective must be "
+                "min_variable_cost."
+            )
+        flexibility = plant_field(rows, "flexibility_measure")
+        if flexibility != "cost_based_load_shift":
+            raise InputValidationError(
+                f"{path.name}: steel plant {name!r} flexibility_measure must be "
+                "cost_based_load_shift."
+            )
+        horizon_mode = plant_field(rows, "horizon_mode")
+        if horizon_mode != "rolling_horizon":
+            raise InputValidationError(
+                f"{path.name}: steel plant {name!r} horizon_mode must be "
+                "rolling_horizon."
+            )
+
+        def device(technology: str) -> IndustrialDevice:
+            row_number, row = by_technology[technology]
+            result = IndustrialDevice(
+                technology=technology,
+                fuel_type=(row.get("fuel_type") or "").strip(),
+                max_power_mw=_float(row, "max_power", path, row_number),
+                min_power_mw=_float(row, "min_power", path, row_number),
+                ramp_up_mw=_float(row, "ramp_up", path, row_number),
+                ramp_down_mw=_float(row, "ramp_down", path, row_number),
+                efficiency=_optional_float(row, "efficiency", 0.0, path, row_number),
+                specific_dri_demand=_optional_float(
+                    row, "specific_dri_demand", 0.0, path, row_number
+                ),
+                specific_electricity_consumption=_optional_float(
+                    row,
+                    "specific_electricity_consumption",
+                    0.0,
+                    path,
+                    row_number,
+                ),
+                specific_hydrogen_consumption=_optional_float(
+                    row,
+                    "specific_hydrogen_consumption",
+                    0.0,
+                    path,
+                    row_number,
+                ),
+                specific_iron_ore_consumption=_optional_float(
+                    row,
+                    "specific_iron_ore_consumption",
+                    0.0,
+                    path,
+                    row_number,
+                ),
+                specific_lime_demand=_optional_float(
+                    row, "specific_lime_demand", 0.0, path, row_number
+                ),
+                lime_co2_factor=_optional_float(
+                    row, "lime_co2_factor", 0.0, path, row_number
+                ),
+                min_operating_time_hours=_optional_float(
+                    row, "min_operating_time", 0.0, path, row_number
+                ),
+                min_down_time_hours=_optional_float(
+                    row, "min_down_time", 0.0, path, row_number
+                ),
+            )
+            if result.max_power_mw <= 0:
+                raise InputValidationError(
+                    f"{path.name}, row {row_number}: max_power must be positive."
+                )
+            if result.min_power_mw != 0:
+                raise InputValidationError(
+                    f"{path.name}, row {row_number}: version four supports "
+                    "industrial min_power=0 only."
+                )
+            if min(result.ramp_up_mw, result.ramp_down_mw) < 0:
+                raise InputValidationError(
+                    f"{path.name}, row {row_number}: ramp limits cannot be negative."
+                )
+            if result.min_operating_time_hours != 0 or result.min_down_time_hours != 0:
+                raise InputValidationError(
+                    f"{path.name}, row {row_number}: version four supports "
+                    "industrial min_operating_time=min_down_time=0 only."
+                )
+            return result
+
+        electrolyser = device("electrolyser")
+        dri_plant = device("dri_plant")
+        eaf = device("eaf")
+        if electrolyser.efficiency <= 0 or electrolyser.efficiency > 1:
+            raise InputValidationError(
+                f"{path.name}: steel plant {name!r} electrolyser efficiency must "
+                "be in (0, 1]."
+            )
+        if dri_plant.fuel_type != "hydrogen":
+            raise InputValidationError(
+                f"{path.name}: steel plant {name!r} DRI fuel_type must be hydrogen."
+            )
+        required_positive = {
+            "DRI specific_electricity_consumption": (
+                dri_plant.specific_electricity_consumption
+            ),
+            "DRI specific_hydrogen_consumption": (
+                dri_plant.specific_hydrogen_consumption
+            ),
+            "DRI specific_iron_ore_consumption": (
+                dri_plant.specific_iron_ore_consumption
+            ),
+            "EAF specific_dri_demand": eaf.specific_dri_demand,
+            "EAF specific_electricity_consumption": (
+                eaf.specific_electricity_consumption
+            ),
+            "EAF specific_lime_demand": eaf.specific_lime_demand,
+        }
+        invalid = [label for label, value in required_positive.items() if value <= 0]
+        if invalid:
+            raise InputValidationError(
+                f"{path.name}: steel plant {name!r} requires positive values for: "
+                + ", ".join(invalid)
+                + "."
+            )
+        if eaf.lime_co2_factor < 0:
+            raise InputValidationError(
+                f"{path.name}: steel plant {name!r} lime_co2_factor cannot be negative."
+            )
+
+        cost_tolerance = numeric_plant_field(rows, "cost_tolerance")
+        demand = numeric_plant_field(rows, "demand")
+        deviation = numeric_plant_field(rows, "load_profile_deviation")
+        if cost_tolerance < 0 or demand <= 0 or deviation < 0:
+            raise InputValidationError(
+                f"{path.name}: steel plant {name!r} requires non-negative cost "
+                "tolerance and load-profile deviation, and positive demand."
+            )
+        look_ahead = parse_duration(
+            plant_field(rows, "look_ahead_horizon"), "look_ahead_horizon"
+        )
+        commit_horizon = parse_duration(
+            plant_field(rows, "commit_horizon"), "commit_horizon"
+        )
+        rolling_step = parse_duration(
+            plant_field(rows, "rolling_step"), "rolling_step"
+        )
+        if commit_horizon > look_ahead:
+            raise InputValidationError(
+                f"{path.name}: steel plant {name!r} commit_horizon cannot exceed "
+                "look_ahead_horizon."
+            )
+        if rolling_step != commit_horizon:
+            raise InputValidationError(
+                f"{path.name}: version four requires rolling_step=commit_horizon."
+            )
+
+        units.append(
+            IndustrialUnit(
+                name=name,
+                operator=plant_field(rows, "unit_operator") or "",
+                node=plant_field(rows, "node") or "",
+                bidding_strategy=strategy,
+                objective=objective,
+                flexibility_measure=flexibility,
+                cost_tolerance_percent=cost_tolerance,
+                demand_t=demand,
+                load_profile_deviation=deviation,
+                horizon_mode=horizon_mode,
+                look_ahead=look_ahead,
+                commit_horizon=commit_horizon,
+                rolling_step=rolling_step,
+                forecast_price_column=(
+                    plant_field(rows, "forecast_electricity_price_update") or ""
+                ),
+                electrolyser=electrolyser,
+                dri_plant=dri_plant,
+                eaf=eaf,
+            )
+        )
+    return tuple(units)
+
+
 def load_time_series_profiles(
     path: Path,
     required_columns: tuple[str, ...],
@@ -615,6 +884,99 @@ def load_time_series_profiles(
                     row, column, path, row_number
                 )
     return profiles
+
+
+def load_aligned_time_series_profiles(
+    path: Path,
+    required_columns: tuple[str, ...],
+    product_duration: timedelta,
+) -> dict[str, dict[datetime, float]]:
+    """Load numeric profiles at product resolution, averaging finer data.
+
+    The source cadence must be regular and divide the market product duration.
+    A product bucket is retained only when all expected source observations are
+    present, so later product lookup reports missing input instead of averaging
+    an incomplete interval.
+    """
+
+    exact = load_time_series_profiles(path, required_columns)
+    if not required_columns:
+        return exact
+    timestamps = sorted(exact[required_columns[0]])
+    if len(timestamps) < 2:
+        raise InputValidationError(
+            f"{path.name} requires at least two timestamps to determine its cadence."
+        )
+    steps = {
+        later - earlier
+        for earlier, later in zip(timestamps, timestamps[1:], strict=False)
+    }
+    if len(steps) != 1:
+        raise InputValidationError(f"{path.name} timestamps must use a regular cadence.")
+    source_step = steps.pop()
+    if source_step <= timedelta(0) or source_step > product_duration:
+        raise InputValidationError(
+            f"{path.name} cadence {source_step} cannot be aligned to product "
+            f"duration {product_duration}."
+        )
+    ratio = product_duration.total_seconds() / source_step.total_seconds()
+    expected_count = round(ratio)
+    if expected_count <= 0 or abs(ratio - expected_count) > 1e-9:
+        raise InputValidationError(
+            f"{path.name} cadence must divide the product duration exactly."
+        )
+    if expected_count == 1:
+        return exact
+
+    product_seconds = int(product_duration.total_seconds())
+    epoch = datetime(1970, 1, 1)
+    buckets: dict[datetime, list[datetime]] = defaultdict(list)
+    for timestamp in timestamps:
+        elapsed = int((timestamp - epoch).total_seconds())
+        bucket = epoch + timedelta(seconds=(elapsed // product_seconds) * product_seconds)
+        buckets[bucket].append(timestamp)
+
+    aligned = {column: {} for column in required_columns}
+    for bucket, members in buckets.items():
+        members.sort()
+        expected = [bucket + index * source_step for index in range(expected_count)]
+        if members != expected:
+            continue
+        for column in required_columns:
+            aligned[column][bucket] = sum(exact[column][time] for time in members) / len(
+                members
+            )
+    return aligned
+
+
+def load_aligned_fuel_price_profiles(
+    path: Path, product_duration: timedelta
+) -> dict[datetime, dict[str, float]]:
+    """Load every fuel-price column at the configured product resolution."""
+
+    if not path.is_file():
+        raise InputValidationError(f"Missing required input file: {path}")
+    with path.open(encoding="utf-8-sig", newline="") as file:
+        reader = csv.reader(file)
+        try:
+            header = next(reader)
+        except StopIteration as exc:
+            raise InputValidationError(f"{path.name} is empty.") from exc
+    if not header or header[0].strip() != "datetime":
+        raise InputValidationError(
+            f"{path.name} must use the time-series layout beginning with datetime."
+        )
+    columns = tuple(column.strip() for column in header[1:] if column.strip())
+    if "co2" not in columns:
+        raise InputValidationError(f"{path.name} must provide a 'co2' column.")
+    by_column = load_aligned_time_series_profiles(path, columns, product_duration)
+    if not columns:
+        return {}
+    timestamps = sorted(by_column[columns[0]])
+    return {
+        timestamp: {column: by_column[column][timestamp] for column in columns}
+        for timestamp in timestamps
+    }
 
 
 def load_fuel_price_profiles(path: Path) -> dict[datetime, dict[str, float]]:

@@ -10,7 +10,7 @@ from .models import MarketOpening, MarketSettings, SimulationResult
 from .reporting import write_results
 from .simulators.household_market import simulate_household_market
 from .simulators.v1_v2 import simulate_v1_v2_market
-
+from .simulators.v4 import simulate_v4_market
 
 __all__ = ["market_openings", "run_simulation", "simulate"]
 
@@ -55,12 +55,8 @@ def market_openings(settings: MarketSettings) -> list[MarketOpening]:
     # the whole opening and emit the required incomplete-product warning. The
     # one-product V1 path retains its established strict boundary.
     includes_end_boundary = settings.product_count > 1
-    while (
-        opening_time + settings.first_delivery < settings.end
-        or (
-            includes_end_boundary
-            and opening_time + settings.first_delivery == settings.end
-        )
+    while opening_time + settings.first_delivery < settings.end or (
+        includes_end_boundary and opening_time + settings.first_delivery == settings.end
     ):
         first_start = opening_time + settings.first_delivery
         products = tuple(
@@ -81,6 +77,8 @@ def simulate(input_dir: str | Path, scenario: str = "base") -> SimulationResult:
     input_path = Path(input_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
     openings = tuple(market_openings(settings))
+    if settings.industrial_dsm_units_file is not None:
+        return simulate_v4_market(input_path, settings, openings)
     if settings.market_mechanism == "pay_as_bid":
         return simulate_household_market(input_path, settings, openings)
     return simulate_v1_v2_market(input_path, settings, openings)

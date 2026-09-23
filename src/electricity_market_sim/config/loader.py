@@ -91,6 +91,16 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
             "exchange_units must be null or the non-empty name of a CSV file."
         )
 
+    raw_industrial_units = data.get("industrial_dsm_units")
+    if raw_industrial_units is None:
+        industrial_dsm_units_file = None
+    elif isinstance(raw_industrial_units, str) and raw_industrial_units.strip():
+        industrial_dsm_units_file = raw_industrial_units.strip()
+    else:
+        raise InputValidationError(
+            "industrial_dsm_units must be null or the non-empty name of a CSV file."
+        )
+
     markets = data.get("markets_config")
     if not isinstance(markets, dict) or "EOM" not in markets:
         raise InputValidationError("The base scenario must define markets_config.EOM.")
@@ -132,6 +142,7 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
             minimum_bid_price=float(eom["minimum_bid_price"]),
             market_mechanism=str(eom["market_mechanism"]),
             exchange_units_file=exchange_units_file,
+            industrial_dsm_units_file=industrial_dsm_units_file,
             additional_fields=additional_fields,
         )
     except KeyError as exc:

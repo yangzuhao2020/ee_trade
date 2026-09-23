@@ -60,12 +60,13 @@ class DemandBid:
             "inelastic_load",
             "elastic_load",
             "household_load",
+            "industrial_load",
             "export",
             "storage_charge",
         }:
             raise ValueError(
                 "demand_type must be inelastic_load, elastic_load, household_load, "
-                "export, or storage_charge."
+                "industrial_load, export, or storage_charge."
             )
         if (self.bid_type == "export") != (demand_type == "export"):
             raise ValueError("Export demand bids must use demand_type='export'.")
@@ -394,8 +395,8 @@ class MarketClearingResult:
         if self.pricing_method not in {"merit_order", "dual", "pay_as_bid"}:
             raise ValueError("pricing_method must be merit_order, dual, or pay_as_bid.")
 
-        if self.pricing_method == "pay_as_bid":
-            self._validate_pay_as_bid_trades()
+        if self.pricing_method == "pay_as_bid" or self.trades:
+            self._validate_trades()
         offer_names_set = {cleared.offer.unit_name for cleared in self.offers}
         if self.pricing_method == "merit_order" and self.cleared_energy_mwh > _ENERGY_TOLERANCE_MWH:
             if self.marginal_unit_name is None:
@@ -572,7 +573,7 @@ class MarketClearingResult:
             trade.trade_energy_mwh for trade in self.trades
         )
 
-    def _validate_pay_as_bid_trades(self) -> None:
+    def _validate_trades(self) -> None:
         """Reconcile immutable trades with accepted order quantities and prices."""
 
         if any(
@@ -604,13 +605,21 @@ class MarketClearingResult:
             bid = bids[trade.buyer_bid_id].bid
             if trade.seller_name != offer.unit_name or trade.buyer_name != bid.unit_name:
                 raise ValueError("Trade participant names must match their order IDs.")
+            expected_trade_price = (
+                offer.bid_price_eur_per_mwh
+                if self.pricing_method == "pay_as_bid"
+                else self.clearing_price_eur_per_mwh
+            )
+            assert expected_trade_price is not None
             if not isclose(
                 trade.trade_price_eur_per_mwh,
-                offer.bid_price_eur_per_mwh,
+                expected_trade_price,
                 rel_tol=0.0,
                 abs_tol=_ENERGY_TOLERANCE_MWH,
             ):
-                raise ValueError("Pay-as-bid trade price must equal the seller offer price.")
+                raise ValueError(
+                    "Trade price must match the market settlement rule."
+                )
             if trade.trade_price_eur_per_mwh > bid.price_eur_per_mwh + _ENERGY_TOLERANCE_MWH:
                 raise ValueError("A trade price cannot exceed the buyer bid price.")
             traded_by_offer[trade.seller_offer_id] = (
@@ -634,20 +643,21 @@ class MarketClearingResult:
                 abs_tol=_ENERGY_TOLERANCE_MWH,
             ):
                 raise ValueError("Trade quantities must reconcile to seller acceptance.")
-            expected_price = (
-                cleared.offer.bid_price_eur_per_mwh
-                if accepted > _ENERGY_TOLERANCE_MWH
-                else 0.0
-            )
-            if not isclose(
-                cleared.clearing_price_eur_per_mwh,
-                expected_price,
-                rel_tol=0.0,
-                abs_tol=_ENERGY_TOLERANCE_MWH,
-            ):
-                raise ValueError(
-                    "A pay-as-bid seller must settle at its own offer price."
+            if self.pricing_method == "pay_as_bid":
+                expected_price = (
+                    cleared.offer.bid_price_eur_per_mwh
+                    if accepted > _ENERGY_TOLERANCE_MWH
+                    else 0.0
                 )
+                if not isclose(
+                    cleared.clearing_price_eur_per_mwh,
+                    expected_price,
+                    rel_tol=0.0,
+                    abs_tol=_ENERGY_TOLERANCE_MWH,
+                ):
+                    raise ValueError(
+                        "A pay-as-bid seller must settle at its own offer price."
+                    )
         for identifier, cleared in bids.items():
             accepted = traded_by_bid.get(identifier, 0.0)
             if not isclose(
