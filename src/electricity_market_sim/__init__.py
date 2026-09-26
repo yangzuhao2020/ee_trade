@@ -2,6 +2,18 @@
 
 from .models import SimulationResult
 from .plotting import generate_plots
-from .simulation import run_simulation, simulate
+from .simulation import (
+    LearningEpisodeRunner,
+    run_simulation,
+    simulate,
+    simulate_learning_episode,
+)
 
-__all__ = ["SimulationResult", "generate_plots", "run_simulation", "simulate"]
+__all__ = [
+    "LearningEpisodeRunner",
+    "SimulationResult",
+    "generate_plots",
+    "run_simulation",
+    "simulate",
+    "simulate_learning_episode",
+]

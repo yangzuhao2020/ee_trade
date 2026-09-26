@@ -103,6 +103,7 @@ def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
             "powerplant_energy_heuristic_flexable",
             "powerplant_energy_heuristic_block",
             "powerplant_energy_heuristic_linked",
+            "powerplant_energy_learning",
         }:
             raise InputValidationError(
                 f"{path.name}, row {row_number}: unsupported bidding_EOM strategy "

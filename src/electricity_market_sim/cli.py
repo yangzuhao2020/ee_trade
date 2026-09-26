@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
-import sys
 
+from .config import load_market_settings
 from .errors import SimulationError
 from .plotting import generate_plots
 from .simulation import run_simulation
@@ -55,17 +56,94 @@ def build_parser() -> argparse.ArgumentParser:
             "(for example '2019-01-01 00:00'). Defaults to the first opening."
         ),
     )
+    parser.add_argument(
+        "--learning-mode",
+        choices=("train", "evaluate"),
+        help=(
+            "For a Version 5 learning scenario, train a policy or evaluate the "
+            "best saved policy. Defaults to train."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        help=(
+            "Checkpoint to resume for training or load for evaluation. Evaluation "
+            "defaults to OUTPUT_DIR/checkpoints/best.pt."
+        ),
+    )
+    parser.add_argument(
+        "--training-episodes",
+        type=int,
+        help="Override learning_config.training_episodes for this training run.",
+    )
+    parser.add_argument(
+        "--training-runs",
+        type=int,
+        help=(
+            "Number of independent learning runs. Defaults to 3; use 1 only for "
+            "resume or quick diagnostic runs."
+        ),
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     try:
-        result = run_simulation(
-            input_dir=arguments.input_dir,
-            output_dir=arguments.output_dir,
-            scenario=arguments.scenario,
+        settings = load_market_settings(
+            arguments.input_dir / "config.yaml", scenario=arguments.scenario
         )
+        is_learning = (
+            settings.learning_config is not None
+            and settings.learning_config.learning_mode
+        )
+        if is_learning:
+            from .training import (
+                evaluate_learning_scenario,
+                train_learning_scenario,
+            )
+
+            learning_mode = arguments.learning_mode or "train"
+            if learning_mode == "train":
+                result = train_learning_scenario(
+                    input_dir=arguments.input_dir,
+                    output_dir=arguments.output_dir,
+                    scenario=arguments.scenario,
+                    checkpoint_path=arguments.checkpoint,
+                    training_episodes=arguments.training_episodes,
+                    independent_runs=arguments.training_runs,
+                )
+            else:
+                if (
+                    arguments.training_episodes is not None
+                    or arguments.training_runs is not None
+                ):
+                    raise SimulationError(
+                        "--training-episodes and --training-runs can only be used with "
+                        "--learning-mode train."
+                    )
+                result = evaluate_learning_scenario(
+                    input_dir=arguments.input_dir,
+                    output_dir=arguments.output_dir,
+                    scenario=arguments.scenario,
+                    checkpoint_path=arguments.checkpoint,
+                )
+        else:
+            if (
+                arguments.learning_mode is not None
+                or arguments.checkpoint is not None
+                or arguments.training_episodes is not None
+                or arguments.training_runs is not None
+            ):
+                raise SimulationError(
+                    "Learning command-line options require a Version 5 learning scenario."
+                )
+            result = run_simulation(
+                input_dir=arguments.input_dir,
+                output_dir=arguments.output_dir,
+                scenario=arguments.scenario,
+            )
     except SimulationError as exc:
         print(f"Simulation failed: {exc}", file=sys.stderr)
         return 2

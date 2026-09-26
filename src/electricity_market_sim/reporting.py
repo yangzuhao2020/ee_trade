@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import csv
 from collections import defaultdict
-from decimal import Decimal, ROUND_HALF_UP
+from collections.abc import Iterable
 from datetime import datetime
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Iterable
 
+from .learning import PRICE_SCALE_EUR_PER_MWH
 from .models import SimulationResult
-
 
 _SETTLEMENT_QUANTUM = Decimal("0.000000000001")
 
@@ -522,6 +522,34 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         }
         for result in simulation_result.industry_optimization_windows
     ]
+    learning_config = simulation_result.settings.learning_config
+    bid_price_scale = (
+        learning_config.max_bid_price
+        if learning_config is not None
+        else PRICE_SCALE_EUR_PER_MWH
+    )
+    learning_rows = [
+        {
+            "delivery_start": _timestamp(result.delivery_start),
+            "action_1": _number(result.action[0]),
+            "action_2": _number(result.action[1]),
+            "minimum_segment_bid_eur_per_mwh": _number(
+                min(result.action) * bid_price_scale
+            ),
+            "flexible_segment_bid_eur_per_mwh": _number(
+                max(result.action) * bid_price_scale
+            ),
+            "available_power_mw": _number(result.available_power_mw),
+            "accepted_power_mw": _number(result.accepted_power_mw),
+            "clearing_price_eur_per_mwh": _number(
+                result.clearing_price_eur_per_mwh
+            ),
+            "profit_eur": _number(result.profit_eur),
+            "regret_eur": _number(result.regret_eur),
+            "reward": f"{result.reward:.12f}",
+        }
+        for result in simulation_result.learning_steps
+    ]
 
     _write_rows(
         output_dir / "market_results.csv",
@@ -815,4 +843,22 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "maximum_flexible_variable_cost_eur",
             ],
             industry_window_rows,
+        )
+    if learning_rows:
+        _write_rows(
+            output_dir / "learning_results.csv",
+            [
+                "delivery_start",
+                "action_1",
+                "action_2",
+                "minimum_segment_bid_eur_per_mwh",
+                "flexible_segment_bid_eur_per_mwh",
+                "available_power_mw",
+                "accepted_power_mw",
+                "clearing_price_eur_per_mwh",
+                "profit_eur",
+                "regret_eur",
+                "reward",
+            ],
+            learning_rows,
         )

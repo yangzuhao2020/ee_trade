@@ -6,6 +6,7 @@ import warnings
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from math import isfinite
 from pathlib import Path
 from typing import Protocol
 
@@ -35,6 +36,12 @@ from ..inputs import (
     load_powerplants,
     load_storage_units,
     validate_fuel_coverage,
+)
+from ..learning import (
+    ActionProvider,
+    LearningEpisodeSession,
+    TransitionConsumer,
+    calculate_load_base,
 )
 from ..market_models import (
     ClearedSupplyOffer,
@@ -329,6 +336,7 @@ def _opening_coverage_issues(
     exchange_unit: ExchangeUnit | None,
     exchange_profiles: dict[datetime, ExchangeSchedule],
     requires_price_forecast: bool,
+    requires_learning_forecast: bool = False,
     requires_storage_price_forecast: bool = False,
 ) -> list[str]:
     """Return every known reason an opening cannot be quoted completely."""
@@ -353,6 +361,12 @@ def _opening_coverage_issues(
             delivery_start + timedelta(hours=offset)
             for delivery_start in delivery_times
             for offset in range(_FORECAST_HOURS + 1)
+        }
+    if requires_learning_forecast:
+        forecast_times |= {
+            delivery_start + timedelta(hours=offset)
+            for delivery_start in delivery_times
+            for offset in range(_FORECAST_HOURS)
         }
     if requires_storage_price_forecast:
         forecast_times |= {
@@ -419,7 +433,8 @@ def _apply_startup_costs(
     has_inflexible_offer = {
         cleared.offer.unit_name
         for cleared in market_result.offers
-        if cleared.offer.offer_segment in {"inflexible", "block_inflexible"}
+        if cleared.offer.offer_segment
+        in {"inflexible", "block_inflexible", "learning_minimum"}
     }
     applied_names: set[str] = set()
     cleared_offers = []
@@ -431,7 +446,8 @@ def _apply_startup_costs(
             and offer.unit_name not in applied_names
             and offer.offer_type == "power_plant"
             and (
-                offer.offer_segment in {"inflexible", "block_inflexible"}
+                offer.offer_segment
+                in {"inflexible", "block_inflexible", "learning_minimum"}
                 or offer.unit_name not in has_inflexible_offer
             )
         ):
@@ -505,6 +521,83 @@ def _validate_strategy_configuration(
             + ", ".join(missing_fields)
             + "."
         )
+
+
+def _learning_plant(
+    settings: MarketSettings, plants: tuple[PowerPlant, ...]
+) -> PowerPlant | None:
+    """Validate and return Version 5's sole learning participant."""
+
+    learning_plants = tuple(
+        plant
+        for plant in plants
+        if plant.bidding_strategy == "powerplant_energy_learning"
+    )
+    if not learning_plants:
+        if (
+            settings.learning_config is not None
+            and settings.learning_config.learning_mode
+        ):
+            raise InputValidationError(
+                "learning_mode requires exactly one powerplant_energy_learning unit."
+            )
+        return None
+    if len(learning_plants) != 1:
+        raise InputValidationError(
+            "Version 5 requires exactly one powerplant_energy_learning unit."
+        )
+    if settings.learning_config is None or not settings.learning_config.learning_mode:
+        raise InputValidationError(
+            "powerplant_energy_learning requires learning_config.learning_mode: true."
+        )
+    if settings.product_count != 1 or settings.product_duration != timedelta(hours=1):
+        raise InputValidationError(
+            "Version 5 requires one 1-hour product per EOM opening."
+        )
+    if settings.market_mechanism != "pay_as_clear":
+        raise InputValidationError(
+            "Version 5 requires EOM market_mechanism: pay_as_clear."
+        )
+    max_bid_price = settings.learning_config.max_bid_price
+    if (
+        settings.minimum_bid_price > -max_bid_price
+        or settings.maximum_bid_price < max_bid_price
+    ):
+        raise InputValidationError(
+            "The EOM price limits must contain the learning action range "
+            f"[-{max_bid_price:g}, {max_bid_price:g}]."
+        )
+    return learning_plants[0]
+
+
+def _residual_load_forecasts(
+    *,
+    forecast_times: set[datetime],
+    demand_units,
+    demand_profiles: dict[str, dict[datetime, float]],
+    plants: tuple[PowerPlant, ...],
+    availability_profiles: dict[str, dict[datetime, float]],
+) -> dict[datetime, float]:
+    """Return demand minus forecast wind/solar production for each hour."""
+
+    variable_renewables = tuple(
+        plant
+        for plant in plants
+        if any(label in plant.technology.lower() for label in ("wind", "solar"))
+    )
+    residual: dict[datetime, float] = {}
+    for forecast_time in sorted(forecast_times):
+        demand_mw = sum(
+            _profile_power(demand_profiles, unit.name, forecast_time, "demand_df.csv")
+            for unit in demand_units
+            if not unit.is_elastic
+        )
+        renewable_mw = sum(
+            _available_power(plant, forecast_time, availability_profiles)
+            for plant in variable_renewables
+        )
+        residual[forecast_time] = demand_mw - renewable_mw
+    return residual
 
 
 def _validate_storage_configuration(
@@ -742,6 +835,8 @@ def _offers_for_opening(
     price_forecasts: dict[datetime, float],
     exchange_unit: ExchangeUnit | None,
     exchange_schedules: dict[datetime, ExchangeSchedule | None],
+    learning_session: LearningEpisodeSession | None = None,
+    scheduled_results: dict[ScheduledProductKey, MarketClearingResult] | None = None,
 ) -> list[SupplyOffer]:
     """Build an entire opening using its common gate-closure state snapshot."""
 
@@ -792,6 +887,21 @@ def _offers_for_opening(
                         price_forecasts,
                     )
                 )
+        elif plant.bidding_strategy == "powerplant_energy_learning":
+            if learning_session is None or scheduled_results is None:
+                raise InputValidationError(
+                    "powerplant_energy_learning requires a learning episode policy."
+                )
+            for start, end in opening.products:
+                offers.extend(
+                    learning_session.offers_for_product(
+                        delivery_start=start,
+                        delivery_end=end,
+                        available_power_mw=available_powers[start],
+                        marginal_cost_eur_per_mwh=marginal_cost_at(start),
+                        scheduled_results=scheduled_results,
+                    )
+                )
         else:
             marginal_cost = marginal_cost_at(opening.products[0][0])
             offers.extend(
@@ -837,6 +947,8 @@ def _clear_opening(
     storages: tuple[StorageUnit, ...] = (),
     storage_initial_energies_mwh: dict[str, float] | None = None,
     additional_demand_bids: tuple[DemandBid, ...] = (),
+    learning_session: LearningEpisodeSession | None = None,
+    scheduled_results: dict[ScheduledProductKey, MarketClearingResult] | None = None,
 ) -> tuple[MarketClearingResult, ...]:
     """Quote and clear one opening from its gate-closure state snapshot."""
 
@@ -866,6 +978,8 @@ def _clear_opening(
         price_forecasts=price_forecasts,
         exchange_unit=exchange_unit,
         exchange_schedules=exchange_schedules,
+        learning_session=learning_session,
+        scheduled_results=scheduled_results,
     )
     storage_contexts: tuple[StorageClearingContext, ...] = ()
     if storages:
@@ -918,11 +1032,36 @@ def simulate_eom_market(
     openings: tuple[MarketOpening, ...],
     *,
     extension: EomMarketExtension | None = None,
+    learning_action_provider: ActionProvider | None = None,
+    learning_transition_consumer: TransitionConsumer | None = None,
+    learning_load_base_mw: float | None = None,
+    learning_enforce_action_bounds: bool = True,
 ) -> SimulationResult:
     """Run the shared EOM event loop with an optional participant extension."""
 
     plants = load_powerplants(input_path / "powerplant_units.csv")
     _validate_strategy_configuration(settings, plants)
+    learning_plant = _learning_plant(settings, plants)
+    if learning_plant is not None and learning_action_provider is None:
+        raise InputValidationError(
+            "A learning_action_provider is required for a Version 5 market episode."
+        )
+    provided_load_base: float | None = None
+    if learning_load_base_mw is not None:
+        try:
+            provided_load_base = float(learning_load_base_mw)
+        except (TypeError, ValueError) as exc:
+            raise InputValidationError(
+                "The saved learning load base must be numeric."
+            ) from exc
+        if not isfinite(provided_load_base) or provided_load_base <= 0:
+            raise InputValidationError(
+                "The saved learning load base must be a positive finite value."
+            )
+        if learning_plant is None:
+            raise InputValidationError(
+                "A saved learning load base requires a learning plant."
+            )
     storages = load_storage_units(input_path / "storage_units.csv")
     _validate_storage_configuration(settings, storages)
     demand_units = load_demand_units(input_path / "demand_units.csv")
@@ -930,11 +1069,16 @@ def simulate_eom_market(
         plant for plant in plants if plant.bidding_strategy != "powerplant_energy_naive"
     )
     requires_price_forecast = any(
-        plant.min_power_mw > _POWER_TOLERANCE_MW for plant in runtime_plants
+        plant.bidding_strategy != "powerplant_energy_learning"
+        and plant.min_power_mw > _POWER_TOLERANCE_MW
+        for plant in runtime_plants
     )
+    requires_learning_forecast = learning_plant is not None
     requires_storage_price_forecast = bool(storages)
     requires_market_price_forecast = (
-        requires_price_forecast or requires_storage_price_forecast
+        requires_price_forecast
+        or requires_learning_forecast
+        or requires_storage_price_forecast
     )
     extension_inputs = (
         extension.prepare(requires_market_price_forecast=requires_market_price_forecast)
@@ -1039,9 +1183,15 @@ def simulate_eom_market(
             exchange_unit=exchange_unit,
             exchange_profiles=exchange_profiles,
             requires_price_forecast=requires_price_forecast,
+            requires_learning_forecast=requires_learning_forecast,
             requires_storage_price_forecast=requires_storage_price_forecast,
         )
         if issues:
+            if learning_plant is not None:
+                raise InputValidationError(
+                    f"Learning opening {_timestamp(opening.opening_time)} is incomplete: "
+                    + "; ".join(issues)
+                )
             warnings.warn(
                 f"跳过市场开放 {_timestamp(opening.opening_time)}："
                 + "; ".join(issues),
@@ -1063,6 +1213,11 @@ def simulate_eom_market(
                         forecast_starts.update(
                             delivery_start + timedelta(hours=offset)
                             for offset in range(_FORECAST_HOURS + 1)
+                        )
+                    if requires_learning_forecast:
+                        forecast_starts.update(
+                            delivery_start + timedelta(hours=offset)
+                            for offset in range(_FORECAST_HOURS)
                         )
                     if requires_storage_price_forecast:
                         forecast_starts.update(
@@ -1088,6 +1243,41 @@ def simulate_eom_market(
                 exchange_profiles=exchange_profiles,
                 forecast_starts=forecast_starts,
             )
+    learning_session: LearningEpisodeSession | None = None
+    if learning_plant is not None:
+        training_times = sorted(
+            {start for opening in valid_openings for start, _ in opening.products}
+        )
+        forecast_times = {
+            start + timedelta(hours=offset)
+            for start in training_times
+            for offset in range(_FORECAST_HOURS)
+        }
+        residual_forecasts = _residual_load_forecasts(
+            forecast_times=forecast_times,
+            demand_units=demand_units,
+            demand_profiles=demand_profiles,
+            plants=plants,
+            availability_profiles=availability_profiles,
+        )
+        if provided_load_base is None:
+            load_base = calculate_load_base(
+                [residual_forecasts[start] for start in training_times]
+            )
+        else:
+            load_base = provided_load_base
+        assert learning_action_provider is not None
+        assert settings.learning_config is not None
+        learning_session = LearningEpisodeSession(
+            plant=learning_plant,
+            action_provider=learning_action_provider,
+            residual_load_forecasts_mw=residual_forecasts,
+            price_forecasts_eur_per_mwh=price_forecasts,
+            load_base_mw=load_base,
+            transition_consumer=learning_transition_consumer,
+            enforce_action_bounds=learning_enforce_action_bounds,
+            price_scale_eur_per_mwh=settings.learning_config.max_bid_price,
+        )
     runtime_states = {
         plant.name: PlantRuntimeState.initially_off(plant) for plant in runtime_plants
     }
@@ -1113,6 +1303,16 @@ def simulate_eom_market(
     results: list[MarketClearingResult] = []
     storage_results: list[StorageDispatchResult] = []
 
+    def finalize_product_starts(keys: list[ScheduledProductKey]) -> None:
+        for key in keys:
+            market_result = _apply_startup_costs(
+                scheduled_results[key], plants, runtime_states
+            )
+            scheduled_results[key] = market_result
+            results.append(market_result)
+            if learning_session is not None:
+                learning_session.record_result(market_result)
+
     while openings_by_time or pending_starts or pending_ends:
         event_time = min([*openings_by_time, *pending_starts, *pending_ends])
 
@@ -1125,6 +1325,12 @@ def simulate_eom_market(
             )
             if extension is not None:
                 extension.record_delivery(scheduled_results[key])
+
+        starting_keys = pending_starts.pop(event_time, [])
+        if learning_session is not None:
+            # Finalize the reward before requesting the next action.  Once the
+            # next state is built, a trainer may update the Actor first.
+            finalize_product_starts(starting_keys)
 
         for opening in openings_by_time.pop(event_time, []):
             additional_demand_bids = (
@@ -1154,6 +1360,8 @@ def simulate_eom_market(
                 storages=storages,
                 storage_initial_energies_mwh=storage_initial_energies,
                 additional_demand_bids=additional_demand_bids,
+                learning_session=learning_session,
+                scheduled_results=scheduled_results,
             )
             for market_result in opening_results:
                 market_result = replace(
@@ -1168,14 +1376,16 @@ def simulate_eom_market(
                 pending_starts[market_result.delivery_start].append(key)
                 pending_ends[market_result.delivery_end].append(key)
 
-        # Products beginning now were unavailable to the preceding bid
-        # generation.  Startup costs use the state immediately before delivery.
-        for key in pending_starts.pop(event_time, []):
-            market_result = _apply_startup_costs(
-                scheduled_results[key], plants, runtime_states
-            )
-            scheduled_results[key] = market_result
-            results.append(market_result)
+        if learning_session is None:
+            # Preserve the established V1--V4 event order.
+            finalize_product_starts(starting_keys)
+
+    learning_steps = ()
+    learning_transitions = ()
+    learning_load_base_mw = None
+    if learning_session is not None:
+        learning_steps, learning_transitions = learning_session.finalize()
+        learning_load_base_mw = learning_session.load_base_mw
 
     result = SimulationResult(
         settings=settings,
@@ -1198,5 +1408,8 @@ def simulate_eom_market(
                 ),
             )
         ),
+        learning_steps=learning_steps,
+        learning_transitions=learning_transitions,
+        learning_load_base_mw=learning_load_base_mw,
     )
     return extension.finalize(result) if extension is not None else result

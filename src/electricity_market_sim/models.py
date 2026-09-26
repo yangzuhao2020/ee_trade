@@ -39,6 +39,9 @@ __all__ = [
     "IndustrialOptimizationWindowResult",
     "IndustrialPlan",
     "IndustrialUnit",
+    "LearningConfig",
+    "LearningStepResult",
+    "LearningTransition",
     "MarketClearingResult",
     "MarketOpening",
     "MarketSettings",
@@ -50,6 +53,37 @@ __all__ = [
     "SupplyOffer",
     "Trade",
 ]
+
+
+@dataclass(frozen=True)
+class LearningConfig:
+    """Validated Version 5 single-agent MATD3 settings."""
+
+    learning_mode: bool
+    algorithm: str
+    learning_rate: float
+    training_episodes: int
+    initial_experience_episodes: int
+    replay_buffer_size: int
+    batch_size: int
+    gamma: float
+    train_frequency_steps: int
+    gradient_steps: int
+    validation_interval: int
+    exploration_noise_std: float
+    noise_sigma: float
+    noise_scale: float
+    noise_dt: float
+    action_noise_schedule: str
+    tau: float
+    policy_delay: int
+    target_policy_noise: float
+    target_noise_clip: float
+    device: str = "cpu"
+    continue_learning: bool = False
+    trained_policies_save_path: str | None = None
+    trained_policies_load_path: str | None = None
+    max_bid_price: float = 100.0
 
 
 @dataclass(frozen=True)
@@ -71,6 +105,8 @@ class MarketSettings:
     exchange_units_file: str | None = None
     industrial_dsm_units_file: str | None = None
     additional_fields: frozenset[str] = field(default_factory=frozenset)
+    learning_config: LearningConfig | None = None
+    seed: int | None = None
 
 
 @dataclass(frozen=True)
@@ -416,6 +452,35 @@ class SimulationResult:
     industry_results: tuple[IndustrialDispatchResult, ...] = ()
     industry_flexibility_results: tuple[IndustrialFlexibilityResult, ...] = ()
     industry_optimization_windows: tuple[IndustrialOptimizationWindowResult, ...] = ()
+    learning_steps: tuple[LearningStepResult, ...] = ()
+    learning_transitions: tuple[LearningTransition, ...] = ()
+    learning_load_base_mw: float | None = None
+
+
+@dataclass(frozen=True)
+class LearningStepResult:
+    """Auditable action, dispatch, and reward for one learning delivery."""
+
+    delivery_start: datetime
+    action: tuple[float, float]
+    available_power_mw: float
+    accepted_power_mw: float
+    clearing_price_eur_per_mwh: float
+    profit_eur: float
+    regret_eur: float
+    reward: float
+
+
+@dataclass(frozen=True)
+class LearningTransition:
+    """One replay-buffer item using the unsorted executed action."""
+
+    delivery_start: datetime
+    state: tuple[float, ...]
+    action: tuple[float, float]
+    reward: float
+    next_state: tuple[float, ...]
+    done: bool
 
 
 @dataclass(frozen=True)
