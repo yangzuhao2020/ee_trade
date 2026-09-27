@@ -131,6 +131,7 @@ def _load_learning_config(
             policy_delay=int(required("policy_delay")),
             target_policy_noise=float(required("target_policy_noise")),
             target_noise_clip=float(required("target_noise_clip")),
+            actor_architecture=str(raw.get("actor_architecture", "mlp")),
             device=str(raw.get("device", "cpu")),
             continue_learning=continue_learning,
             trained_policies_save_path=optional_path("trained_policies_save_path"),
@@ -145,6 +146,10 @@ def _load_learning_config(
     if config.algorithm != "matd3":
         raise InputValidationError(
             "Version 5 requires learning_config.algorithm: matd3."
+        )
+    if config.actor_architecture != "mlp":
+        raise InputValidationError(
+            "Version 5 supports only learning_config.actor_architecture: mlp."
         )
     if config.action_noise_schedule != "linear":
         raise InputValidationError(

@@ -14,6 +14,12 @@ from .dispatch import (
     _plot_storage_dispatch,
 )
 from .industry import _plot_industry_dispatch
+from .learning import (
+    _plot_evaluation_comparison,
+    _plot_learning_curves,
+    _plot_learning_unit,
+    _read_learning_metrics,
+)
 from .market import (
     _plot_first_merit_order,
     _plot_first_pay_as_bid_order_book,
@@ -29,13 +35,18 @@ from .opening import (
 
 # Keep the stable package-level API intentionally small; chart implementations
 # live in focused modules and are imported by this orchestration entry point.
-__all__ = ["generate_plots"]
+__all__ = ["generate_learning_plots", "generate_plots"]
+
+_LEARNING_UNIT_PLOT = "learning_unit.png"
+_LEARNING_CURVES_PLOT = "learning_curves.png"
+_LEARNING_COMPARISON_PLOT = "learning_evaluation_comparison.png"
 
 
 def generate_plots(
     result: SimulationResult,
     output_dir: str | Path,
     opening_time: datetime | None = None,
+    learning_episode_label: str = "Actor evaluation",
 ) -> tuple[Path, ...]:
     """Render durable PNG summaries from a complete simulation result.
 
@@ -126,6 +137,24 @@ def generate_plots(
             )
         else:
             industry_plot_path.unlink(missing_ok=True)
+        if result.learning_steps:
+            paths.append(
+                _plot_learning_unit(
+                    pyplot,
+                    dates,
+                    results,
+                    result.learning_steps,
+                    plot_directory / _LEARNING_UNIT_PLOT,
+                    learning_episode_label,
+                )
+            )
+        else:
+            for name in (
+                _LEARNING_UNIT_PLOT,
+                _LEARNING_CURVES_PLOT,
+                _LEARNING_COMPARISON_PLOT,
+            ):
+                (plot_directory / name).unlink(missing_ok=True)
         if result.settings.market_mechanism == "complex_clearing":
             # A directory may have been rendered by an older version which
             # incorrectly treated complex clearing as a simple merit order.
@@ -188,4 +217,53 @@ def generate_plots(
     except Exception as exc:
         raise PlottingError(f"Could not generate PNG plots: {exc}") from exc
 
+    return tuple(paths)
+
+
+def generate_learning_plots(
+    metrics_path: str | Path,
+    output_dir: str | Path,
+) -> tuple[Path, ...]:
+    """Render Version 5 learning curves and the Actor/baseline comparison.
+
+    The metrics CSV written by training or evaluation is the only input, so the
+    learning API keeps returning a plain ``SimulationResult``.
+    """
+
+    rows = _read_learning_metrics(Path(metrics_path))
+    curve_rows = [
+        row
+        for row in rows
+        if row["phase"] in {"initial_experience", "train", "validation"}
+    ]
+    comparison_rows = [
+        row for row in rows if row["phase"] in {"evaluation", "baseline"}
+    ]
+    pyplot, _ = _load_matplotlib()
+    plot_directory = Path(output_dir)
+    plot_directory.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+    try:
+        if curve_rows:
+            paths.append(
+                _plot_learning_curves(
+                    pyplot, curve_rows, plot_directory / _LEARNING_CURVES_PLOT
+                )
+            )
+        else:
+            (plot_directory / _LEARNING_CURVES_PLOT).unlink(missing_ok=True)
+        if comparison_rows:
+            paths.append(
+                _plot_evaluation_comparison(
+                    pyplot,
+                    comparison_rows,
+                    plot_directory / _LEARNING_COMPARISON_PLOT,
+                )
+            )
+        else:
+            (plot_directory / _LEARNING_COMPARISON_PLOT).unlink(missing_ok=True)
+    except PlottingError:
+        raise
+    except Exception as exc:
+        raise PlottingError(f"Could not generate learning PNG plots: {exc}") from exc
     return tuple(paths)

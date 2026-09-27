@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .config import load_market_settings
 from .errors import SimulationError
-from .plotting import generate_plots
+from .plotting import generate_learning_plots, generate_plots
 from .simulation import run_simulation
 
 
@@ -90,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
+    learning_metrics_path: Path | None = None
     try:
         settings = load_market_settings(
             arguments.input_dir / "config.yaml", scenario=arguments.scenario
@@ -98,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             settings.learning_config is not None
             and settings.learning_config.learning_mode
         )
+        learning_episode_label = "Actor evaluation"
         if is_learning:
             from .training import (
                 evaluate_learning_scenario,
@@ -105,6 +107,17 @@ def main(argv: list[str] | None = None) -> int:
             )
 
             learning_mode = arguments.learning_mode or "train"
+            if (
+                learning_mode == "evaluate"
+                and arguments.checkpoint is not None
+                and arguments.checkpoint.name != "best.pt"
+            ):
+                learning_episode_label = (
+                    f"Actor evaluation ({arguments.checkpoint.stem})"
+                )
+            else:
+                learning_episode_label = "Best Actor evaluation"
+
             if learning_mode == "train":
                 result = train_learning_scenario(
                     input_dir=arguments.input_dir,
@@ -114,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
                     training_episodes=arguments.training_episodes,
                     independent_runs=arguments.training_runs,
                 )
+                learning_metrics_path = arguments.output_dir / "learning_metrics.csv"
             else:
                 if (
                     arguments.training_episodes is not None
@@ -128,6 +142,9 @@ def main(argv: list[str] | None = None) -> int:
                     output_dir=arguments.output_dir,
                     scenario=arguments.scenario,
                     checkpoint_path=arguments.checkpoint,
+                )
+                learning_metrics_path = (
+                    arguments.output_dir / "learning_evaluation_metrics.csv"
                 )
         else:
             if (
@@ -154,7 +171,12 @@ def main(argv: list[str] | None = None) -> int:
                 result,
                 arguments.output_dir / "plots",
                 opening_time=arguments.plot_opening,
+                learning_episode_label=learning_episode_label,
             )
+            if learning_metrics_path is not None:
+                generate_learning_plots(
+                    learning_metrics_path, arguments.output_dir / "plots"
+                )
         except Exception as exc:
             # CSV output is already durable at this point. Plot failures must
             # not change a successful simulation into a lost result.

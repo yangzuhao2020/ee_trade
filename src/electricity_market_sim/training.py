@@ -752,6 +752,10 @@ def _train_single_run(
             ),
             expected_load_base_mw=float(restored["load_base_mw"]),
         )
+    if best_discounted_reward == float("-inf"):
+        # No historical best is being continued: drop a stale best.pt left by
+        # an unrelated earlier training so it cannot pass as this run's best.
+        best_path.unlink(missing_ok=True)
 
     for episode in range(first_episode, episode_count + 1):
         initial_experience = episode <= config.initial_experience_episodes
@@ -767,7 +771,7 @@ def _train_single_run(
             _metrics(
                 training_result,
                 run=run,
-                phase="train",
+                phase="initial_experience" if initial_experience else "train",
                 episode=episode,
                 gamma=config.gamma,
             )
@@ -786,7 +790,10 @@ def _train_single_run(
                 gamma=config.gamma,
             )
             metrics.append(validation_metrics)
-            if validation_metrics.discounted_reward > best_discounted_reward:
+            if (
+                not initial_experience
+                and validation_metrics.discounted_reward > best_discounted_reward
+            ):
                 best_discounted_reward = validation_metrics.discounted_reward
                 agent.save_checkpoint(
                     best_path,
@@ -805,9 +812,10 @@ def _train_single_run(
             ),
         )
 
-    if not best_path.is_file():
+    if best_discounted_reward == float("-inf") or not best_path.is_file():
         raise InputValidationError(
-            "Training did not produce a best checkpoint; increase training_episodes."
+            "Training did not produce a best checkpoint; increase training_episodes "
+            "or reduce episodes_collecting_initial_experience."
         )
 
     best_payload = agent.load_checkpoint(best_path, load_optimizers=False)

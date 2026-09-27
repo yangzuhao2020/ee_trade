@@ -14,6 +14,8 @@ from .common import (
     _save_figure,
 )
 
+_NARROW_SEGMENT_SHARE = 0.005
+
 
 def _market_price_series(
     results: tuple[MarketClearingResult, ...],
@@ -508,10 +510,18 @@ def _plot_first_merit_order(pyplot, market, unit_colors, path: Path) -> Path:
             cleared.offer.identifier,
         ),
     )
+    x_limit = (
+        max(
+            sum(cleared.offer.offered_energy_mwh for cleared in offers),
+            market.requested_demand_mwh,
+        )
+        * 1.03
+    )
+    narrow_energy = x_limit * _NARROW_SEGMENT_SHARE
     cumulative_energy = 0.0
     label_offset = max(market.clearing_price_eur_per_mwh * 0.035, 1.0)
-    accepted_label_added = False
-    unaccepted_label_added = False
+    has_accepted = False
+    has_unaccepted = False
     show_unit_labels = len(offers) <= 20
     marginal_point: tuple[float, float] | None = None
 
@@ -520,16 +530,16 @@ def _plot_first_merit_order(pyplot, market, unit_colors, path: Path) -> Path:
         offered_end = cumulative_energy + offer.offered_energy_mwh
         accepted_end = cumulative_energy + cleared.accepted_energy_mwh
         color = unit_colors[offer.unit_name] if show_unit_labels else "#54A24B"
-        if cleared.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH:
+        is_accepted = cleared.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH
+        if is_accepted:
             axis.hlines(
                 offer.bid_price_eur_per_mwh,
                 cumulative_energy,
                 accepted_end,
                 color=color,
                 linewidth=7,
-                label=("Accepted offer energy" if not accepted_label_added else None),
             )
-            accepted_label_added = True
+            has_accepted = True
         if accepted_end < offered_end - _ENERGY_TOLERANCE_MWH:
             axis.hlines(
                 offer.bid_price_eur_per_mwh,
@@ -537,17 +547,31 @@ def _plot_first_merit_order(pyplot, market, unit_colors, path: Path) -> Path:
                 offered_end,
                 color="#B8B8B8",
                 linewidth=4,
-                label=(
-                    "Unaccepted offer energy" if not unaccepted_label_added else None
-                ),
             )
-            unaccepted_label_added = True
+            has_unaccepted = True
+        is_narrow = _ENERGY_TOLERANCE_MWH < offer.offered_energy_mwh < narrow_energy
+        if is_narrow:
+            axis.scatter(
+                [(cumulative_energy + offered_end) / 2],
+                [offer.bid_price_eur_per_mwh],
+                s=30,
+                color=color if is_accepted else "#B8B8B8",
+                edgecolors="#1F1F1F",
+                linewidths=0.5,
+                zorder=3,
+            )
         if show_unit_labels and offer.offered_energy_mwh > _ENERGY_TOLERANCE_MWH:
             axis.text(
-                (cumulative_energy + offered_end) / 2,
+                cumulative_energy
+                if is_narrow
+                else (cumulative_energy + offered_end) / 2,
                 offer.bid_price_eur_per_mwh + label_offset,
-                offer.unit_name,
-                ha="center",
+                (
+                    f"{offer.unit_name} · {offer.offer_segment.removeprefix('learning_')}"
+                    if offer.offer_segment.startswith("learning_")
+                    else offer.unit_name
+                ),
+                ha="left" if is_narrow else "center",
                 va="bottom",
                 fontsize=9,
             )
@@ -564,6 +588,16 @@ def _plot_first_merit_order(pyplot, market, unit_colors, path: Path) -> Path:
             marginal_point = (accepted_end, offer.bid_price_eur_per_mwh)
         cumulative_energy = offered_end
 
+    if has_accepted:
+        axis.plot(
+            [],
+            [],
+            color="#4B5563" if show_unit_labels else "#54A24B",
+            linewidth=7,
+            label="Accepted offer energy",
+        )
+    if has_unaccepted:
+        axis.plot([], [], color="#B8B8B8", linewidth=4, label="Unaccepted offer energy")
     if marginal_point is not None:
         axis.scatter(
             [marginal_point[0]],
@@ -605,7 +639,7 @@ def _plot_first_merit_order(pyplot, market, unit_colors, path: Path) -> Path:
     axis.set_title("Merit order — " + market.delivery_start.strftime("%Y-%m-%d %H:%M"))
     axis.set_xlabel("Cumulative offered energy (MWh)")
     axis.set_ylabel("Bid price (EUR/MWh)")
-    axis.set_xlim(0, max(cumulative_energy, market.requested_demand_mwh) * 1.03)
+    axis.set_xlim(0, x_limit)
     axis.grid(axis="y", alpha=0.25)
     axis.legend(loc="upper left")
     figure.tight_layout()

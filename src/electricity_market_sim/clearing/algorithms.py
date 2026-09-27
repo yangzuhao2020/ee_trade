@@ -93,7 +93,10 @@ def clear_pay_as_clear(
 
     Supply is ordered by `(price, unit_name)`. Demand is ordered by
     `(-price, unit_name)`. These stable keys deliberately replace ASSUME's random
-    tie break so a learning scenario produces reproducible results.
+    tie break so a learning scenario produces reproducible results. At equal
+    price, a learning unit's minimum-output segment clears before its flexible
+    segment so accepted energy has a deterministic segment attribution. This
+    tie break does not impose a minimum dispatched output on the unit.
     """
 
     if not demand_bids and not supply_offers:
@@ -125,6 +128,7 @@ def clear_pay_as_clear(
         key=lambda offer: (
             offer.bid_price_eur_per_mwh,
             offer.unit_name,
+            offer.offer_segment != "learning_minimum",
             offer.identifier,
         ),
     )  # 按价格从小到大排。

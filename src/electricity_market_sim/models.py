@@ -79,6 +79,7 @@ class LearningConfig:
     policy_delay: int
     target_policy_noise: float
     target_noise_clip: float
+    actor_architecture: str = "mlp"
     device: str = "cpu"
     continue_learning: bool = False
     trained_policies_save_path: str | None = None
