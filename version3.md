@@ -198,4 +198,4 @@ $$
 10. 使用至少包含一个低价时段和一个后续高价时段的短预测序列，验证电池在功率、效率、SOC 和窗口末端 SOC 约束内低价充电、高价放电；不得使用未来实际出清价作出决策。
 11. `trade_results.csv` 的每笔交易包含 `opening_id`、`buyer_bid_id` 和 `seller_offer_id`；按 `opening_id` 和 `buyer_bid_id` 汇总的 `payment_eur` 必须与 `demand_results.csv` 中对应买单的实际支付一致。
 
-运行入口沿用 `PYTHONPATH=src python -m electricity_market_sim`，指定 `--input-dir examples/input/example_01h --scenario eom` 和独立输出目录。
+运行入口沿用 `PYTHONPATH=. python -m electricity_market_sim`（包已移至项目根），指定 `--input-dir examples/input/example_01h --scenario eom` 和独立输出目录。
