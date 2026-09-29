@@ -1,4 +1,7 @@
-examples
+examples/*
+!examples/input/
+examples/input/*/*
+!examples/input/*/config.yaml
 outputs
 tests/*
 !tests/test_v3_trading.py
