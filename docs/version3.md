@@ -19,7 +19,7 @@
 
 统一单位：设备功率用 MW，电池容量用 MWh，价格用 EUR/MWh。时长为 $Δt=0.25 h$ 的产品，其申报电量为 $功率 × 0.25$ MWh；不得把 15 分钟的 MW 数值直接当成 MWh。
 
-统一订单方向与符号：所有买单和卖单的 `volume_mwh` 均保存非负电量，使用 `side=buy` 或 `side=sell` 表示订单方向。进入市场供需平衡计算时，卖单电量取正值，买单电量取负值；该符号转换只用于内部平衡计算，不改变订单中保存的 `volume_mwh`。`demand_results.csv` 中的申报、成交和未成交电量以及 `trade_results.csv` 中的成交电量均使用非负值。
+统一订单方向与符号：所有买单和卖单的 `volume_mwh` 均保存非负电量，使用 `side=buy` 或 `side=sell` 表示订单方向。进入市场供需平衡计算时，卖单电量取正值，买单电量取负值；该符号转换只用于内部平衡计算，不改变订单中保存的 `volume_mwh`。`demand_results.csv` 中的申报、成交和未成交电量均使用非负值。
 
 时间序列的时间戳表示交付时段起点。市场在00:00开市时，首个产品为00:15—00:30，读取00:15对应的数据；00:00数据只用于初始状态或历史状态初始化，不生成交付订单。
 
@@ -27,23 +27,10 @@
 保留第二版已有输出，本版新增以下内容。
 ### demand_results.csv
 增加 A360 的买单、成交量和实际支付。市场成交量不得与其他结果重复累加。
-### trade_results.csv
-记录 `pay_as_bid` 的逐笔成交：
-```
-delivery_start
-delivery_end
-opening_id
-buyer_name
-buyer_bid_id
-seller_name
-seller_offer_id
-trade_energy_mwh
-trade_price_eur_per_mwh
-payment_eur
-```
-成交电量使用正值：$$
+### 成交结算
+取消 `trade_results.csv` 的独立导出。内部逐笔成交记录继续用于结算和市场均价计算，成交电量使用正值：$$
 \mathrm{payment} = \mathrm{trade\_energy} \times \mathrm{trade\_price}$$
-`demand_results.csv` 中每张买单的 `payment_eur`，必须等于 `trade_results.csv` 中相同 `opening_id` 和 `buyer_bid_id` 的全部逐笔支付之和。
+`demand_results.csv` 直接读取出清结果中每张买单的成交电量和实际支付，导出时不再重新汇总内部逐笔交易。完全未成交的买单仍记录申报量、未成交量和零支付。
 ### household_results.csv
 记录 A360 的计划及实际设备运行：
 ```
@@ -180,7 +167,7 @@ $$
 ## 关于报价、出清与实际运行注意的地方
 1. 对每个可交付的 15 分钟产品，A360 提交一张普通买单：`side = buy`，`volume_mwh = P_grid × 0.25`，`price = 3000 EUR/MWh`。零电量不提交。`price_EOM=130.92` 是优化预测值，**不是这张买单的报价**。
 2. `demand_EOM` 仍按 `demand_df.csv` 的该时段数值提交 `side=buy` 的独立买单，价格使用其 `62.88 EUR/MWh`；报价超过其最高愿付价的卖单不得与之成交。继续支持旧输入未填写 `price` 时的行为。
-3. `pay_as_bid` 按需求报价从高到低、供给报价从低到高撮合；仅当卖方报价不高于买方报价时成交，边际订单可部分成交。每笔成交按**对应卖单的报价**结算，同时保存撮合明细与双方费用。此机制没有全市场统一结算价，不能把 `3000` 或预测价写成实际价格。
+3. `pay_as_bid` 按需求报价从高到低、供给报价从低到高撮合；仅当卖方报价不高于买方报价时成交，边际订单可部分成交。每笔成交按**对应卖单的报价**结算，内部保留撮合明细用于汇总买方支付和卖方收入。此机制没有全市场统一结算价，不能把 `3000` 或预测价写成实际价格。
 4. 本版新增逐笔结算价；`market_results.csv` 在 `pay_as_bid` 下的原 `clearing_price_eur_per_mwh` 留空，另列示按成交量加权的 `average_trade_price_eur_per_mwh`，图表明确标为均价。调整结果数据模型以允许这个空值，不用 `0` 冒充统一出清价。原有 `pay_as_clear` 仍按第二版的统一价记录和结算。
 5. 订单计划、市场成交与真实执行分开：只有成交的购电量才能供建筑运行。若 A360 买单未完全成交，先削减或取消计划中的电池充电，将成交电量优先用于热泵；满足热泵用电后的剩余成交电量，才可在功率和 SOC 约束内用于电池充电。若成交电量仍不足以满足热泵用电，则按实际供热量运行热泵并记录 `unmet_heat_mwh_th`。不得照计划更新电池 SOC 或假定未成交电量已经供给热泵；每个交付时段结束后按照实际设备运行更新真实 SOC。
 6. `example_01h` 不读取 `demand_df.csv` 中的建筑负荷列。A360 在本版仅支持默认值 `P_fixed=0 MW`，相关建筑负荷列不参与优化和报价；非零固定负荷尚未验证，且不属于本版验收范围。
@@ -196,6 +183,6 @@ $$
 8. 市场订单的 `volume_mwh` 统一使用非负 MWh，并通过 `side` 区分买卖方向。15 分钟产品中，`demand_EOM=100 MW` 对应 `side=buy`、`volume_mwh=25 MWh` 的买单；发电机报价功率为 `P MW` 时，对应 `side=sell`、`volume_mwh=P×0.25 MWh` 的卖单。进入供需平衡计算时买单转换为 `-25 MWh`，订单和输出文件仍保存 `25 MWh`。
 9. 在单个 15 分钟产品中，当总需求低于 NEURATH F 的 `min_power=560 MW` 时，其普通卖单仍可部分成交；成交功率等于市场实际匹配的需求功率，不因 `min_power` 导致出清不可行。
 10. 使用至少包含一个低价时段和一个后续高价时段的短预测序列，验证电池在功率、效率、SOC 和窗口末端 SOC 约束内低价充电、高价放电；不得使用未来实际出清价作出决策。
-11. `trade_results.csv` 的每笔交易包含 `opening_id`、`buyer_bid_id` 和 `seller_offer_id`；按 `opening_id` 和 `buyer_bid_id` 汇总的 `payment_eur` 必须与 `demand_results.csv` 中对应买单的实际支付一致。
+11. 不生成 `trade_results.csv`；按同一次开市和买单编号汇总内部交易的成交电量及支付，必须与 `demand_results.csv` 中对应买单的成交电量及实际支付一致。
 
 运行入口沿用 `PYTHONPATH=. python -m electricity_market_sim`（包已移至项目根），指定 `--input-dir examples/input/example_01h --scenario eom` 和独立输出目录。

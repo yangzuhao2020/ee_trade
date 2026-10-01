@@ -44,7 +44,6 @@ from ..learning import (
     calculate_load_base,
 )
 from ..market_models import (
-    ClearedSupplyOffer,
     DemandBid,
     MarketClearingResult,
     SupplyOffer,
@@ -453,29 +452,8 @@ def _apply_startup_costs(
         ):
             startup_cost = plants_by_name[offer.unit_name].start_cost_eur
             applied_names.add(offer.unit_name)
-        cleared_offers.append(
-            ClearedSupplyOffer(
-                offer=offer,
-                accepted_energy_mwh=cleared.accepted_energy_mwh,
-                clearing_price_eur_per_mwh=cleared.clearing_price_eur_per_mwh,
-                startup_cost_eur=startup_cost,
-            )
-        )
-    return MarketClearingResult(
-        delivery_start=market_result.delivery_start,
-        delivery_end=market_result.delivery_end,
-        requested_demand_mwh=market_result.requested_demand_mwh,
-        cleared_energy_mwh=market_result.cleared_energy_mwh,
-        unserved_load_mwh=market_result.unserved_load_mwh,
-        unfulfilled_export_mwh=market_result.unfulfilled_export_mwh,
-        clearing_price_eur_per_mwh=market_result.clearing_price_eur_per_mwh,
-        offers=tuple(cleared_offers),
-        demand_bids=market_result.demand_bids,
-        marginal_unit_name=market_result.marginal_unit_name,
-        pricing_method=market_result.pricing_method,
-        opening_time=market_result.opening_time,
-        trades=market_result.trades,
-    )
+        cleared_offers.append(replace(cleared, startup_cost_eur=startup_cost))
+    return replace(market_result, offers=tuple(cleared_offers))
 
 
 def _record_runtime_states(

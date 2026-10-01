@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from math import isclose, isfinite
@@ -222,9 +223,7 @@ class Trade:
 
     delivery_start: datetime
     delivery_end: datetime
-    buyer_name: str
     buyer_bid_id: str
-    seller_name: str
     seller_offer_id: str
     trade_energy_mwh: float
     trade_price_eur_per_mwh: float
@@ -499,27 +498,11 @@ class MarketClearingResult:
         )
 
     @property
-    def requested_export_mwh(self) -> float:
-        return sum(
-            demand.bid.volume_mwh
-            for demand in self.demand_bids
-            if demand.bid.bid_type == "export"
-        )
-
-    @property
     def cleared_export_mwh(self) -> float:
         return sum(
             demand.accepted_energy_mwh
             for demand in self.demand_bids
             if demand.bid.bid_type == "export"
-        )
-
-    @property
-    def offered_import_mwh(self) -> float:
-        return sum(
-            offer.offer.offered_energy_mwh
-            for offer in self.offers
-            if offer.offer.offer_type == "import"
         )
 
     @property
@@ -593,9 +576,9 @@ class MarketClearingResult:
 
         offers = {cleared.offer.identifier: cleared for cleared in self.offers}
         bids = {cleared.bid.identifier: cleared for cleared in self.demand_bids}
-        traded_by_offer: dict[str, float] = {}
-        traded_by_bid: dict[str, float] = {}
-        payment_by_bid: dict[str, float] = {}
+        traded_by_offer: dict[str, float] = defaultdict(float)
+        traded_by_bid: dict[str, float] = defaultdict(float)
+        payment_by_bid: dict[str, float] = defaultdict(float)
         for trade in self.trades:
             if trade.seller_offer_id not in offers:
                 raise ValueError(f"Unknown seller offer {trade.seller_offer_id!r}.")
@@ -603,8 +586,6 @@ class MarketClearingResult:
                 raise ValueError(f"Unknown buyer bid {trade.buyer_bid_id!r}.")
             offer = offers[trade.seller_offer_id].offer
             bid = bids[trade.buyer_bid_id].bid
-            if trade.seller_name != offer.unit_name or trade.buyer_name != bid.unit_name:
-                raise ValueError("Trade participant names must match their order IDs.")
             expected_trade_price = (
                 offer.bid_price_eur_per_mwh
                 if self.pricing_method == "pay_as_bid"
@@ -622,20 +603,12 @@ class MarketClearingResult:
                 )
             if trade.trade_price_eur_per_mwh > bid.price_eur_per_mwh + _ENERGY_TOLERANCE_MWH:
                 raise ValueError("A trade price cannot exceed the buyer bid price.")
-            traded_by_offer[trade.seller_offer_id] = (
-                traded_by_offer.get(trade.seller_offer_id, 0.0)
-                + trade.trade_energy_mwh
-            )
-            traded_by_bid[trade.buyer_bid_id] = (
-                traded_by_bid.get(trade.buyer_bid_id, 0.0)
-                + trade.trade_energy_mwh
-            )
-            payment_by_bid[trade.buyer_bid_id] = (
-                payment_by_bid.get(trade.buyer_bid_id, 0.0) + trade.payment_eur
-            )
+            traded_by_offer[trade.seller_offer_id] += trade.trade_energy_mwh
+            traded_by_bid[trade.buyer_bid_id] += trade.trade_energy_mwh
+            payment_by_bid[trade.buyer_bid_id] += trade.payment_eur
 
         for identifier, cleared in offers.items():
-            accepted = traded_by_offer.get(identifier, 0.0)
+            accepted = traded_by_offer[identifier]
             if not isclose(
                 accepted,
                 cleared.accepted_energy_mwh,
@@ -659,7 +632,7 @@ class MarketClearingResult:
                         "A pay-as-bid seller must settle at its own offer price."
                     )
         for identifier, cleared in bids.items():
-            accepted = traded_by_bid.get(identifier, 0.0)
+            accepted = traded_by_bid[identifier]
             if not isclose(
                 accepted,
                 cleared.accepted_energy_mwh,
@@ -668,7 +641,7 @@ class MarketClearingResult:
             ):
                 raise ValueError("Trade quantities must reconcile to buyer acceptance.")
             if not isclose(
-                payment_by_bid.get(identifier, 0.0),
+                payment_by_bid[identifier],
                 cleared.payment_eur,
                 rel_tol=0.0,
                 abs_tol=1e-6,

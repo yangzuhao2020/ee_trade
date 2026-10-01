@@ -1,8 +1,8 @@
-"""Market-wide, merit-order, and pay-as-bid visualisations."""
+"""Market-wide and pay-as-bid visualisations."""
 
 from __future__ import annotations
 
-from math import isclose, isfinite
+from math import isfinite
 from pathlib import Path
 
 from ..errors import PlottingError
@@ -13,8 +13,6 @@ from .common import (
     _format_time_axis,
     _save_figure,
 )
-
-_NARROW_SEGMENT_SHARE = 0.005
 
 
 def _market_price_series(
@@ -494,152 +492,6 @@ def _plot_first_pay_as_bid_order_book(pyplot, market, unit_colors, path: Path) -
         market.cleared_energy_mwh,
     )
     axis.set_xlim(0, maximum_energy * 1.03 if maximum_energy > 0 else 1.0)
-    axis.grid(axis="y", alpha=0.25)
-    axis.legend(loc="upper left")
-    figure.tight_layout()
-    return _save_figure(pyplot, figure, path)
-
-
-def _plot_first_merit_order(pyplot, market, unit_colors, path: Path) -> Path:
-    figure, axis = pyplot.subplots(figsize=(11, 6.5))
-    offers = sorted(
-        market.offers,
-        key=lambda cleared: (
-            cleared.offer.bid_price_eur_per_mwh,
-            cleared.offer.unit_name,
-            cleared.offer.identifier,
-        ),
-    )
-    x_limit = (
-        max(
-            sum(cleared.offer.offered_energy_mwh for cleared in offers),
-            market.requested_demand_mwh,
-        )
-        * 1.03
-    )
-    narrow_energy = x_limit * _NARROW_SEGMENT_SHARE
-    cumulative_energy = 0.0
-    label_offset = max(market.clearing_price_eur_per_mwh * 0.035, 1.0)
-    has_accepted = False
-    has_unaccepted = False
-    show_unit_labels = len(offers) <= 20
-    marginal_point: tuple[float, float] | None = None
-
-    for cleared in offers:
-        offer = cleared.offer
-        offered_end = cumulative_energy + offer.offered_energy_mwh
-        accepted_end = cumulative_energy + cleared.accepted_energy_mwh
-        color = unit_colors[offer.unit_name] if show_unit_labels else "#54A24B"
-        is_accepted = cleared.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH
-        if is_accepted:
-            axis.hlines(
-                offer.bid_price_eur_per_mwh,
-                cumulative_energy,
-                accepted_end,
-                color=color,
-                linewidth=7,
-            )
-            has_accepted = True
-        if accepted_end < offered_end - _ENERGY_TOLERANCE_MWH:
-            axis.hlines(
-                offer.bid_price_eur_per_mwh,
-                accepted_end,
-                offered_end,
-                color="#B8B8B8",
-                linewidth=4,
-            )
-            has_unaccepted = True
-        is_narrow = _ENERGY_TOLERANCE_MWH < offer.offered_energy_mwh < narrow_energy
-        if is_narrow:
-            axis.scatter(
-                [(cumulative_energy + offered_end) / 2],
-                [offer.bid_price_eur_per_mwh],
-                s=30,
-                color=color if is_accepted else "#B8B8B8",
-                edgecolors="#1F1F1F",
-                linewidths=0.5,
-                zorder=3,
-            )
-        if show_unit_labels and offer.offered_energy_mwh > _ENERGY_TOLERANCE_MWH:
-            axis.text(
-                cumulative_energy
-                if is_narrow
-                else (cumulative_energy + offered_end) / 2,
-                offer.bid_price_eur_per_mwh + label_offset,
-                (
-                    f"{offer.unit_name} · {offer.offer_segment.removeprefix('learning_')}"
-                    if offer.offer_segment.startswith("learning_")
-                    else offer.unit_name
-                ),
-                ha="left" if is_narrow else "center",
-                va="bottom",
-                fontsize=9,
-            )
-        if (
-            offer.unit_name == market.marginal_unit_name
-            and cleared.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH
-            and isclose(
-                offer.bid_price_eur_per_mwh,
-                market.clearing_price_eur_per_mwh,
-                rel_tol=0.0,
-                abs_tol=_ENERGY_TOLERANCE_MWH,
-            )
-        ):
-            marginal_point = (accepted_end, offer.bid_price_eur_per_mwh)
-        cumulative_energy = offered_end
-
-    if has_accepted:
-        axis.plot(
-            [],
-            [],
-            color="#4B5563" if show_unit_labels else "#54A24B",
-            linewidth=7,
-            label="Accepted offer energy",
-        )
-    if has_unaccepted:
-        axis.plot([], [], color="#B8B8B8", linewidth=4, label="Unaccepted offer energy")
-    if marginal_point is not None:
-        axis.scatter(
-            [marginal_point[0]],
-            [marginal_point[1]],
-            marker="D",
-            s=46,
-            color="#111111",
-            edgecolors="#FFFFFF",
-            linewidths=0.7,
-            zorder=4,
-            label=f"Marginal unit: {market.marginal_unit_name}",
-        )
-    if not show_unit_labels:
-        axis.text(
-            0.99,
-            0.02,
-            f"{len(offers)} offers; unit labels omitted",
-            transform=axis.transAxes,
-            ha="right",
-            va="bottom",
-            fontsize=8,
-            color="#555555",
-        )
-
-    axis.axvline(
-        market.requested_demand_mwh,
-        color="#1F1F1F",
-        linestyle="--",
-        linewidth=1.2,
-        label="Demand energy",
-    )
-    axis.axhline(
-        market.clearing_price_eur_per_mwh,
-        color="#2F5597",
-        linestyle=":",
-        linewidth=1.3,
-        label="Clearing price",
-    )
-    axis.set_title("Merit order — " + market.delivery_start.strftime("%Y-%m-%d %H:%M"))
-    axis.set_xlabel("Cumulative offered energy (MWh)")
-    axis.set_ylabel("Bid price (EUR/MWh)")
-    axis.set_xlim(0, x_limit)
     axis.grid(axis="y", alpha=0.25)
     axis.legend(loc="upper left")
     figure.tight_layout()

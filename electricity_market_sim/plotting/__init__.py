@@ -21,7 +21,6 @@ from .learning import (
     _read_learning_metrics,
 )
 from .market import (
-    _plot_first_merit_order,
     _plot_first_pay_as_bid_order_book,
     _plot_market_overview,
     _plot_market_summary,
@@ -158,7 +157,6 @@ def generate_plots(
         if result.settings.market_mechanism == "complex_clearing":
             # A directory may have been rendered by an older version which
             # incorrectly treated complex clearing as a simple merit order.
-            (plot_directory / "merit_order_first_product.png").unlink(missing_ok=True)
             (plot_directory / "pay_as_bid_first_product.png").unlink(missing_ok=True)
             opening_results = _select_opening_results(results, opening_time)
             selected_opening_time = (
@@ -192,7 +190,6 @@ def generate_plots(
             )
         elif result.settings.market_mechanism == "pay_as_bid":
             _remove_stale_opening_plots(plot_directory / "openings")
-            (plot_directory / "merit_order_first_product.png").unlink(missing_ok=True)
             paths.append(
                 _plot_first_pay_as_bid_order_book(
                     pyplot,
@@ -204,14 +201,6 @@ def generate_plots(
         else:
             _remove_stale_opening_plots(plot_directory / "openings")
             (plot_directory / "pay_as_bid_first_product.png").unlink(missing_ok=True)
-            paths.append(
-                _plot_first_merit_order(
-                    pyplot,
-                    results[0],
-                    unit_colors,
-                    plot_directory / "merit_order_first_product.png",
-                )
-            )
     except PlottingError:
         raise
     except Exception as exc:

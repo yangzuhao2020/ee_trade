@@ -206,9 +206,7 @@ def clear_pay_as_clear(
         Trade(
             delivery_start=delivery_start,
             delivery_end=delivery_end,
-            buyer_name=demand.unit_name,
             buyer_bid_id=demand.identifier,
-            seller_name=offer.unit_name,
             seller_offer_id=offer.identifier,
             trade_energy_mwh=energy,
             trade_price_eur_per_mwh=clearing_price,
@@ -288,9 +286,7 @@ def clear_pay_as_bid(
             trade = Trade(
                 delivery_start=delivery_start,
                 delivery_end=delivery_end,
-                buyer_name=bid.unit_name,
                 buyer_bid_id=bid.identifier,
-                seller_name=offer.unit_name,
                 seller_offer_id=offer.identifier,
                 trade_energy_mwh=quantity,
                 trade_price_eur_per_mwh=offer.bid_price_eur_per_mwh,

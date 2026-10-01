@@ -6,13 +6,10 @@ import csv
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import datetime
-from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 from .learning import PRICE_SCALE_EUR_PER_MWH
 from .models import SimulationResult
-
-_SETTLEMENT_QUANTUM = Decimal("0.000000000001")
 
 
 def _timestamp(value: datetime) -> str:
@@ -25,20 +22,6 @@ def _number(value: float) -> str:
 
 def _optional_number(value: float | None) -> str:
     return "" if value is None else _number(value)
-
-
-def _settlement_decimal(value: float) -> Decimal:
-    return Decimal(str(value)).quantize(
-        _SETTLEMENT_QUANTUM,
-        rounding=ROUND_HALF_UP,
-    )
-
-
-def _settlement_number(value: Decimal) -> str:
-    return format(
-        value.quantize(_SETTLEMENT_QUANTUM, rounding=ROUND_HALF_UP),
-        "f",
-    )
 
 
 def _write_rows(path: Path, fields: list[str], rows: Iterable[dict[str, str]]) -> None:
@@ -61,7 +44,6 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
     unit_rows = []
     offer_rows = []
     demand_rows = []
-    trade_rows = []
     exchange_rows = []
     operator_totals: dict[str, dict[str, float]] = defaultdict(
         lambda: {
@@ -74,13 +56,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         }
     )
     for market_result in sorted_results:
-        reported_energy_by_bid: dict[str, Decimal] = defaultdict(Decimal)
-        reported_payments_by_bid: dict[str, Decimal] = defaultdict(Decimal)
         opening_time = market_result.opening_time or market_result.delivery_start
         opening_id = opening_time.isoformat()
-        duration_hours = (
-            market_result.delivery_end - market_result.delivery_start
-        ).total_seconds() / 3600
+        duration_hours = market_result.duration_hours
         market_rows.append(
             {
                 "market_id": simulation_result.settings.market_id,
@@ -115,19 +93,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 ),
                 "cleared_energy_mwh": _number(market_result.cleared_energy_mwh),
                 "unserved_load_mwh": _number(market_result.unserved_load_mwh),
-                "requested_export_mwh": _number(market_result.requested_export_mwh),
-                "cleared_export_mwh": _number(market_result.cleared_export_mwh),
-                "unfulfilled_export_mwh": _number(
-                    market_result.unfulfilled_export_mwh
-                ),
                 "unserved_total_demand_mwh": _number(
                     market_result.unserved_demand_mwh
-                ),
-                "offered_import_mwh": _number(market_result.offered_import_mwh),
-                "cleared_import_mwh": _number(market_result.cleared_import_mwh),
-                "net_exchange_mwh": _number(market_result.net_exchange_mwh),
-                "exchange_market_cash_flow_eur": _number(
-                    market_result.exchange_cash_flow_eur
                 ),
                 "clearing_price_eur_per_mwh": _optional_number(
                     market_result.clearing_price_eur_per_mwh
@@ -141,29 +108,6 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 ),
             }
         )
-        for trade in market_result.trades:
-            reported_energy = _settlement_decimal(trade.trade_energy_mwh)
-            reported_price = _settlement_decimal(trade.trade_price_eur_per_mwh)
-            reported_payment = (reported_energy * reported_price).quantize(
-                _SETTLEMENT_QUANTUM,
-                rounding=ROUND_HALF_UP,
-            )
-            reported_energy_by_bid[trade.buyer_bid_id] += reported_energy
-            reported_payments_by_bid[trade.buyer_bid_id] += reported_payment
-            trade_rows.append(
-                {
-                    "delivery_start": _timestamp(trade.delivery_start),
-                    "delivery_end": _timestamp(trade.delivery_end),
-                    "opening_id": opening_id,
-                    "buyer_name": trade.buyer_name,
-                    "buyer_bid_id": trade.buyer_bid_id,
-                    "seller_name": trade.seller_name,
-                    "seller_offer_id": trade.seller_offer_id,
-                    "trade_energy_mwh": _settlement_number(reported_energy),
-                    "trade_price_eur_per_mwh": _settlement_number(reported_price),
-                    "payment_eur": _settlement_number(reported_payment),
-                }
-            )
         for cleared in market_result.demand_bids:
             demand_rows.append(
                 {
@@ -181,33 +125,20 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                         cleared.bid.price_eur_per_mwh
                     ),
                     "requested_energy_mwh": _number(cleared.bid.volume_mwh),
-                    "accepted_energy_mwh": (
-                        _settlement_number(
-                            reported_energy_by_bid[cleared.bid.identifier]
-                        )
-                        if market_result.trades
-                        else _number(cleared.accepted_energy_mwh)
-                    ),
+                    "accepted_energy_mwh": _number(cleared.accepted_energy_mwh),
                     "unaccepted_energy_mwh": _number(cleared.unserved_energy_mwh),
                     "clearing_price_eur_per_mwh": _number(
                         cleared.clearing_price_eur_per_mwh
                     ),
-                    "payment_eur": (
-                        _settlement_number(
-                            reported_payments_by_bid[cleared.bid.identifier]
-                        )
-                        if market_result.trades
-                        else _number(cleared.payment_eur)
-                    ),
+                    "payment_eur": _number(cleared.payment_eur),
                 }
             )
-        powerplant_offers = [
-            cleared
-            for cleared in market_result.offers
-            if cleared.offer.offer_type == "power_plant"
-        ]
-        for cleared in powerplant_offers:
+        offers_by_unit: dict[str, list] = defaultdict(list)
+        for cleared in market_result.offers:
             offer = cleared.offer
+            if offer.offer_type != "power_plant":
+                continue
+            offers_by_unit[offer.unit_name].append(cleared)
             offer_rows.append(
                 {
                     "opening_id": opening_id,
@@ -232,9 +163,6 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     "offered_energy_mwh": _number(offer.offered_energy_mwh),
                     "accepted_power_mw": _number(cleared.accepted_power_mw),
                     "accepted_energy_mwh": _number(cleared.accepted_energy_mwh),
-                    "clearing_price_eur_per_mwh": _number(
-                        cleared.clearing_price_eur_per_mwh
-                    ),
                     "accepted_price_eur_per_mwh": _number(
                         cleared.clearing_price_eur_per_mwh
                     ),
@@ -246,9 +174,6 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 }
             )
 
-        offers_by_unit: dict[str, list] = defaultdict(list)
-        for cleared in powerplant_offers:
-            offers_by_unit[cleared.offer.unit_name].append(cleared)
         for unit_name, cleared_offers in sorted(offers_by_unit.items()):
             first_offer = cleared_offers[0].offer
             offered_energy_mwh = sum(
@@ -570,14 +495,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "unaccepted_elastic_demand_mwh",
             "cleared_energy_mwh",
             "unserved_load_mwh",
-            "requested_export_mwh",
-            "cleared_export_mwh",
-            "unfulfilled_export_mwh",
             "unserved_total_demand_mwh",
-            "offered_import_mwh",
-            "cleared_import_mwh",
-            "net_exchange_mwh",
-            "exchange_market_cash_flow_eur",
             "clearing_price_eur_per_mwh",
             "average_trade_price_eur_per_mwh",
             "pricing_method",
@@ -607,23 +525,6 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         ],
         demand_rows,
     )
-    if simulation_result.settings.market_mechanism == "pay_as_bid" or trade_rows:
-        _write_rows(
-            output_dir / "trade_results.csv",
-            [
-                "delivery_start",
-                "delivery_end",
-                "opening_id",
-                "buyer_name",
-                "buyer_bid_id",
-                "seller_name",
-                "seller_offer_id",
-                "trade_energy_mwh",
-                "trade_price_eur_per_mwh",
-                "payment_eur",
-            ],
-            trade_rows,
-        )
     _write_rows(
         output_dir / "unit_results.csv",
         [
@@ -753,7 +654,6 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "offered_energy_mwh",
                 "accepted_power_mw",
                 "accepted_energy_mwh",
-                "clearing_price_eur_per_mwh",
                 "accepted_price_eur_per_mwh",
                 "revenue_eur",
                 "variable_cost_eur",

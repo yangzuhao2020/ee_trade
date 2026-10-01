@@ -351,7 +351,7 @@ maximum_flexible_variable_cost_eur
 ```
 其中，`baseline_variable_cost_eur` 是同一优化窗口内基准计划的可变成本总和，`maximum_flexible_variable_cost_eur` 为应用 `cost_tolerance` 后的成本上限；两者均不包含参考负荷偏差惩罚。`window_id` 同时写入该窗口产生的逐时生产和灵活性结果，用于关联三份输出。
 
-A360 的报价量、成交量、未成交量和实际出清价格继续写入已有的 `demand_results.csv` 和 `trade_results.csv`。当市场采用 `pay_as_clear` 时，`trade_results.csv` 仍按买卖双方的实际匹配关系逐笔记录，所有交易使用该产品最终的统一出清价格；同一买单的逐笔成交电量及支付之和必须分别等于 `demand_results.csv` 中的成交电量及支付。
+A360 的报价量、成交量、未成交量和实际支付继续写入已有的 `demand_results.csv`，实际出清价格记录在 `market_results.csv`。取消 `trade_results.csv` 的独立导出。当市场采用 `pay_as_clear` 时，内部成交记录使用该产品最终的统一出清价格结算；同一买单的逐笔成交电量及支付之和必须分别等于 `demand_results.csv` 中的成交电量及支付。
 ## 报价策略
 1. 根据预测电价优化钢铁生产计划，得到每个时段的总购电功率：
 $$
