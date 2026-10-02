@@ -54,60 +54,28 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
     times = [market.delivery_start for market in results]
     prices, price_label = _market_price_series(results)
     requested_demand = [market.requested_demand_mwh for market in results]
-    cleared_inelastic = [market.cleared_inelastic_demand_mwh for market in results]
-    cleared_elastic = [market.cleared_elastic_demand_mwh for market in results]
-    cleared_household = [
-        sum(
-            demand.accepted_energy_mwh
-            for demand in market.demand_bids
-            if demand.bid.demand_type == "household_load"
-        )
-        for market in results
-    ]
-    cleared_industrial = [
-        sum(
-            demand.accepted_energy_mwh
-            for demand in market.demand_bids
-            if demand.bid.demand_type == "industrial_load"
-        )
-        for market in results
-    ]
-    cleared_storage = [
-        sum(
-            demand.accepted_energy_mwh
-            for demand in market.demand_bids
-            if demand.bid.demand_type == "storage_charge"
-        )
-        for market in results
-    ]
-    cleared_export = [market.cleared_export_mwh for market in results]
-    unserved_load = [market.unserved_load_mwh for market in results]
-    unaccepted_elastic = [market.unaccepted_elastic_demand_mwh for market in results]
-    unaccepted_household = [
-        sum(
-            demand.unserved_energy_mwh
-            for demand in market.demand_bids
-            if demand.bid.demand_type == "household_load"
-        )
-        for market in results
-    ]
-    unaccepted_industrial = [
-        sum(
-            demand.unserved_energy_mwh
-            for demand in market.demand_bids
-            if demand.bid.demand_type == "industrial_load"
-        )
-        for market in results
-    ]
-    unaccepted_storage = [
-        sum(
-            demand.unserved_energy_mwh
-            for demand in market.demand_bids
-            if demand.bid.demand_type == "storage_charge"
-        )
-        for market in results
-    ]
-    unfulfilled_export = [market.unfulfilled_export_mwh for market in results]
+
+    def by_type(attribute: str, demand_type: str) -> list[float]:
+        return [
+            market.demand_total(attribute, demand_type=demand_type) for market in results
+        ]
+
+    accepted_layers = (
+        (by_type("accepted_energy_mwh", "inelastic_load"), "#4C78A8", "Served inelastic load"),
+        (by_type("accepted_energy_mwh", "household_load"), "#72B7B2", "Accepted household load"),
+        (by_type("accepted_energy_mwh", "industrial_load"), "#D4A72C", "Accepted industrial load"),
+        (by_type("accepted_energy_mwh", "elastic_load"), "#54A24B", "Accepted elastic demand"),
+        (by_type("accepted_energy_mwh", "storage_charge"), "#E45756", "Accepted storage charge"),
+        ([market.cleared_export_mwh for market in results], "#F58518", "Accepted export"),
+    )
+    unaccepted_lines = (
+        ([market.unserved_load_mwh for market in results], "#E45756", 1.2, "Unserved inelastic load"),
+        (by_type("unserved_energy_mwh", "elastic_load"), "#7F7F7F", 1.0, "Unaccepted elastic demand"),
+        (by_type("unserved_energy_mwh", "household_load"), "#72B7B2", 1.0, "Unaccepted household load"),
+        (by_type("unserved_energy_mwh", "industrial_load"), "#D4A72C", 1.0, "Unaccepted industrial load"),
+        (by_type("unserved_energy_mwh", "storage_charge"), "#B279A2", 1.0, "Unaccepted storage charge"),
+        ([market.unfulfilled_export_mwh for market in results], "#F58518", 1.0, "Unfulfilled export"),
+    )
 
     figure, (price_axis, demand_axis, unaccepted_axis) = pyplot.subplots(
         3,
@@ -129,81 +97,23 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
     price_axis.grid(axis="y", alpha=0.25)
     price_axis.legend(loc="upper right")
 
-    demand_axis.fill_between(
-        times,
-        0,
-        cleared_inelastic,
-        step="mid",
-        color="#4C78A8",
-        alpha=0.35,
-        label="Served inelastic load",
-    )
-    cleared_with_household = [
-        inelastic + household
-        for inelastic, household in zip(cleared_inelastic, cleared_household)
-    ]
-    demand_axis.fill_between(
-        times,
-        cleared_inelastic,
-        cleared_with_household,
-        step="mid",
-        color="#72B7B2",
-        alpha=0.35,
-        label="Accepted household load",
-    )
-    cleared_with_industrial = [
-        with_household + industrial
-        for with_household, industrial in zip(
-            cleared_with_household, cleared_industrial
+    lower = None
+    for values, color, label in accepted_layers:
+        upper = (
+            values
+            if lower is None
+            else [base + value for base, value in zip(lower, values)]
         )
-    ]
-    demand_axis.fill_between(
-        times,
-        cleared_with_household,
-        cleared_with_industrial,
-        step="mid",
-        color="#D4A72C",
-        alpha=0.35,
-        label="Accepted industrial load",
-    )
-    cleared_local = [
-        with_industrial + elastic
-        for with_industrial, elastic in zip(cleared_with_industrial, cleared_elastic)
-    ]
-    demand_axis.fill_between(
-        times,
-        cleared_with_industrial,
-        cleared_local,
-        step="mid",
-        color="#54A24B",
-        alpha=0.35,
-        label="Accepted elastic demand",
-    )
-    cleared_with_storage = [
-        local + storage for local, storage in zip(cleared_local, cleared_storage)
-    ]
-    demand_axis.fill_between(
-        times,
-        cleared_local,
-        cleared_with_storage,
-        step="mid",
-        color="#E45756",
-        alpha=0.35,
-        label="Accepted storage charge",
-    )
-    cleared_total = [
-        with_storage + export
-        for with_storage, export in zip(cleared_with_storage, cleared_export)
-    ]
-    demand_axis.fill_between(
-        times,
-        cleared_with_storage,
-        cleared_total,
-        step="mid",
-        color="#F58518",
-        alpha=0.35,
-        label="Accepted export",
-    )
+        demand_axis.fill_between(
+            times,
+            0 if lower is None else lower,
+            upper,
+            step="mid",
+            color=color,
+            alpha=0.35,
+            label=label,
+        )
+        lower = upper
     demand_axis.step(
         times,
         requested_demand,
@@ -216,54 +126,10 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
     demand_axis.grid(axis="y", alpha=0.25)
     demand_axis.legend(loc="upper right", ncol=3)
 
-    unaccepted_axis.step(
-        times,
-        unserved_load,
-        where="mid",
-        color="#E45756",
-        linewidth=1.2,
-        label="Unserved inelastic load",
-    )
-    unaccepted_axis.step(
-        times,
-        unaccepted_elastic,
-        where="mid",
-        color="#7F7F7F",
-        linewidth=1.0,
-        label="Unaccepted elastic demand",
-    )
-    unaccepted_axis.step(
-        times,
-        unaccepted_household,
-        where="mid",
-        color="#72B7B2",
-        linewidth=1.0,
-        label="Unaccepted household load",
-    )
-    unaccepted_axis.step(
-        times,
-        unaccepted_industrial,
-        where="mid",
-        color="#D4A72C",
-        linewidth=1.0,
-        label="Unaccepted industrial load",
-    )
-    unaccepted_axis.step(
-        times,
-        unaccepted_storage,
-        where="mid",
-        color="#B279A2",
-        linewidth=1.0,
-        label="Unaccepted storage charge",
-    )
-    unaccepted_axis.step(
-        times,
-        unfulfilled_export,
-        where="mid",
-        color="#F58518",
-        linewidth=1.0,
-        label="Unfulfilled export",
-    )
+    for values, color, linewidth, label in unaccepted_lines:
+        unaccepted_axis.step(
+            times, values, where="mid", color=color, linewidth=linewidth, label=label
+        )
     unaccepted_axis.set_ylabel("Unaccepted (MWh)")
     unaccepted_axis.set_xlabel("Delivery start")
     unaccepted_axis.grid(axis="y", alpha=0.25)

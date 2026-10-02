@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from math import isclose, isfinite
+from operator import attrgetter
 
 from .time_utils import hours_between
 
@@ -330,7 +331,7 @@ class MarketClearingResult:
                 "Supply offers must be power_plant, import, or storage_discharge offers."
             )
 
-        requested_demand = sum(cleared.bid.volume_mwh for cleared in self.demand_bids)
+        requested_demand = self.demand_total("bid.volume_mwh")
         if not isclose(
             self.requested_demand_mwh,
             requested_demand,
@@ -350,9 +351,7 @@ class MarketClearingResult:
             raise ValueError(
                 "The sum of accepted supply energy must equal cleared energy."
             )
-        accepted_demand_energy = sum(
-            demand.accepted_energy_mwh for demand in self.demand_bids
-        )
+        accepted_demand_energy = self.demand_total("accepted_energy_mwh")
         if not isclose(
             accepted_demand_energy,
             self.cleared_energy_mwh,
@@ -362,10 +361,8 @@ class MarketClearingResult:
             raise ValueError(
                 "The sum of accepted demand energy must equal cleared energy."
             )
-        expected_unserved_load = sum(
-            demand.unserved_energy_mwh
-            for demand in self.demand_bids
-            if demand.bid.demand_type == "inelastic_load"
+        expected_unserved_load = self.demand_total(
+            "unserved_energy_mwh", demand_type="inelastic_load"
         )
         if not isclose(
             self.unserved_load_mwh,
@@ -376,10 +373,8 @@ class MarketClearingResult:
             raise ValueError(
                 "Unserved load must equal the unmet local-load demand energy."
             )
-        expected_unfulfilled_export = sum(
-            demand.unserved_energy_mwh
-            for demand in self.demand_bids
-            if demand.bid.bid_type == "export"
+        expected_unfulfilled_export = self.demand_total(
+            "unserved_energy_mwh", bid_type="export"
         )
         if not isclose(
             self.unfulfilled_export_mwh,
@@ -435,75 +430,58 @@ class MarketClearingResult:
     def cleared_power_mw(self) -> float:
         return self.cleared_energy_mwh / self.duration_hours
 
+    def demand_total(
+        self,
+        attribute: str,
+        *,
+        demand_type: str | None = None,
+        bid_type: str | None = None,
+    ) -> float:
+        value_of = attrgetter(attribute)
+        return sum(
+            value_of(demand)
+            for demand in self.demand_bids
+            if (demand_type is None or demand.bid.demand_type == demand_type)
+            and (bid_type is None or demand.bid.bid_type == bid_type)
+        )
+
     @property
     def unserved_demand_mwh(self) -> float:
         """All unaccepted demand, including price-responsive elastic bids."""
 
-        return sum(demand.unserved_energy_mwh for demand in self.demand_bids)
+        return self.demand_total("unserved_energy_mwh")
 
     @property
     def unaccepted_elastic_demand_mwh(self) -> float:
-        return sum(
-            demand.unserved_energy_mwh
-            for demand in self.demand_bids
-            if demand.bid.demand_type == "elastic_load"
-        )
+        return self.demand_total("unserved_energy_mwh", demand_type="elastic_load")
 
     @property
     def requested_inelastic_demand_mwh(self) -> float:
-        return sum(
-            demand.bid.volume_mwh
-            for demand in self.demand_bids
-            if demand.bid.demand_type == "inelastic_load"
-        )
+        return self.demand_total("bid.volume_mwh", demand_type="inelastic_load")
 
     @property
     def cleared_inelastic_demand_mwh(self) -> float:
-        return sum(
-            demand.accepted_energy_mwh
-            for demand in self.demand_bids
-            if demand.bid.demand_type == "inelastic_load"
-        )
+        return self.demand_total("accepted_energy_mwh", demand_type="inelastic_load")
 
     @property
     def requested_elastic_demand_mwh(self) -> float:
-        return sum(
-            demand.bid.volume_mwh
-            for demand in self.demand_bids
-            if demand.bid.demand_type == "elastic_load"
-        )
+        return self.demand_total("bid.volume_mwh", demand_type="elastic_load")
 
     @property
     def cleared_elastic_demand_mwh(self) -> float:
-        return sum(
-            demand.accepted_energy_mwh
-            for demand in self.demand_bids
-            if demand.bid.demand_type == "elastic_load"
-        )
+        return self.demand_total("accepted_energy_mwh", demand_type="elastic_load")
 
     @property
     def requested_local_demand_mwh(self) -> float:
-        return sum(
-            demand.bid.volume_mwh
-            for demand in self.demand_bids
-            if demand.bid.bid_type == "local_load"
-        )
+        return self.demand_total("bid.volume_mwh", bid_type="local_load")
 
     @property
     def cleared_local_demand_mwh(self) -> float:
-        return sum(
-            demand.accepted_energy_mwh
-            for demand in self.demand_bids
-            if demand.bid.bid_type == "local_load"
-        )
+        return self.demand_total("accepted_energy_mwh", bid_type="local_load")
 
     @property
     def cleared_export_mwh(self) -> float:
-        return sum(
-            demand.accepted_energy_mwh
-            for demand in self.demand_bids
-            if demand.bid.bid_type == "export"
-        )
+        return self.demand_total("accepted_energy_mwh", bid_type="export")
 
     @property
     def cleared_import_mwh(self) -> float:
@@ -529,11 +507,7 @@ class MarketClearingResult:
 
     @property
     def export_payment_eur(self) -> float:
-        return sum(
-            demand.payment_eur
-            for demand in self.demand_bids
-            if demand.bid.bid_type == "export"
-        )
+        return self.demand_total("payment_eur", bid_type="export")
 
     @property
     def exchange_cash_flow_eur(self) -> float:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
@@ -827,6 +827,85 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
     return tuple(units)
 
 
+_ValueCheck = Callable[[str, dict[str, float], Path, int], None]
+
+
+def _read_time_series(
+    path: Path,
+    select_columns: Callable[[list[str]], Sequence[str]],
+    *,
+    encoding: str = "utf-8-sig",
+    datetime_context: str = "",
+    check: _ValueCheck | None = None,
+) -> tuple[Sequence[str], dict[datetime, dict[str, float]]]:
+    with path.open(encoding=encoding, newline="") as file:
+        reader = csv.DictReader(file)
+        if not reader.fieldnames or "datetime" not in reader.fieldnames:
+            raise InputValidationError(
+                f"{path.name} must include a 'datetime' column{datetime_context}."
+            )
+        columns = select_columns(reader.fieldnames)
+        rows: dict[datetime, dict[str, float]] = {}
+        for row_number, row in enumerate(reader, start=2):
+            timestamp = _parse_datetime(row["datetime"], path, row_number)
+            if timestamp in rows:
+                raise InputValidationError(
+                    f"{path.name}, row {row_number}: duplicate timestamp "
+                    f"{timestamp.isoformat(sep=' ')}."
+                )
+            values: dict[str, float] = {}
+            for column in columns:
+                values[column] = _float(row, column, path, row_number)
+                if check is not None:
+                    check(column, values, path, row_number)
+            rows[timestamp] = values
+    return columns, rows
+
+
+def _by_column(
+    rows: dict[datetime, dict[str, float]], columns: Sequence[str]
+) -> dict[str, dict[datetime, float]]:
+    return {
+        column: {timestamp: values[column] for timestamp, values in rows.items()}
+        for column in columns
+    }
+
+
+def _hourly_means(
+    rows: dict[datetime, dict[str, float]], columns: Sequence[str]
+) -> dict[str, dict[datetime, float]]:
+    buckets: dict[str, dict[datetime, list[float]]] = {
+        column: defaultdict(list) for column in columns
+    }
+    for timestamp, values in rows.items():
+        hour = _hour_start(timestamp)
+        for column in columns:
+            buckets[column][hour].append(values[column])
+    return {
+        column: {hour: sum(values) / len(values) for hour, values in hourly.items()}
+        for column, hourly in buckets.items()
+    }
+
+
+def _check_availability(
+    column: str, values: dict[str, float], path: Path, row_number: int
+) -> None:
+    if not 0 <= values[column] <= 1:
+        raise InputValidationError(
+            f"{path.name}, row {row_number}: availability for {column!r} "
+            "must be between 0 and 1."
+        )
+
+
+def _check_demand(
+    column: str, values: dict[str, float], path: Path, row_number: int
+) -> None:
+    if values[column] < 0:
+        raise InputValidationError(
+            f"{path.name}, row {row_number}: demand cannot be negative."
+        )
+
+
 def load_time_series_profiles(
     path: Path,
     required_columns: tuple[str, ...],
@@ -837,41 +916,28 @@ def load_time_series_profiles(
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
-    with path.open(encoding="utf-8-sig", newline="") as file:
-        reader = csv.DictReader(file)
-        if not reader.fieldnames or "datetime" not in reader.fieldnames:
-            raise InputValidationError(f"{path.name} must include a 'datetime' column.")
-        missing = [column for column in required_columns if column not in reader.fieldnames]
+
+    def select(fieldnames: list[str]) -> tuple[str, ...]:
+        missing = [column for column in required_columns if column not in fieldnames]
         if missing:
             raise InputValidationError(
                 f"{path.name} is missing columns: {', '.join(missing)}."
             )
         unused = [
             column
-            for column in reader.fieldnames
+            for column in fieldnames
             if column != "datetime" and column not in required_columns
         ]
         if warn_unused_columns and unused:
             warnings.warn(
                 f"{path.name}: ignored unused columns: {', '.join(unused)}.",
                 RuntimeWarning,
-                stacklevel=2,
+                stacklevel=4,
             )
-        profiles = {column: {} for column in required_columns}
-        seen: set[datetime] = set()
-        for row_number, row in enumerate(reader, start=2):
-            timestamp = _parse_datetime(row["datetime"], path, row_number)
-            if timestamp in seen:
-                raise InputValidationError(
-                    f"{path.name}, row {row_number}: duplicate timestamp "
-                    f"{timestamp.isoformat(sep=' ')}."
-                )
-            seen.add(timestamp)
-            for column in required_columns:
-                profiles[column][timestamp] = _float(
-                    row, column, path, row_number
-                )
-    return profiles
+        return required_columns
+
+    _, rows = _read_time_series(path, select)
+    return _by_column(rows, required_columns)
 
 
 def load_aligned_time_series_profiles(
@@ -972,27 +1038,14 @@ def load_fuel_price_profiles(path: Path) -> dict[datetime, dict[str, float]]:
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
-    with path.open(encoding="utf-8-sig", newline="") as file:
-        reader = csv.DictReader(file)
-        if not reader.fieldnames or "datetime" not in reader.fieldnames:
-            raise InputValidationError(
-                f"{path.name} must include a 'datetime' column for pay_as_bid."
-            )
-        price_columns = [column for column in reader.fieldnames if column != "datetime"]
+
+    def select(fieldnames: list[str]) -> list[str]:
+        price_columns = [column for column in fieldnames if column != "datetime"]
         if "co2" not in price_columns:
             raise InputValidationError(f"{path.name} must provide a 'co2' column.")
-        profiles: dict[datetime, dict[str, float]] = {}
-        for row_number, row in enumerate(reader, start=2):
-            timestamp = _parse_datetime(row["datetime"], path, row_number)
-            if timestamp in profiles:
-                raise InputValidationError(
-                    f"{path.name}, row {row_number}: duplicate timestamp "
-                    f"{timestamp.isoformat(sep=' ')}."
-                )
-            profiles[timestamp] = {
-                column: _float(row, column, path, row_number)
-                for column in price_columns
-            }
+        return price_columns
+
+    _, profiles = _read_time_series(path, select, datetime_context=" for pay_as_bid")
     return profiles
 
 
@@ -1003,31 +1056,13 @@ def load_exact_availability_profiles(
 
     if not path.is_file():
         return {}
-    with path.open(encoding="utf-8-sig", newline="") as file:
-        reader = csv.DictReader(file)
-        if not reader.fieldnames or "datetime" not in reader.fieldnames:
-            raise InputValidationError(f"{path.name} must include a 'datetime' column.")
-        plant_names = {plant.name for plant in plants}
-        columns = [column for column in reader.fieldnames if column in plant_names]
-        profiles = {column: {} for column in columns}
-        seen: set[datetime] = set()
-        for row_number, row in enumerate(reader, start=2):
-            timestamp = _parse_datetime(row["datetime"], path, row_number)
-            if timestamp in seen:
-                raise InputValidationError(
-                    f"{path.name}, row {row_number}: duplicate timestamp "
-                    f"{timestamp.isoformat(sep=' ')}."
-                )
-            seen.add(timestamp)
-            for column in columns:
-                value = _float(row, column, path, row_number)
-                if not 0 <= value <= 1:
-                    raise InputValidationError(
-                        f"{path.name}, row {row_number}: availability for {column!r} "
-                        "must be between 0 and 1."
-                    )
-                profiles[column][timestamp] = value
-    return profiles
+    plant_names = {plant.name for plant in plants}
+    columns, rows = _read_time_series(
+        path,
+        lambda fieldnames: [column for column in fieldnames if column in plant_names],
+        check=_check_availability,
+    )
+    return _by_column(rows, columns)
 
 
 def load_exchange_unit(path: Path) -> ExchangeUnit:
@@ -1114,43 +1149,25 @@ def load_hourly_demand_profiles(
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
-    with path.open(encoding="utf-8", newline="") as file:
-        reader = csv.DictReader(file)
-        if not reader.fieldnames or "datetime" not in reader.fieldnames:
-            raise InputValidationError(f"{path.name} must include a 'datetime' column.")
-        profiled_units = [unit for unit in demand_units if unit.profile_column is not None]
-        missing = [unit.profile_column for unit in profiled_units if unit.profile_column not in reader.fieldnames]
+    profiled_units = [unit for unit in demand_units if unit.profile_column is not None]
+
+    def select(fieldnames: list[str]) -> list[str]:
+        missing = [
+            unit.profile_column
+            for unit in profiled_units
+            if unit.profile_column not in fieldnames
+        ]
         if missing:
             raise InputValidationError(
                 f"{path.name} is missing demand profile columns: {', '.join(missing)}."
             )
+        return [unit.profile_column for unit in profiled_units]
 
-        buckets: dict[str, dict[datetime, list[float]]] = {
-            unit.name: defaultdict(list) for unit in profiled_units
-        }
-        seen_timestamps: set[datetime] = set()
-        for row_number, row in enumerate(reader, start=2):
-            timestamp = _parse_datetime(row["datetime"], path, row_number)
-            if timestamp in seen_timestamps:
-                raise InputValidationError(
-                    f"{path.name}, row {row_number}: duplicate timestamp {timestamp.isoformat(sep=' ')}."
-                )
-            seen_timestamps.add(timestamp)
-            bucket = _hour_start(timestamp)
-            for unit in profiled_units:
-                value = _float(row, unit.profile_column, path, row_number)
-                if value < 0:
-                    raise InputValidationError(
-                        f"{path.name}, row {row_number}: demand cannot be negative."
-                    )
-                buckets[unit.name][bucket].append(value)
-
-    return {
-        unit_name: {
-            hour: sum(values) / len(values) for hour, values in hourly_values.items()
-        }
-        for unit_name, hourly_values in buckets.items()
-    }
+    columns, rows = _read_time_series(
+        path, select, encoding="utf-8", check=_check_demand
+    )
+    hourly = _hourly_means(rows, columns)
+    return {unit.name: hourly[unit.profile_column] for unit in profiled_units}
 
 
 def load_hourly_availability_profiles(
@@ -1164,17 +1181,15 @@ def load_hourly_availability_profiles(
 
     if not path.is_file():
         return {}
-    with path.open(encoding="utf-8", newline="") as file:
-        reader = csv.DictReader(file)
-        if not reader.fieldnames or "datetime" not in reader.fieldnames:
-            raise InputValidationError(f"{path.name} must include a 'datetime' column.")
-        plant_names = {plant.name for plant in plants}
+    plant_names = {plant.name for plant in plants}
+
+    def select(fieldnames: list[str]) -> list[str]:
         profile_columns = [
-            column for column in reader.fieldnames if column != "datetime" and column in plant_names
+            column for column in fieldnames if column != "datetime" and column in plant_names
         ]
         unknown_columns = [
             column
-            for column in reader.fieldnames
+            for column in fieldnames
             if column != "datetime" and column not in plant_names
         ]
         if unknown_columns:
@@ -1186,35 +1201,12 @@ def load_hourly_availability_profiles(
             raise InputValidationError(
                 f"{path.name} must contain at least one power-plant availability column."
             )
+        return profile_columns
 
-        buckets: dict[str, dict[datetime, list[float]]] = {
-            column: defaultdict(list) for column in profile_columns
-        }
-        seen_timestamps: set[datetime] = set()
-        for row_number, row in enumerate(reader, start=2):
-            timestamp = _parse_datetime(row["datetime"], path, row_number)
-            if timestamp in seen_timestamps:
-                raise InputValidationError(
-                    f"{path.name}, row {row_number}: duplicate timestamp "
-                    f"{timestamp.isoformat(sep=' ')}."
-                )
-            seen_timestamps.add(timestamp)
-            hour = _hour_start(timestamp)
-            for column in profile_columns:
-                value = _float(row, column, path, row_number)
-                if not 0.0 <= value <= 1.0:
-                    raise InputValidationError(
-                        f"{path.name}, row {row_number}: availability for {column!r} "
-                        "must be between 0 and 1."
-                    )
-                buckets[column][hour].append(value)
-
-    return {
-        plant_name: {
-            hour: sum(values) / len(values) for hour, values in hourly_values.items()
-        }
-        for plant_name, hourly_values in buckets.items()
-    }
+    columns, rows = _read_time_series(
+        path, select, encoding="utf-8", check=_check_availability
+    )
+    return _hourly_means(rows, columns)
 
 
 def load_hourly_exchange_profiles(
@@ -1227,51 +1219,39 @@ def load_hourly_exchange_profiles(
 
     import_column = f"{exchange_unit.name}_import"
     export_column = f"{exchange_unit.name}_export"
-    with path.open(encoding="utf-8", newline="") as file:
-        reader = csv.DictReader(file)
-        if not reader.fieldnames or "datetime" not in reader.fieldnames:
-            raise InputValidationError(f"{path.name} must include a 'datetime' column.")
+
+    def select(fieldnames: list[str]) -> list[str]:
         missing = [
             column
             for column in (import_column, export_column)
-            if column not in reader.fieldnames
+            if column not in fieldnames
         ]
         if missing:
             raise InputValidationError(
                 f"{path.name} is missing exchange profile columns: {', '.join(missing)}."
             )
+        return [import_column, export_column]
 
-        import_buckets: dict[datetime, list[float]] = defaultdict(list)
-        export_buckets: dict[datetime, list[float]] = defaultdict(list)
-        seen_timestamps: set[datetime] = set()
-        for row_number, row in enumerate(reader, start=2):
-            timestamp = _parse_datetime(row["datetime"], path, row_number)
-            if timestamp in seen_timestamps:
-                raise InputValidationError(
-                    f"{path.name}, row {row_number}: duplicate timestamp "
-                    f"{timestamp.isoformat(sep=' ')}."
-                )
-            seen_timestamps.add(timestamp)
-            import_power = _float(row, import_column, path, row_number)
-            export_power = _float(row, export_column, path, row_number)
-            if import_power < 0 or export_power < 0:
-                raise InputValidationError(
-                    f"{path.name}, row {row_number}: import and export powers must be non-negative."
-                )
-            hour = _hour_start(timestamp)
-            import_buckets[hour].append(import_power)
-            export_buckets[hour].append(export_power)
+    def check_powers(
+        column: str, values: dict[str, float], path: Path, row_number: int
+    ) -> None:
+        if column == export_column and (
+            values[import_column] < 0 or values[export_column] < 0
+        ):
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: import and export powers must be non-negative."
+            )
 
-    if import_buckets.keys() != export_buckets.keys():
-        raise InputValidationError(
-            f"{path.name}: import and export profiles do not cover the same hours."
-        )
+    columns, rows = _read_time_series(
+        path, select, encoding="utf-8", check=check_powers
+    )
+    hourly = _hourly_means(rows, columns)
     return {
         hour: ExchangeSchedule(
-            import_power_mw=sum(import_values) / len(import_values),
-            export_power_mw=sum(export_buckets[hour]) / len(export_buckets[hour]),
+            import_power_mw=import_power,
+            export_power_mw=hourly[export_column][hour],
         )
-        for hour, import_values in import_buckets.items()
+        for hour, import_power in hourly[import_column].items()
     }
 
 
