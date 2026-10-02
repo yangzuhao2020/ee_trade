@@ -834,11 +834,10 @@ def _read_time_series(
     path: Path,
     select_columns: Callable[[list[str]], Sequence[str]],
     *,
-    encoding: str = "utf-8-sig",
     datetime_context: str = "",
     check: _ValueCheck | None = None,
 ) -> tuple[Sequence[str], dict[datetime, dict[str, float]]]:
-    with path.open(encoding=encoding, newline="") as file:
+    with path.open(encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
         if not reader.fieldnames or "datetime" not in reader.fieldnames:
             raise InputValidationError(
@@ -874,6 +873,13 @@ def _by_column(
 def _hourly_means(
     rows: dict[datetime, dict[str, float]], columns: Sequence[str]
 ) -> dict[str, dict[datetime, float]]:
+    """Average the available samples in each hour with equal sample weights.
+
+    Partial hours and irregular sampling are accepted. A single sample represents
+    its whole hour; an hour with no samples remains absent. This is not a
+    time-weighted average or the complete-bucket policy of aligned profiles.
+    """
+
     buckets: dict[str, dict[datetime, list[float]]] = {
         column: defaultdict(list) for column in columns
     }
@@ -1094,7 +1100,7 @@ def load_fuel_prices(path: Path) -> dict[str, float]:
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
-    with path.open(encoding="utf-8", newline="") as file:
+    with path.open(encoding="utf-8-sig", newline="") as file:
         rows = list(csv.reader(file))
     if len(rows) < 2 or len(rows[0]) < 2:
         raise InputValidationError(
@@ -1145,7 +1151,7 @@ def _hour_start(timestamp: datetime) -> datetime:
 def load_hourly_demand_profiles(
     path: Path, demand_units: tuple[DemandUnit, ...]
 ) -> dict[str, dict[datetime, float]]:
-    """Load 15-minute (or hourly) MW data and resample each column by hourly mean."""
+    """Load MW data using equal-weight hourly means of the available samples."""
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
@@ -1163,9 +1169,7 @@ def load_hourly_demand_profiles(
             )
         return [unit.profile_column for unit in profiled_units]
 
-    columns, rows = _read_time_series(
-        path, select, encoding="utf-8", check=_check_demand
-    )
+    columns, rows = _read_time_series(path, select, check=_check_demand)
     hourly = _hourly_means(rows, columns)
     return {unit.name: hourly[unit.profile_column] for unit in profiled_units}
 
@@ -1173,7 +1177,7 @@ def load_hourly_demand_profiles(
 def load_hourly_availability_profiles(
     path: Path, plants: tuple[PowerPlant, ...]
 ) -> dict[str, dict[datetime, float]]:
-    """Load optional 0--1 availability factors and resample them by hourly mean.
+    """Load optional 0--1 factors using equal-weight means of available samples.
 
     A plant with no column uses availability 1.0.  A plant with a column must
     provide every delivery hour that the simulation or its price forecast uses.
@@ -1203,16 +1207,14 @@ def load_hourly_availability_profiles(
             )
         return profile_columns
 
-    columns, rows = _read_time_series(
-        path, select, encoding="utf-8", check=_check_availability
-    )
+    columns, rows = _read_time_series(path, select, check=_check_availability)
     return _hourly_means(rows, columns)
 
 
 def load_hourly_exchange_profiles(
     path: Path, exchange_unit: ExchangeUnit
 ) -> dict[datetime, ExchangeSchedule]:
-    """Load positive 15-minute exchange plans and resample them to hourly MW."""
+    """Load exchange MW using equal-weight hourly means of available samples."""
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
@@ -1242,9 +1244,7 @@ def load_hourly_exchange_profiles(
                 f"{path.name}, row {row_number}: import and export powers must be non-negative."
             )
 
-    columns, rows = _read_time_series(
-        path, select, encoding="utf-8", check=check_powers
-    )
+    columns, rows = _read_time_series(path, select, check=check_powers)
     hourly = _hourly_means(rows, columns)
     return {
         hour: ExchangeSchedule(

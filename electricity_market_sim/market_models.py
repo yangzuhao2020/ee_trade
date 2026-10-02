@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from math import isclose, isfinite
@@ -20,6 +21,7 @@ __all__ = [
     "MarketClearingResult",
     "SupplyOffer",
     "Trade",
+    "sum_cleared_demand",
 ]
 
 
@@ -216,6 +218,24 @@ class ClearedDemandBid:
     @property
     def payment_eur(self) -> float:
         return self.accepted_energy_mwh * self.clearing_price_eur_per_mwh
+
+
+def sum_cleared_demand(
+    demand_bids: Iterable[ClearedDemandBid],
+    attribute: str,
+    *,
+    demand_type: str | None = None,
+    bid_type: str | None = None,
+) -> float:
+    """Sum a demand field in order, before or after assembling a market result."""
+
+    value_of = attrgetter(attribute)
+    return sum(
+        value_of(demand)
+        for demand in demand_bids
+        if (demand_type is None or demand.bid.demand_type == demand_type)
+        and (bid_type is None or demand.bid.bid_type == bid_type)
+    )
 
 
 @dataclass(frozen=True)
@@ -437,12 +457,11 @@ class MarketClearingResult:
         demand_type: str | None = None,
         bid_type: str | None = None,
     ) -> float:
-        value_of = attrgetter(attribute)
-        return sum(
-            value_of(demand)
-            for demand in self.demand_bids
-            if (demand_type is None or demand.bid.demand_type == demand_type)
-            and (bid_type is None or demand.bid.bid_type == bid_type)
+        return sum_cleared_demand(
+            self.demand_bids,
+            attribute,
+            demand_type=demand_type,
+            bid_type=bid_type,
         )
 
     @property

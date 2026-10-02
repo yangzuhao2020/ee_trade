@@ -236,7 +236,7 @@ def available_power_mw(
         return plant.max_power_mw * profile[delivery_start]
     except KeyError as exc:
         raise KeyError(
-            f"availability_df.csv has no complete hourly profile for "
+            f"availability_df.csv has no hourly profile for "
             f"{format_timestamp(delivery_start)} and "
             f"plant {plant.name!r}."
         ) from exc

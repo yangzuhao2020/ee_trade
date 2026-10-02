@@ -12,6 +12,7 @@ clearing.py 是市场出清的核心文件。
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 
 import numpy as np
 
@@ -34,6 +35,7 @@ from ..market_models import (
     MarketClearingResult,
     SupplyOffer,
     Trade,
+    sum_cleared_demand,
 )
 from ..models import MarketSettings, StorageClearingContext
 
@@ -83,6 +85,45 @@ def validate_demand_prices(
     )
 
 
+def _validate_order_ids(
+    demand_bids: list[DemandBid],
+    supply_offers: list[SupplyOffer],
+    *,
+    supply_error: str,
+) -> None:
+    bid_ids = [bid.identifier for bid in demand_bids]
+    offer_ids = [offer.identifier for offer in supply_offers]
+    if len(bid_ids) != len(set(bid_ids)):
+        raise ValueError("Demand bid identifiers must be unique within a product.")
+    if len(offer_ids) != len(set(offer_ids)):
+        raise ValueError(supply_error)
+
+
+def _single_product(
+    demand_bids: list[DemandBid], supply_offers: list[SupplyOffer]
+) -> tuple[datetime, datetime]:
+    products = {
+        (bid.delivery_start, bid.delivery_end) for bid in demand_bids
+    } | {(offer.delivery_start, offer.delivery_end) for offer in supply_offers}
+    if len(products) != 1:
+        raise ValueError("All bids and offers passed to one clearing must share a product.")
+    return products.pop()
+
+
+def _demand_totals(cleared_demands: tuple[ClearedDemandBid, ...]) -> dict[str, float]:
+    """Shared result fields; retain each algorithm's own traded-energy sum."""
+
+    return {
+        "requested_demand_mwh": sum_cleared_demand(cleared_demands, "bid.volume_mwh"),
+        "unserved_load_mwh": sum_cleared_demand(
+            cleared_demands, "unserved_energy_mwh", demand_type="inelastic_load"
+        ),
+        "unfulfilled_export_mwh": sum_cleared_demand(
+            cleared_demands, "unserved_energy_mwh", bid_type="export"
+        ),
+    }
+
+
 def clear_pay_as_clear(
     demand_bids: list[DemandBid], supply_offers: list[SupplyOffer]
 ) -> MarketClearingResult:
@@ -98,22 +139,15 @@ def clear_pay_as_clear(
 
     if not demand_bids and not supply_offers:
         raise ValueError("Cannot clear an empty market.")
-    bid_ids = [bid.identifier for bid in demand_bids]
-    offer_ids = [offer.identifier for offer in supply_offers]
-    if len(bid_ids) != len(set(bid_ids)):
-        raise ValueError("Demand bid identifiers must be unique within a product.")
-    if len(offer_ids) != len(set(offer_ids)):
-        raise ValueError(
+    _validate_order_ids(
+        demand_bids,
+        supply_offers,
+        supply_error=(
             "Supply offer identifiers must be unique within a product; "
             "unit names must be unique when no offer_id is supplied."
-        )
-
-    products = {
-        (bid.delivery_start, bid.delivery_end) for bid in demand_bids
-    } | {(offer.delivery_start, offer.delivery_end) for offer in supply_offers}
-    if len(products) != 1:
-        raise ValueError("All bids and offers passed to one clearing must share a product.")
-    delivery_start, delivery_end = products.pop()
+        ),
+    )
+    delivery_start, delivery_end = _single_product(demand_bids, supply_offers)
 
     # 需求按价格从高到低排序；同价时再按名称和原始顺序稳定打破平局。
     ordered_demands = sorted(
@@ -187,18 +221,7 @@ def clear_pay_as_clear(
         )
         for index, bid in enumerate(demand_bids)
     )
-    requested_demand = sum(bid.volume_mwh for bid in demand_bids)
     cleared_energy = sum(item.accepted_energy_mwh for item in cleared_offers)
-    unserved_load = sum(
-        item.unserved_energy_mwh
-        for item in cleared_demands
-        if item.bid.demand_type == "inelastic_load"
-    )
-    unfulfilled_export = sum(
-        item.unserved_energy_mwh
-        for item in cleared_demands
-        if item.bid.bid_type == "export"
-    )
     trades = tuple(
         Trade(
             delivery_start=delivery_start,
@@ -214,10 +237,8 @@ def clear_pay_as_clear(
     return MarketClearingResult(
         delivery_start=delivery_start,
         delivery_end=delivery_end,
-        requested_demand_mwh=requested_demand,
+        **_demand_totals(cleared_demands),
         cleared_energy_mwh=cleared_energy,
-        unserved_load_mwh=unserved_load,
-        unfulfilled_export_mwh=unfulfilled_export,
         clearing_price_eur_per_mwh=clearing_price,
         offers=cleared_offers,
         demand_bids=cleared_demands,
@@ -233,19 +254,12 @@ def clear_pay_as_bid(
 
     if not demand_bids and not supply_offers:
         raise ValueError("Cannot clear an empty market.")
-    products = {
-        (bid.delivery_start, bid.delivery_end) for bid in demand_bids
-    } | {(offer.delivery_start, offer.delivery_end) for offer in supply_offers}
-    if len(products) != 1:
-        raise ValueError("All bids and offers passed to one clearing must share a product.")
-    delivery_start, delivery_end = products.pop()
-
-    bid_ids = [bid.identifier for bid in demand_bids]
-    offer_ids = [offer.identifier for offer in supply_offers]
-    if len(bid_ids) != len(set(bid_ids)):
-        raise ValueError("Demand bid identifiers must be unique within a product.")
-    if len(offer_ids) != len(set(offer_ids)):
-        raise ValueError("Supply offer identifiers must be unique within a product.")
+    delivery_start, delivery_end = _single_product(demand_bids, supply_offers)
+    _validate_order_ids(
+        demand_bids,
+        supply_offers,
+        supply_error="Supply offer identifiers must be unique within a product.",
+    )
 
     ordered_bids = sorted(
         demand_bids,
@@ -327,18 +341,8 @@ def clear_pay_as_bid(
     return MarketClearingResult(
         delivery_start=delivery_start,
         delivery_end=delivery_end,
-        requested_demand_mwh=sum(bid.volume_mwh for bid in demand_bids),
+        **_demand_totals(cleared_demands),
         cleared_energy_mwh=cleared_energy,
-        unserved_load_mwh=sum(
-            cleared.unserved_energy_mwh
-            for cleared in cleared_demands
-            if cleared.bid.demand_type == "inelastic_load"
-        ),
-        unfulfilled_export_mwh=sum(
-            cleared.unserved_energy_mwh
-            for cleared in cleared_demands
-            if cleared.bid.bid_type == "export"
-        ),
         clearing_price_eur_per_mwh=None,
         offers=cleared_offers,
         demand_bids=cleared_demands,
@@ -789,19 +793,9 @@ def _complex_results(
             MarketClearingResult(
                 delivery_start=delivery_start,
                 delivery_end=delivery_end,
-                requested_demand_mwh=sum(bid.volume_mwh for _, bid in indexed_demands),
+                **_demand_totals(cleared_demands),
                 cleared_energy_mwh=sum(
                     item.accepted_energy_mwh for item in cleared_offers
-                ),
-                unserved_load_mwh=sum(
-                    item.unserved_energy_mwh
-                    for item in cleared_demands
-                    if item.bid.demand_type == "inelastic_load"
-                ),
-                unfulfilled_export_mwh=sum(
-                    item.unserved_energy_mwh
-                    for item in cleared_demands
-                    if item.bid.bid_type == "export"
                 ),
                 clearing_price_eur_per_mwh=prices[product],
                 offers=cleared_offers,

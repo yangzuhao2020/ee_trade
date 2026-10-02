@@ -113,7 +113,7 @@ def _profile_power(
         return profiles[unit_name][delivery_start]
     except KeyError as exc:
         raise InputValidationError(
-            f"{source_name} has no complete hourly profile for "
+            f"{source_name} has no hourly profile for "
             f"{format_timestamp(delivery_start)} and unit {unit_name!r}."
         ) from exc
 
@@ -204,7 +204,7 @@ def _demand_bids_for_product(
         exchange_schedule = exchange_profiles[delivery_start]
     except KeyError as exc:
         raise InputValidationError(
-            "exchanges_df.csv has no complete hourly profile for "
+            "exchanges_df.csv has no hourly profile for "
             f"{format_timestamp(delivery_start)}."
         ) from exc
     demand_bids.append(
