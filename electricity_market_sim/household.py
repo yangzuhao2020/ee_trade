@@ -24,6 +24,7 @@ from .models import (
     HouseholdPlan,
     HouseholdUnit,
 )
+from .time_utils import hours_between
 
 
 _TOLERANCE = 1e-8
@@ -36,11 +37,6 @@ def _require_household_optimizer() -> None:
             "Household optimization requires SciPy with scipy.optimize.milp "
             f"available{detail}."
         )
-
-
-def _duration_hours(product: tuple[datetime, datetime]) -> float:
-    start, end = product
-    return (end - start).total_seconds() / 3600
 
 
 @dataclass(frozen=True)
@@ -120,7 +116,7 @@ def _build_household_problem(
     mode_offset = 4 * count
     variable_count = 5 * count
 
-    durations = np.array([_duration_hours(product) for product in products])
+    durations = np.array([hours_between(*product) for product in products])
     if np.any(durations <= 0):
         raise InputValidationError("Household products must have positive durations.")
     prices = np.empty(count)
@@ -503,7 +499,7 @@ def dispatch_household(
     previous_discharge = initial_battery_discharge_power_mw
     records: list[HouseholdDispatchResult] = []
     for plan in plans:
-        duration = _duration_hours((plan.delivery_start, plan.delivery_end))
+        duration = hours_between(plan.delivery_start, plan.delivery_end)
         retained_energy = energy * (
             (1.0 - household.battery_loss_rate) ** duration
         )

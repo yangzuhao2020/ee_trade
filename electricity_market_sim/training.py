@@ -18,7 +18,8 @@ from torch.nn import functional as F
 from .config import load_market_settings
 from .errors import InputValidationError
 from .learning import ACTION_SIZE, OBSERVATION_SIZE
-from .models import LearningConfig, LearningTransition, SimulationResult
+from .learning_metrics import LEARNING_METRIC_DECIMALS, LEARNING_METRIC_FIELDS
+from .models import LearningConfig, LearningTransition, MarketSettings, SimulationResult
 from .reporting import write_results
 from .simulation import LearningEpisodeRunner, market_openings
 
@@ -453,20 +454,7 @@ def _write_metrics(path: Path, metrics: list[_EpisodeMetrics]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(
-            file,
-            fieldnames=[
-                "run",
-                "phase",
-                "episode",
-                "total_reward",
-                "discounted_reward",
-                "total_profit_eur",
-                "accepted_energy_mwh",
-                "minimum_segment_average_bid_eur_per_mwh",
-                "flexible_segment_average_bid_eur_per_mwh",
-                "minimum_segment_acceptance_ratio",
-                "flexible_segment_acceptance_ratio",
-            ],
+            file, fieldnames=["run", "phase", "episode", *LEARNING_METRIC_FIELDS]
         )
         writer.writeheader()
         for item in metrics:
@@ -475,36 +463,12 @@ def _write_metrics(path: Path, metrics: list[_EpisodeMetrics]) -> None:
                     "run": item.run,
                     "phase": item.phase,
                     "episode": item.episode,
-                    "total_reward": f"{item.total_reward:.12f}",
-                    "discounted_reward": f"{item.discounted_reward:.12f}",
-                    "total_profit_eur": f"{item.total_profit_eur:.6f}",
-                    "accepted_energy_mwh": f"{item.accepted_energy_mwh:.6f}",
-                    "minimum_segment_average_bid_eur_per_mwh": (
-                        f"{item.minimum_segment_average_bid_eur_per_mwh:.6f}"
-                    ),
-                    "flexible_segment_average_bid_eur_per_mwh": (
-                        f"{item.flexible_segment_average_bid_eur_per_mwh:.6f}"
-                    ),
-                    "minimum_segment_acceptance_ratio": (
-                        f"{item.minimum_segment_acceptance_ratio:.12f}"
-                    ),
-                    "flexible_segment_acceptance_ratio": (
-                        f"{item.flexible_segment_acceptance_ratio:.12f}"
-                    ),
+                    **{
+                        name: f"{getattr(item, name):.{decimals}f}"
+                        for name, decimals in LEARNING_METRIC_DECIMALS.items()
+                    },
                 }
             )
-
-
-_SUMMARY_FIELDS = (
-    "total_reward",
-    "discounted_reward",
-    "total_profit_eur",
-    "accepted_energy_mwh",
-    "minimum_segment_average_bid_eur_per_mwh",
-    "flexible_segment_average_bid_eur_per_mwh",
-    "minimum_segment_acceptance_ratio",
-    "flexible_segment_acceptance_ratio",
-)
 
 
 def _write_run_summary(path: Path, metrics: list[_EpisodeMetrics]) -> None:
@@ -513,7 +477,7 @@ def _write_run_summary(path: Path, metrics: list[_EpisodeMetrics]) -> None:
     evaluations = [item for item in metrics if item.phase in {"evaluation", "baseline"}]
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = ["phase", "run_count"]
-    for name in _SUMMARY_FIELDS:
+    for name in LEARNING_METRIC_FIELDS:
         fieldnames.extend((f"{name}_mean", f"{name}_std"))
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -526,7 +490,7 @@ def _write_run_summary(path: Path, metrics: list[_EpisodeMetrics]) -> None:
                 "phase": phase,
                 "run_count": len(phase_metrics),
             }
-            for name in _SUMMARY_FIELDS:
+            for name in LEARNING_METRIC_FIELDS:
                 values = [float(getattr(item, name)) for item in phase_metrics]
                 row[f"{name}_mean"] = f"{fmean(values):.12f}"
                 row[f"{name}_std"] = f"{pstdev(values):.12f}"
@@ -598,8 +562,7 @@ def _default_evaluation_checkpoint(config: LearningConfig, output_path: Path) ->
     return output_path / "checkpoints" / "best.pt"
 
 
-def _learning_config(input_dir: Path, scenario: str) -> LearningConfig:
-    settings = load_market_settings(input_dir / "config.yaml", scenario=scenario)
+def _learning_config(settings: MarketSettings) -> LearningConfig:
     config = settings.learning_config
     if config is None or not config.learning_mode:
         raise InputValidationError(
@@ -683,7 +646,7 @@ def _train_single_run(
     """Train and evaluate one statistically independent MATD3 run."""
 
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
-    config = _learning_config(input_path, scenario)
+    config = _learning_config(settings)
     episode_count = (
         config.training_episodes if training_episodes is None else training_episodes
     )
@@ -854,7 +817,7 @@ def train_learning_scenario(
     input_path = Path(input_dir)
     output_path = Path(output_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
-    config = _learning_config(input_path, scenario)
+    config = _learning_config(settings)
     if independent_runs is None:
         run_count = (
             1
@@ -938,7 +901,7 @@ def evaluate_learning_scenario(
     input_path = Path(input_dir)
     output_path = Path(output_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
-    config = _learning_config(input_path, scenario)
+    config = _learning_config(settings)
     agent = MATD3Agent(
         config,
         total_regular_steps=max(

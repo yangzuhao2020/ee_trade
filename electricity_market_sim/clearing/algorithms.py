@@ -50,22 +50,27 @@ def _require_complex_optimizer() -> None:
         )
 
 
+def _validate_price_limits(
+    orders: list[SupplyOffer] | list[DemandBid],
+    price_field: str,
+    label: str,
+    settings: MarketSettings,
+) -> None:
+    for order in orders:
+        price = getattr(order, price_field)
+        if not settings.minimum_bid_price <= price <= settings.maximum_bid_price:
+            raise InputValidationError(
+                f"{label} for {order.identifier!r} ({price:.6f} EUR/MWh) is outside "
+                "the configured bid-price limits."
+            )
+
+
 def validate_offer_prices(
     offers: list[SupplyOffer], settings: MarketSettings
 ) -> None:
     """Reject supply prices outside the configured market limits."""
 
-    for offer in offers:
-        if not (
-            settings.minimum_bid_price
-            <= offer.bid_price_eur_per_mwh
-            <= settings.maximum_bid_price
-        ):
-            raise InputValidationError(
-                f"Bid price for {offer.identifier!r} "
-                f"({offer.bid_price_eur_per_mwh:.6f} EUR/MWh) is outside "
-                "the configured bid-price limits."
-            )
+    _validate_price_limits(offers, "bid_price_eur_per_mwh", "Bid price", settings)
 
 
 def validate_demand_prices(
@@ -73,17 +78,9 @@ def validate_demand_prices(
 ) -> None:
     """Reject demand prices outside the configured market limits."""
 
-    for bid in demand_bids:
-        if not (
-            settings.minimum_bid_price
-            <= bid.price_eur_per_mwh
-            <= settings.maximum_bid_price
-        ):
-            raise InputValidationError(
-                f"Demand bid price for {bid.identifier!r} "
-                f"({bid.price_eur_per_mwh:.6f} EUR/MWh) is outside "
-                "the configured bid-price limits."
-            )
+    _validate_price_limits(
+        demand_bids, "price_eur_per_mwh", "Demand bid price", settings
+    )
 
 
 def clear_pay_as_clear(

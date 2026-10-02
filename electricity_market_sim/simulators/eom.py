@@ -36,6 +36,7 @@ from ..inputs import (
     load_powerplants,
     load_storage_units,
     validate_fuel_coverage,
+    validate_unique_names,
 )
 from ..learning import (
     ActionProvider,
@@ -59,6 +60,7 @@ from ..models import (
     StorageDispatchResult,
     StorageUnit,
 )
+from ..time_utils import format_timestamp, hours_between
 
 _POWER_TOLERANCE_MW = 1e-9
 _FORECAST_HOURS = 12
@@ -101,10 +103,6 @@ class EomMarketExtension(Protocol):
         """Validate and attach extension-specific output to the result."""
 
 
-def _timestamp(value: datetime) -> str:
-    return value.isoformat(sep=" ", timespec="minutes")
-
-
 def _profile_power(
     profiles: dict[str, dict[datetime, float]],
     unit_name: str,
@@ -116,7 +114,7 @@ def _profile_power(
     except KeyError as exc:
         raise InputValidationError(
             f"{source_name} has no complete hourly profile for "
-            f"{_timestamp(delivery_start)} and unit {unit_name!r}."
+            f"{format_timestamp(delivery_start)} and unit {unit_name!r}."
         ) from exc
 
 
@@ -131,7 +129,7 @@ def _elastic_demand_bids(
     assert demand_unit.elasticity is not None
     assert demand_unit.max_price_eur_per_mwh is not None
     assert demand_unit.num_bids is not None
-    duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
+    duration_hours = hours_between(delivery_start, delivery_end)
     maximum_power = demand_unit.max_power_mw
     maximum_price = demand_unit.max_price_eur_per_mwh
     first_power = maximum_power * maximum_price**demand_unit.elasticity
@@ -174,7 +172,7 @@ def _demand_bids_for_product(
 ) -> tuple[list[DemandBid], ExchangeSchedule | None]:
     """Create local-load, elastic-load, and optional exchange demand orders."""
 
-    duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
+    duration_hours = hours_between(delivery_start, delivery_end)
     demand_bids: list[DemandBid] = []
     for demand_unit in demand_units:
         if demand_unit.is_elastic:
@@ -207,7 +205,7 @@ def _demand_bids_for_product(
     except KeyError as exc:
         raise InputValidationError(
             "exchanges_df.csv has no complete hourly profile for "
-            f"{_timestamp(delivery_start)}."
+            f"{format_timestamp(delivery_start)}."
         ) from exc
     demand_bids.append(
         DemandBid(
@@ -231,7 +229,7 @@ def _exchange_import_offer(
     delivery_start: datetime,
     delivery_end: datetime,
 ) -> SupplyOffer:
-    duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
+    duration_hours = hours_between(delivery_start, delivery_end)
     identifier = f"{exchange_unit.name}::import::{delivery_start.isoformat()}"
     return SupplyOffer(
         unit_name=exchange_unit.name,
@@ -351,7 +349,7 @@ def _opening_coverage_issues(
         issues.append(
             "交付时段超出仿真结束时间: "
             + ", ".join(
-                f"{_timestamp(start)}–{_timestamp(end)}" for start, end in beyond_end
+                f"{format_timestamp(start)}–{format_timestamp(end)}" for start, end in beyond_end
             )
         )
     forecast_times: set[datetime] = set()
@@ -387,7 +385,7 @@ def _opening_coverage_issues(
             else "交付数据"
         )
         issues.append(
-            f"{kind}缺少 {source}: " + ", ".join(_timestamp(time) for time in missing)
+            f"{kind}缺少 {source}: " + ", ".join(format_timestamp(time) for time in missing)
         )
 
     for demand_unit in demand_units:
@@ -692,7 +690,7 @@ def _project_storage_energies(
         ):
             raise InputValidationError(
                 f"Accepted commitments project storage {storage.name!r} outside "
-                f"its SOC bounds before {_timestamp(first_delivery)}."
+                f"its SOC bounds before {format_timestamp(first_delivery)}."
             )
         projected[storage.name] = min(
             storage.max_energy_mwh, max(storage.min_energy_mwh, energy)
@@ -837,7 +835,7 @@ def _offers_for_opening(
             except KeyError as exc:
                 raise InputValidationError(
                     "fuel_prices_df.csv has no complete product profile for "
-                    f"{_timestamp(delivery_start)}."
+                    f"{format_timestamp(delivery_start)}."
                 ) from exc
             return current_plant.marginal_cost(prices)
 
@@ -1066,21 +1064,15 @@ def simulate_eom_market(
             fuel_prices=load_fuel_prices(input_path / "fuel_prices_df.csv"),
         )
     )
-    participant_names = [
-        *(plant.name for plant in plants),
-        *(storage.name for storage in storages),
-        *(unit.name for unit in demand_units),
-        *extension_inputs.participant_names,
-    ]
-    if len(participant_names) != len(set(participant_names)):
-        duplicates = sorted(
-            {name for name in participant_names if participant_names.count(name) > 1}
-        )
-        raise InputValidationError(
-            "Participant names must be unique across all market units: "
-            + ", ".join(duplicates)
-            + "."
-        )
+    validate_unique_names(
+        [
+            *(plant.name for plant in plants),
+            *(storage.name for storage in storages),
+            *(unit.name for unit in demand_units),
+            *extension_inputs.participant_names,
+        ],
+        "all market units",
+    )
     fuel_prices = extension_inputs.fuel_prices
     fuel_price_profiles = extension_inputs.fuel_price_profiles
     validate_fuel_coverage(plants, fuel_prices)
@@ -1133,7 +1125,7 @@ def simulate_eom_market(
                 except KeyError as exc:
                     raise InputValidationError(
                         "fuel_prices_df.csv has no complete product profile for "
-                        f"{_timestamp(cost_time)}."
+                        f"{format_timestamp(cost_time)}."
                     ) from exc
             if not (
                 settings.minimum_bid_price
@@ -1141,7 +1133,7 @@ def simulate_eom_market(
                 <= settings.maximum_bid_price
             ):
                 time_detail = (
-                    "" if cost_time is None else f" at {_timestamp(cost_time)}"
+                    "" if cost_time is None else f" at {format_timestamp(cost_time)}"
                 )
                 raise InputValidationError(
                     f"Marginal cost for {plant.name!r}{time_detail} "
@@ -1167,11 +1159,11 @@ def simulate_eom_market(
         if issues:
             if learning_plant is not None:
                 raise InputValidationError(
-                    f"Learning opening {_timestamp(opening.opening_time)} is incomplete: "
+                    f"Learning opening {format_timestamp(opening.opening_time)} is incomplete: "
                     + "; ".join(issues)
                 )
             warnings.warn(
-                f"跳过市场开放 {_timestamp(opening.opening_time)}："
+                f"跳过市场开放 {format_timestamp(opening.opening_time)}："
                 + "; ".join(issues),
                 RuntimeWarning,
                 stacklevel=2,

@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from ..bidding import naive_offer
+from ..bidding import available_power_mw, naive_offer
 from ..clearing import clear_pay_as_bid, validate_demand_prices, validate_offer_prices
 from ..errors import InputValidationError
 from ..household import (
@@ -21,16 +21,15 @@ from ..inputs import (
     load_household_units,
     load_powerplants,
     load_time_series_profiles,
+    validate_fuel_coverage,
+    validate_unique_names,
 )
 from ..market_models import DemandBid, MarketClearingResult, SupplyOffer
 from ..models import MarketOpening, MarketSettings, SimulationResult
+from ..time_utils import format_timestamp, hours_between
 
 
 _POWER_TOLERANCE_MW = 1e-9
-
-
-def _timestamp(value: datetime) -> str:
-    return value.isoformat(sep=" ", timespec="minutes")
 
 
 def simulate_household_market(
@@ -63,20 +62,14 @@ def simulate_household_market(
         raise InputValidationError(
             "pay_as_bid requires residential_dsm_units.csv with at least one household."
         )
-    participant_names = [
-        *(plant.name for plant in plants),
-        *(unit.name for unit in demand_units),
-        *(household.name for household in households),
-    ]
-    duplicates = sorted(
-        name for name in set(participant_names) if participant_names.count(name) > 1
+    validate_unique_names(
+        [
+            *(plant.name for plant in plants),
+            *(unit.name for unit in demand_units),
+            *(household.name for household in households),
+        ],
+        "plants, demand, and households",
     )
-    if duplicates:
-        raise InputValidationError(
-            "Participant names must be unique across plants, demand, and households: "
-            + ", ".join(duplicates)
-            + "."
-        )
 
     demand_profiles = load_time_series_profiles(
         input_path / "demand_df.csv",
@@ -97,19 +90,7 @@ def simulate_household_market(
     availability = load_exact_availability_profiles(
         input_path / "availability_df.csv", plants
     )
-    available_fuels = set(next(iter(fuel_prices.values()))) if fuel_prices else set()
-    missing_fuels = sorted(
-        {
-            plant.fuel_type
-            for plant in plants
-            if plant.fuel_type != "renewable"
-        }
-        - available_fuels
-    )
-    if missing_fuels:
-        raise InputValidationError(
-            "fuel_prices_df.csv is missing prices for: " + ", ".join(missing_fuels)
-        )
+    validate_fuel_coverage(plants, next(iter(fuel_prices.values()), {}))
 
     household_energy = {
         household.name: household.initial_energy_mwh for household in households
@@ -169,9 +150,7 @@ def simulate_household_market(
 
         opening_results: list[MarketClearingResult] = []
         for delivery_start, delivery_end in opening.products:
-            duration_hours = (
-                delivery_end - delivery_start
-            ).total_seconds() / 3600
+            duration_hours = hours_between(delivery_start, delivery_end)
             demand_bids: list[DemandBid] = []
             for unit in demand_units:
                 assert unit.profile_column is not None
@@ -180,7 +159,7 @@ def simulate_household_market(
                 except KeyError as exc:
                     raise InputValidationError(
                         f"demand_df.csv is missing {unit.profile_column!r} at "
-                        f"{_timestamp(delivery_start)}."
+                        f"{format_timestamp(delivery_start)}."
                     ) from exc
                 if power < 0:
                     raise InputValidationError("Demand power cannot be negative.")
@@ -225,23 +204,19 @@ def simulate_household_market(
                 product_fuel_prices = fuel_prices[delivery_start]
             except KeyError as exc:
                 raise InputValidationError(
-                    f"fuel_prices_df.csv is missing {_timestamp(delivery_start)}."
+                    f"fuel_prices_df.csv is missing {format_timestamp(delivery_start)}."
                 ) from exc
             offers: list[SupplyOffer] = []
             for plant in plants:
-                plant_profile = availability.get(plant.name)
-                if plant_profile is None:
-                    available_power = plant.max_power_mw
-                else:
-                    try:
-                        available_power = (
-                            plant.max_power_mw * plant_profile[delivery_start]
-                        )
-                    except KeyError as exc:
-                        raise InputValidationError(
-                            f"availability_df.csv is missing {plant.name!r} at "
-                            f"{_timestamp(delivery_start)}."
-                        ) from exc
+                try:
+                    available_power = available_power_mw(
+                        plant, delivery_start, availability
+                    )
+                except KeyError as exc:
+                    raise InputValidationError(
+                        f"availability_df.csv is missing {plant.name!r} at "
+                        f"{format_timestamp(delivery_start)}."
+                    ) from exc
                 marginal_cost = plant.marginal_cost(product_fuel_prices)
                 offers.append(
                     naive_offer(

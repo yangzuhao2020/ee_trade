@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from math import isclose, isfinite
 
+from .time_utils import hours_between
+
 
 _ENERGY_TOLERANCE_MWH = 1e-7
 
@@ -166,9 +168,7 @@ class ClearedSupplyOffer:
 
     @property
     def duration_hours(self) -> float:
-        return (
-            self.offer.delivery_end - self.offer.delivery_start
-        ).total_seconds() / 3600
+        return hours_between(self.offer.delivery_start, self.offer.delivery_end)
 
     @property
     def accepted_power_mw(self) -> float:
@@ -202,7 +202,7 @@ class ClearedDemandBid:
 
     @property
     def duration_hours(self) -> float:
-        return (self.bid.delivery_end - self.bid.delivery_start).total_seconds() / 3600
+        return hours_between(self.bid.delivery_start, self.bid.delivery_end)
 
     @property
     def accepted_power_mw(self) -> float:
@@ -425,7 +425,7 @@ class MarketClearingResult:
     def duration_hours(self) -> float:
         """Delivery duration used to convert energy quantities into power."""
 
-        return (self.delivery_end - self.delivery_start).total_seconds() / 3600
+        return hours_between(self.delivery_start, self.delivery_end)
 
     @property
     def requested_demand_power_mw(self) -> float:

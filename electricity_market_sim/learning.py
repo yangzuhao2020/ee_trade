@@ -16,6 +16,7 @@ import numpy as np
 from .errors import InputValidationError
 from .market_models import MarketClearingResult, SupplyOffer
 from .models import LearningStepResult, LearningTransition, PowerPlant
+from .time_utils import hours_between
 
 OBSERVATION_SIZE = 38
 ACTION_SIZE = 2
@@ -132,7 +133,7 @@ def learning_offers(
         executed_action = float(values[0]), float(values[1])
     if available_power_mw < plant.min_power_mw - _POWER_TOLERANCE_MW:
         return ()
-    duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
+    duration_hours = hours_between(delivery_start, delivery_end)
     if duration_hours <= 0:
         raise ValueError("Learning offer duration must be positive.")
     low_price, high_price = sorted(

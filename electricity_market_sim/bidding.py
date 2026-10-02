@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 from .market_models import DemandBid, SupplyOffer
 from .models import PowerPlant, StorageUnit
+from .time_utils import format_timestamp, hours_between
 
 _POWER_TOLERANCE_MW = 1e-9
 _FORECAST_HOURS = 12
@@ -139,7 +140,7 @@ def storage_heuristic_orders(
     available_start = forecast_start or min(price_forecast)
     available_end = forecast_end or max(price_forecast)
     for delivery_start, delivery_end in products:
-        duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
+        duration_hours = hours_between(delivery_start, delivery_end)
         reference_energy = min(
             storage.max_energy_mwh,
             reference_energy + storage.natural_inflow_mw * duration_hours,
@@ -236,7 +237,7 @@ def available_power_mw(
     except KeyError as exc:
         raise KeyError(
             f"availability_df.csv has no complete hourly profile for "
-            f"{delivery_start.isoformat(sep=' ', timespec='minutes')} and "
+            f"{format_timestamp(delivery_start)} and "
             f"plant {plant.name!r}."
         ) from exc
 
@@ -250,7 +251,7 @@ def naive_offer(
 ) -> SupplyOffer:
     """Build V1's one-part marginal-cost offer with V2 availability applied."""
 
-    duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
+    duration_hours = hours_between(delivery_start, delivery_end)
     offer_id = f"{plant.name}::single::{delivery_start.isoformat()}"
     return SupplyOffer(
         unit_name=plant.name,
@@ -284,7 +285,7 @@ def heuristic_flexible_offers(
     that retaining operation has non-negative future value.
     """
 
-    duration_hours = (delivery_end - delivery_start).total_seconds() / 3600
+    duration_hours = hours_between(delivery_start, delivery_end)
     # A unit that cannot physically reach its minimum stable output does not
     # submit an offer.  This is distinct from clearing: a submitted minimum
     # tranche may still be partially accepted by the market.

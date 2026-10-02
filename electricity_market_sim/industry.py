@@ -25,6 +25,7 @@ from .models import (
     IndustrialPlan,
     IndustrialUnit,
 )
+from .time_utils import hours_between
 
 
 _TOLERANCE = 1e-7
@@ -37,10 +38,6 @@ def _require_optimizer() -> None:
             "Industrial optimization requires SciPy with scipy.optimize.linprog "
             f"available{detail}."
         )
-
-
-def _duration_hours(product: tuple[datetime, datetime]) -> float:
-    return (product[1] - product[0]).total_seconds() / 3600
 
 
 @dataclass(frozen=True)
@@ -136,7 +133,7 @@ def maximum_industry_production(
         return 0.0
     _require_optimizer()
     coefficients = process_coefficients(unit)
-    durations = np.array([_duration_hours(product) for product in products])
+    durations = np.array([hours_between(*product) for product in products])
     bounds = [
         (0.0, _steel_upper_bound(unit, coefficients, duration))
         for duration in durations
@@ -251,7 +248,7 @@ def _build_industry_problem(
     negative_offset = remaining_count + count
     variable_count = remaining_count + 2 * count
     remaining_durations = np.array(
-        [_duration_hours(product) for product in remaining_products]
+        [hours_between(*product) for product in remaining_products]
     )
     if np.any(remaining_durations <= 0):
         raise InputValidationError("Industrial products must have positive durations.")
@@ -566,7 +563,7 @@ def dispatch_industry(
         ratio = 0.0
     else:
         ratio = max(0.0, accepted_energy_mwh) / plan.planned_energy_mwh
-    duration = _duration_hours((plan.delivery_start, plan.delivery_end))
+    duration = hours_between(plan.delivery_start, plan.delivery_end)
     return IndustrialDispatchResult(
         window_id=plan.window_id,
         delivery_start=plan.delivery_start,

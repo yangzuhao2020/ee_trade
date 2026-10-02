@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import csv
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
@@ -356,10 +357,11 @@ def load_demand_units(path: Path) -> tuple[DemandUnit, ...]:
     return tuple(units)
 
 
-def _first_nonempty(
+def _group_field(
     rows: list[tuple[int, dict[str, str]]],
     column: str,
     path: Path,
+    group: str,
     *,
     required: bool = True,
 ) -> str | None:
@@ -370,12 +372,12 @@ def _first_nonempty(
     }
     if len(values) > 1:
         raise InputValidationError(
-            f"{path.name}: rows for one building disagree on {column!r}."
+            f"{path.name}: rows for one {group} disagree on {column!r}."
         )
     if not values:
         if required:
             raise InputValidationError(
-                f"{path.name}: building field {column!r} is not configured."
+                f"{path.name}: {group.replace(' ', '-')} field {column!r} is not configured."
             )
         return None
     return values.pop()
@@ -418,20 +420,20 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
 
         heat_number, heat = by_technology["heat_pump"]
         battery_number, battery = by_technology["generic_storage"]
-        strategy = _first_nonempty(rows, "bidding_EOM", path)
+        strategy = _group_field(rows, "bidding_EOM", path, "building")
         if strategy != "household_energy_optimization":
             raise InputValidationError(
                 f"{path.name}: building {name!r} uses unsupported bidding_EOM "
                 f"{strategy!r}."
             )
-        prosumer_raw = (_first_nonempty(
-            rows, "is_prosumer", path, required=False
+        prosumer_raw = (_group_field(
+            rows, "is_prosumer", path, "building", required=False
         ) or "No").lower()
         if prosumer_raw not in {"yes", "no"}:
             raise InputValidationError(
                 f"{path.name}: building {name!r} is_prosumer must be Yes or No."
             )
-        cost_tolerance_raw = _first_nonempty(rows, "cost_tolerance", path) or "0"
+        cost_tolerance_raw = _group_field(rows, "cost_tolerance", path, "building") or "0"
         try:
             cost_tolerance = float(cost_tolerance_raw)
         except ValueError as exc:
@@ -455,12 +457,12 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
 
         household = HouseholdUnit(
             name=name,
-            operator=_first_nonempty(rows, "unit_operator", path) or "",
-            node=_first_nonempty(rows, "node", path) or "",
+            operator=_group_field(rows, "unit_operator", path, "building") or "",
+            node=_group_field(rows, "node", path, "building") or "",
             bidding_strategy=strategy,
-            objective=_first_nonempty(rows, "objective", path) or "",
-            flexibility_measure=_first_nonempty(
-                rows, "flexibility_measure", path
+            objective=_group_field(rows, "objective", path, "building") or "",
+            flexibility_measure=_group_field(
+                rows, "flexibility_measure", path, "building"
             ) or "",
             cost_tolerance_percent=cost_tolerance,
             is_prosumer=prosumer_raw == "yes",
@@ -589,22 +591,7 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
         *,
         required: bool = True,
     ) -> str | None:
-        values = {
-            row.get(column, "").strip()
-            for _, row in rows
-            if row.get(column, "").strip()
-        }
-        if len(values) > 1:
-            raise InputValidationError(
-                f"{path.name}: rows for one steel plant disagree on {column!r}."
-            )
-        if not values:
-            if required:
-                raise InputValidationError(
-                    f"{path.name}: steel-plant field {column!r} is not configured."
-                )
-            return None
-        return values.pop()
+        return _group_field(rows, column, path, "steel plant", required=required)
 
     def numeric_plant_field(
         rows: list[tuple[int, dict[str, str]]], column: str
@@ -1300,4 +1287,14 @@ def validate_fuel_coverage(plants: tuple[PowerPlant, ...], fuel_prices: dict[str
     if missing:
         raise InputValidationError(
             "fuel_prices_df.csv is missing prices for: " + ", ".join(missing)
+        )
+
+
+def validate_unique_names(names: Iterable[str], scope: str) -> None:
+    duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
+    if duplicates:
+        raise InputValidationError(
+            f"Participant names must be unique across {scope}: "
+            + ", ".join(duplicates)
+            + "."
         )

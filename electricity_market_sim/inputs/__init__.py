@@ -17,6 +17,7 @@ from .csv_loader import (
     load_storage_units,
     load_time_series_profiles,
     validate_fuel_coverage,
+    validate_unique_names,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "load_storage_units",
     "load_time_series_profiles",
     "validate_fuel_coverage",
+    "validate_unique_names",
 ]

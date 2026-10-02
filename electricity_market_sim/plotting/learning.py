@@ -8,6 +8,7 @@ from statistics import fmean, pstdev
 from typing import Any
 
 from ..errors import PlottingError
+from ..learning_metrics import LEARNING_METRIC_FIELDS
 from ..market_models import MarketClearingResult
 from ..models import LearningStepResult
 from .common import (
@@ -19,16 +20,6 @@ from .common import (
 )
 
 _LEARNING_SEGMENTS = ("learning_minimum", "learning_flexible")
-_METRIC_FIELDS = (
-    "total_reward",
-    "discounted_reward",
-    "total_profit_eur",
-    "accepted_energy_mwh",
-    "minimum_segment_average_bid_eur_per_mwh",
-    "flexible_segment_average_bid_eur_per_mwh",
-    "minimum_segment_acceptance_ratio",
-    "flexible_segment_acceptance_ratio",
-)
 _CURVE_FIELDS = (
     ("total_reward", "Total reward"),
     ("discounted_reward", "Discounted reward"),
@@ -244,7 +235,8 @@ def _read_learning_metrics(path: Path) -> list[dict[str, Any]]:
     with path.open(encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
         missing = sorted(
-            {"run", "phase", "episode", *_METRIC_FIELDS} - set(reader.fieldnames or ())
+            {"run", "phase", "episode", *LEARNING_METRIC_FIELDS}
+            - set(reader.fieldnames or ())
         )
         if missing:
             raise PlottingError(
@@ -256,7 +248,7 @@ def _read_learning_metrics(path: Path) -> list[dict[str, Any]]:
                     "run": int(row["run"]),
                     "phase": row["phase"],
                     "episode": int(row["episode"]),
-                    **{name: float(row[name]) for name in _METRIC_FIELDS},
+                    **{name: float(row[name]) for name in LEARNING_METRIC_FIELDS},
                 }
                 for row in reader
             ]

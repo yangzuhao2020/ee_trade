@@ -5,20 +5,18 @@ from __future__ import annotations
 import csv
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import datetime
 from math import isclose
+from operator import attrgetter
 from pathlib import Path
+from typing import Any
 
 from .errors import InputValidationError
 from .learning import PRICE_SCALE_EUR_PER_MWH
 from .models import SimulationResult
+from .time_utils import format_timestamp, hours_between
 
 
 _POWER_TOLERANCE_MW = 1e-7
-
-
-def _timestamp(value: datetime) -> str:
-    return value.isoformat(sep=" ", timespec="minutes")
 
 
 def _number(value: float) -> str:
@@ -27,6 +25,38 @@ def _number(value: float) -> str:
 
 def _optional_number(value: float | None) -> str:
     return "" if value is None else _number(value)
+
+
+def _paired_results(
+    kind: str,
+    fields: tuple[str, ...],
+    dispatch_results: Iterable[Any],
+    flexibility_results: Iterable[Any],
+) -> tuple[dict[tuple, Any], dict[tuple, Any]]:
+    key_of = attrgetter(*fields)
+    indexed: list[dict[tuple, Any]] = []
+    for side, results in (
+        ("dispatch", dispatch_results),
+        ("flexibility", flexibility_results),
+    ):
+        by_key: dict[tuple, Any] = {}
+        for result in results:
+            key = key_of(result)
+            if key in by_key:
+                raise InputValidationError(f"Duplicate {kind} {side} result: {key!r}.")
+            by_key[key] = result
+        indexed.append(by_key)
+    dispatch, flexibility = indexed
+    missing_flexibility = dispatch.keys() - flexibility.keys()
+    missing_dispatch = flexibility.keys() - dispatch.keys()
+    if missing_flexibility or missing_dispatch:
+        raise InputValidationError(
+            f"{kind.capitalize()} dispatch and flexibility results must match by "
+            f"({', '.join(fields)}); "
+            f"missing flexibility: {sorted(missing_flexibility)!r}; "
+            f"missing dispatch: {sorted(missing_dispatch)!r}."
+        )
+    return dispatch, flexibility
 
 
 def _write_rows(path: Path, fields: list[str], rows: Iterable[dict[str, str]]) -> None:
@@ -69,9 +99,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             {
                 "market_id": simulation_result.settings.market_id,
                 "opening_id": opening_id,
-                "opening_time": _timestamp(opening_time),
-                "delivery_start": _timestamp(market_result.delivery_start),
-                "delivery_end": _timestamp(market_result.delivery_end),
+                "opening_time": format_timestamp(opening_time),
+                "delivery_start": format_timestamp(market_result.delivery_start),
+                "delivery_end": format_timestamp(market_result.delivery_end),
                 "duration_hours": _number(duration_hours),
                 "requested_demand_energy_mwh": _number(
                     market_result.requested_demand_mwh
@@ -118,9 +148,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             demand_rows.append(
                 {
                     "opening_id": opening_id,
-                    "opening_time": _timestamp(opening_time),
-                    "delivery_start": _timestamp(cleared.bid.delivery_start),
-                    "delivery_end": _timestamp(cleared.bid.delivery_end),
+                    "opening_time": format_timestamp(opening_time),
+                    "delivery_start": format_timestamp(cleared.bid.delivery_start),
+                    "delivery_end": format_timestamp(cleared.bid.delivery_end),
                     "unit_name": cleared.bid.unit_name,
                     "unit_operator": cleared.bid.operator,
                     "bid_id": cleared.bid.identifier,
@@ -148,9 +178,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             offer_rows.append(
                 {
                     "opening_id": opening_id,
-                    "opening_time": _timestamp(opening_time),
-                    "delivery_start": _timestamp(offer.delivery_start),
-                    "delivery_end": _timestamp(offer.delivery_end),
+                    "opening_time": format_timestamp(opening_time),
+                    "delivery_start": format_timestamp(offer.delivery_start),
+                    "delivery_end": format_timestamp(offer.delivery_end),
                     "unit_name": offer.unit_name,
                     "unit_operator": offer.operator,
                     "technology": offer.technology,
@@ -221,9 +251,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             unit_rows.append(
                 {
                     "opening_id": opening_id,
-                    "opening_time": _timestamp(opening_time),
-                    "delivery_start": _timestamp(market_result.delivery_start),
-                    "delivery_end": _timestamp(market_result.delivery_end),
+                    "opening_time": format_timestamp(opening_time),
+                    "delivery_start": format_timestamp(market_result.delivery_start),
+                    "delivery_end": format_timestamp(market_result.delivery_end),
                     "unit_name": unit_name,
                     "unit_operator": first_offer.operator,
                     "technology": first_offer.technology,
@@ -280,9 +310,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             exchange_rows.append(
                 {
                     "opening_id": opening_id,
-                    "opening_time": _timestamp(opening_time),
-                    "delivery_start": _timestamp(market_result.delivery_start),
-                    "delivery_end": _timestamp(market_result.delivery_end),
+                    "opening_time": format_timestamp(opening_time),
+                    "delivery_start": format_timestamp(market_result.delivery_start),
+                    "delivery_end": format_timestamp(market_result.delivery_end),
                     "duration_hours": _number(duration_hours),
                     "settlement_method": "pay_as_clear",
                     "exchange_name": import_offer.offer.unit_name,
@@ -311,15 +341,15 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
 
     storage_rows = []
     for storage_result in simulation_result.storage_results:
-        duration_hours = (
-            storage_result.delivery_end - storage_result.delivery_start
-        ).total_seconds() / 3600
+        duration_hours = hours_between(
+            storage_result.delivery_start, storage_result.delivery_end
+        )
         storage_rows.append(
             {
                 "opening_id": storage_result.opening_time.isoformat(),
-                "opening_time": _timestamp(storage_result.opening_time),
-                "delivery_start": _timestamp(storage_result.delivery_start),
-                "delivery_end": _timestamp(storage_result.delivery_end),
+                "opening_time": format_timestamp(storage_result.opening_time),
+                "delivery_start": format_timestamp(storage_result.delivery_start),
+                "delivery_end": format_timestamp(storage_result.delivery_end),
                 "duration_hours": _number(duration_hours),
                 "unit_name": storage_result.unit_name,
                 "unit_operator": storage_result.operator,
@@ -363,34 +393,17 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             }
         )
 
-    household_by_key = {}
-    for result in simulation_result.household_results:
-        key = (result.unit_name, result.delivery_start, result.delivery_end)
-        if key in household_by_key:
-            raise InputValidationError(f"Duplicate household dispatch result: {key!r}.")
-        household_by_key[key] = result
-    flexibility_by_key = {}
-    for result in simulation_result.household_flexibility_results:
-        key = (result.unit_name, result.delivery_start, result.delivery_end)
-        if key in flexibility_by_key:
-            raise InputValidationError(
-                f"Duplicate household flexibility result: {key!r}."
-            )
-        flexibility_by_key[key] = result
-    missing_flexibility = household_by_key.keys() - flexibility_by_key.keys()
-    missing_dispatch = flexibility_by_key.keys() - household_by_key.keys()
-    if missing_flexibility or missing_dispatch:
-        raise InputValidationError(
-            "Household dispatch and flexibility results must match by "
-            "(unit_name, delivery_start, delivery_end); "
-            f"missing flexibility: {sorted(missing_flexibility)!r}; "
-            f"missing dispatch: {sorted(missing_dispatch)!r}."
-        )
+    household_by_key, flexibility_by_key = _paired_results(
+        "household",
+        ("unit_name", "delivery_start", "delivery_end"),
+        simulation_result.household_results,
+        simulation_result.household_flexibility_results,
+    )
 
     household_rows = [
         {
-            "delivery_start": _timestamp(result.delivery_start),
-            "delivery_end": _timestamp(result.delivery_end),
+            "delivery_start": format_timestamp(result.delivery_start),
+            "delivery_end": format_timestamp(result.delivery_end),
             "unit_name": result.unit_name,
             "forecast_price_eur_per_mwh": _number(
                 result.forecast_price_eur_per_mwh
@@ -418,43 +431,12 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         }
         for key, result in household_by_key.items()
     ]
-    industry_by_key = {}
-    for result in simulation_result.industry_results:
-        key = (
-            result.unit_name,
-            result.delivery_start,
-            result.delivery_end,
-            result.window_id,
-        )
-        if key in industry_by_key:
-            raise InputValidationError(f"Duplicate industrial dispatch result: {key!r}.")
-        industry_by_key[key] = result
-    industry_flexibility_by_key = {}
-    for result in simulation_result.industry_flexibility_results:
-        key = (
-            result.unit_name,
-            result.delivery_start,
-            result.delivery_end,
-            result.window_id,
-        )
-        if key in industry_flexibility_by_key:
-            raise InputValidationError(
-                f"Duplicate industrial flexibility result: {key!r}."
-            )
-        industry_flexibility_by_key[key] = result
-    missing_industry_flexibility = (
-        industry_by_key.keys() - industry_flexibility_by_key.keys()
+    industry_by_key, industry_flexibility_by_key = _paired_results(
+        "industrial",
+        ("unit_name", "delivery_start", "delivery_end", "window_id"),
+        simulation_result.industry_results,
+        simulation_result.industry_flexibility_results,
     )
-    missing_industry_dispatch = (
-        industry_flexibility_by_key.keys() - industry_by_key.keys()
-    )
-    if missing_industry_flexibility or missing_industry_dispatch:
-        raise InputValidationError(
-            "Industrial dispatch and flexibility results must match by "
-            "(unit_name, delivery_start, delivery_end, window_id); "
-            f"missing flexibility: {sorted(missing_industry_flexibility)!r}; "
-            f"missing dispatch: {sorted(missing_industry_dispatch)!r}."
-        )
     for key, result in industry_by_key.items():
         baseline_power = industry_flexibility_by_key[key].baseline_power_mw
         if not isclose(
@@ -470,7 +452,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             )
     industry_rows = [
         {
-            "datetime": _timestamp(result.delivery_start),
+            "datetime": format_timestamp(result.delivery_start),
             "window_id": result.window_id,
             "unit_name": result.unit_name,
             "electrolyser_power_mw": _number(result.electrolyser_power_mw),
@@ -499,10 +481,10 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         {
             "window_id": result.window_id,
             "unit_name": result.unit_name,
-            "optimization_start": _timestamp(result.optimization_start),
-            "optimization_end": _timestamp(result.optimization_end),
-            "commit_start": _timestamp(result.commit_start),
-            "commit_end": _timestamp(result.commit_end),
+            "optimization_start": format_timestamp(result.optimization_start),
+            "optimization_end": format_timestamp(result.optimization_end),
+            "commit_start": format_timestamp(result.commit_start),
+            "commit_end": format_timestamp(result.commit_end),
             "baseline_variable_cost_eur": _number(
                 result.baseline_variable_cost_eur
             ),
@@ -520,7 +502,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
     )
     learning_rows = [
         {
-            "delivery_start": _timestamp(result.delivery_start),
+            "delivery_start": format_timestamp(result.delivery_start),
             "action_1": _number(result.action[0]),
             "action_2": _number(result.action[1]),
             "minimum_segment_bid_eur_per_mwh": _number(

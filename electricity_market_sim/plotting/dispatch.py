@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..models import StorageDispatchResult
+from ..time_utils import hours_between
 from .common import (
     _ENERGY_TOLERANCE_MWH,
     _UNIT_COLORS,
@@ -252,9 +253,7 @@ def _plot_storage_dispatch(
         soc_values: list[float] = []
         net_power: list[float] = []
         for row in rows:
-            duration_hours = (
-                row.delivery_end - row.delivery_start
-            ).total_seconds() / 3600
+            duration_hours = hours_between(row.delivery_start, row.delivery_end)
             if not soc_times or soc_times[-1] != row.delivery_start:
                 soc_times.append(row.delivery_start)
                 soc_values.append(row.soc_before * 100)
