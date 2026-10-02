@@ -383,40 +383,60 @@ def _group_field(
     return values.pop()
 
 
+def _group_by_name(
+    raw_rows: list[dict[str, str]], path: Path
+) -> dict[str, list[tuple[int, dict[str, str]]]]:
+    grouped: dict[str, list[tuple[int, dict[str, str]]]] = defaultdict(list)
+    for row_number, row in enumerate(raw_rows, start=2):
+        grouped[_require(row, "name", path, row_number)].append((row_number, row))
+    return grouped
+
+
+def _devices_by_technology(
+    name: str,
+    rows: list[tuple[int, dict[str, str]]],
+    required_devices: set[str],
+    path: Path,
+    group: str,
+) -> dict[str, tuple[int, dict[str, str]]]:
+    by_technology: dict[str, tuple[int, dict[str, str]]] = {}
+    for row_number, row in rows:
+        technology = _require(row, "technology", path, row_number)
+        if technology in by_technology:
+            raise InputValidationError(
+                f"{path.name}: {group} {name!r} has duplicate {technology!r} rows."
+            )
+        by_technology[technology] = (row_number, row)
+    missing = required_devices - by_technology.keys()
+    if missing:
+        raise InputValidationError(
+            f"{path.name}: {group} {name!r} is missing device rows: "
+            + ", ".join(sorted(missing))
+            + "."
+        )
+    unsupported = by_technology.keys() - required_devices
+    if unsupported:
+        raise InputValidationError(
+            f"{path.name}: {group} {name!r} has unsupported devices: "
+            + ", ".join(sorted(unsupported))
+            + "."
+        )
+    return by_technology
+
+
 def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
     """Merge heat-pump and battery rows into building-level V3 participants."""
 
     if not path.is_file():
         return ()
     raw_rows = _read_rows(path)
-    grouped: dict[str, list[tuple[int, dict[str, str]]]] = defaultdict(list)
-    for row_number, row in enumerate(raw_rows, start=2):
-        grouped[_require(row, "name", path, row_number)].append((row_number, row))
+    grouped = _group_by_name(raw_rows, path)
 
     households: list[HouseholdUnit] = []
     for name, rows in sorted(grouped.items()):
-        by_technology: dict[str, tuple[int, dict[str, str]]] = {}
-        for row_number, row in rows:
-            technology = _require(row, "technology", path, row_number)
-            if technology in by_technology:
-                raise InputValidationError(
-                    f"{path.name}: building {name!r} has duplicate {technology!r} rows."
-                )
-            by_technology[technology] = (row_number, row)
-        missing = {"heat_pump", "generic_storage"} - by_technology.keys()
-        if missing:
-            raise InputValidationError(
-                f"{path.name}: building {name!r} is missing device rows: "
-                + ", ".join(sorted(missing))
-                + "."
-            )
-        unsupported = by_technology.keys() - {"heat_pump", "generic_storage"}
-        if unsupported:
-            raise InputValidationError(
-                f"{path.name}: building {name!r} has unsupported devices: "
-                + ", ".join(sorted(unsupported))
-                + "."
-            )
+        by_technology = _devices_by_technology(
+            name, rows, {"heat_pump", "generic_storage"}, path, "building"
+        )
 
         heat_number, heat = by_technology["heat_pump"]
         battery_number, battery = by_technology["generic_storage"]
@@ -581,9 +601,7 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
     if not path.is_file():
         return ()
     raw_rows = _read_rows(path)
-    grouped: dict[str, list[tuple[int, dict[str, str]]]] = defaultdict(list)
-    for row_number, row in enumerate(raw_rows, start=2):
-        grouped[_require(row, "name", path, row_number)].append((row_number, row))
+    grouped = _group_by_name(raw_rows, path)
 
     def plant_field(
         rows: list[tuple[int, dict[str, str]]],
@@ -613,30 +631,9 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
 
     units: list[IndustrialUnit] = []
     for name, rows in sorted(grouped.items()):
-        by_technology: dict[str, tuple[int, dict[str, str]]] = {}
-        for row_number, row in rows:
-            technology = _require(row, "technology", path, row_number)
-            if technology in by_technology:
-                raise InputValidationError(
-                    f"{path.name}: steel plant {name!r} has duplicate "
-                    f"{technology!r} rows."
-                )
-            by_technology[technology] = (row_number, row)
-        required_devices = {"electrolyser", "dri_plant", "eaf"}
-        missing = required_devices - by_technology.keys()
-        unsupported = by_technology.keys() - required_devices
-        if missing:
-            raise InputValidationError(
-                f"{path.name}: steel plant {name!r} is missing device rows: "
-                + ", ".join(sorted(missing))
-                + "."
-            )
-        if unsupported:
-            raise InputValidationError(
-                f"{path.name}: steel plant {name!r} has unsupported devices: "
-                + ", ".join(sorted(unsupported))
-                + "."
-            )
+        by_technology = _devices_by_technology(
+            name, rows, {"electrolyser", "dri_plant", "eaf"}, path, "steel plant"
+        )
 
         if plant_field(rows, "unit_type") != "steel_plant":
             raise InputValidationError(

@@ -9,11 +9,7 @@ from pathlib import Path
 from ..bidding import available_power_mw, naive_offer
 from ..clearing import clear_pay_as_bid, validate_demand_prices, validate_offer_prices
 from ..errors import InputValidationError
-from ..household import (
-    dispatch_household,
-    evaluate_household_flexibility,
-    optimize_household,
-)
+from ..household import dispatch_household, plan_household_opening
 from ..inputs import (
     load_demand_units,
     load_exact_availability_profiles,
@@ -107,37 +103,16 @@ def simulate_household_market(
         if any(product in cleared_products for product in opening.products):
             raise ValueError("A delivery product cannot be quoted in two openings.")
 
-        plans_by_household = {
-            household.name: optimize_household(
-                household,
-                opening.products,
-                forecasts["price_EOM"],
-                forecasts[f"{household.name}_heat_demand"],
-                household_energy[household.name],
-                initial_heat_pump_power_mw=household_heat_pump_power[household.name],
-                initial_battery_charge_power_mw=household_charge_power[household.name],
-                initial_battery_discharge_power_mw=household_discharge_power[
-                    household.name
-                ],
-            )
-            for household in households
-        }
-        flexibility_by_household = {
-            household.name: evaluate_household_flexibility(
-                household,
-                opening.products,
-                forecasts["price_EOM"],
-                forecasts[f"{household.name}_heat_demand"],
-                household_energy[household.name],
-                plans_by_household[household.name],
-                initial_heat_pump_power_mw=household_heat_pump_power[household.name],
-                initial_battery_charge_power_mw=household_charge_power[household.name],
-                initial_battery_discharge_power_mw=household_discharge_power[
-                    household.name
-                ],
-            )
-            for household in households
-        }
+        plans_by_household, flexibility_by_household = plan_household_opening(
+            households,
+            opening.products,
+            forecasts["price_EOM"],
+            forecasts,
+            household_energy,
+            household_heat_pump_power,
+            household_charge_power,
+            household_discharge_power,
+        )
         for household in households:
             household_flexibility_results.extend(
                 flexibility_by_household[household.name]

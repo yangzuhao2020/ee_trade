@@ -318,40 +318,29 @@ def heuristic_flexible_offers(
             expected_operating_time * inflexible_power
         )
 
+    segment_specs = []
+    if inflexible_power > _POWER_TOLERANCE_MW:
+        segment_specs.append(("inflexible", inflexible_power, inflexible_price))
+    if flexible_power > _POWER_TOLERANCE_MW:
+        segment_specs.append(("flexible", flexible_power, marginal_cost))
     offers: list[SupplyOffer] = []
     timestamp = delivery_start.isoformat()
-    if inflexible_power > _POWER_TOLERANCE_MW:
+    for segment, power_mw, price in segment_specs:
+        identifier = f"{plant.name}::{segment}::{timestamp}"
         offers.append(
             SupplyOffer(
-            unit_name=plant.name,
-            operator=plant.operator,
-            technology=plant.technology,
-            delivery_start=delivery_start,
-            delivery_end=delivery_end,
-            offered_power_mw=inflexible_power,
-            offered_energy_mwh=inflexible_power * duration_hours,
-            bid_price_eur_per_mwh=inflexible_price,
-            marginal_cost_eur_per_mwh=marginal_cost,
-            offer_id=f"{plant.name}::inflexible::{timestamp}",
-            offer_segment="inflexible",
-            bid_id=f"{plant.name}::inflexible::{timestamp}",
-            )
-        )
-    if flexible_power > _POWER_TOLERANCE_MW:
-        offers.append(
-            SupplyOffer(
-            unit_name=plant.name,
-            operator=plant.operator,
-            technology=plant.technology,
-            delivery_start=delivery_start,
-            delivery_end=delivery_end,
-            offered_power_mw=flexible_power,
-            offered_energy_mwh=flexible_power * duration_hours,
-            bid_price_eur_per_mwh=marginal_cost,
-            marginal_cost_eur_per_mwh=marginal_cost,
-            offer_id=f"{plant.name}::flexible::{timestamp}",
-            offer_segment="flexible",
-            bid_id=f"{plant.name}::flexible::{timestamp}",
+                unit_name=plant.name,
+                operator=plant.operator,
+                technology=plant.technology,
+                delivery_start=delivery_start,
+                delivery_end=delivery_end,
+                offered_power_mw=power_mw,
+                offered_energy_mwh=power_mw * duration_hours,
+                bid_price_eur_per_mwh=price,
+                marginal_cost_eur_per_mwh=marginal_cost,
+                offer_id=identifier,
+                offer_segment=segment,
+                bid_id=identifier,
             )
         )
     return offers

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
@@ -19,6 +20,7 @@ else:
 from .errors import InputValidationError
 from .market_models import DemandBid, MarketClearingResult
 from .models import (
+    IndustrialDevice,
     IndustrialDispatchResult,
     IndustrialFlexibilityResult,
     IndustrialOptimizationWindowResult,
@@ -122,6 +124,39 @@ def _power_coefficients(
     return electrolyser, dri, eaf, electrolyser + dri + eaf
 
 
+def _ramp_constraint_rows(
+    devices: tuple[IndustrialDevice, IndustrialDevice, IndustrialDevice],
+    power_coefficients: tuple[Sequence[float], ...],
+    initial_powers_mw: tuple[float, float, float],
+    *,
+    row_width: int,
+    row_offset: int = 0,
+) -> tuple[list[np.ndarray], list[float]]:
+    """Adjacent-step ramp-up/down rows, ordered by step then device."""
+
+    rows: list[np.ndarray] = []
+    limits: list[float] = []
+    for index in range(len(power_coefficients[0])):
+        for device_index, device in enumerate(devices):
+            coefficient = power_coefficients[device_index][index]
+            increase = np.zeros(row_width)
+            increase[row_offset + index] = coefficient
+            decrease = np.zeros(row_width)
+            decrease[row_offset + index] = -coefficient
+            if index:
+                previous = power_coefficients[device_index][index - 1]
+                increase[row_offset + index - 1] = -previous
+                decrease[row_offset + index - 1] = previous
+                initial = 0.0
+            else:
+                initial = initial_powers_mw[device_index]
+            rows.extend((increase, decrease))
+            limits.extend(
+                (device.ramp_up_mw + initial, device.ramp_down_mw - initial)
+            )
+    return rows, limits
+
+
 def maximum_industry_production(
     unit: IndustrialUnit,
     products: tuple[tuple[datetime, datetime], ...],
@@ -141,33 +176,17 @@ def maximum_industry_production(
     power_per_tonne = [
         _power_coefficients(coefficients, duration)[:3] for duration in durations
     ]
-    rows: list[np.ndarray] = []
-    limits: list[float] = []
+    device_coefficients = tuple(
+        tuple(per_tonne[device_index] for per_tonne in power_per_tonne)
+        for device_index in range(3)
+    )
     devices = (unit.electrolyser, unit.dri_plant, unit.eaf)
-    for index in range(len(products)):
-        for device_index, device in enumerate(devices):
-            coefficient = power_per_tonne[index][device_index]
-            increase = np.zeros(len(products))
-            increase[index] = coefficient
-            decrease = np.zeros(len(products))
-            decrease[index] = -coefficient
-            if index:
-                previous_coefficient = power_per_tonne[index - 1][device_index]
-                increase[index - 1] = -previous_coefficient
-                decrease[index - 1] = previous_coefficient
-                previous_power = None
-            else:
-                previous_power = initial_powers_mw[device_index]
-            rows.append(increase)
-            limits.append(
-                device.ramp_up_mw
-                + (previous_power if previous_power is not None else 0.0)
-            )
-            rows.append(decrease)
-            limits.append(
-                device.ramp_down_mw
-                - (previous_power if previous_power is not None else 0.0)
-            )
+    rows, limits = _ramp_constraint_rows(
+        devices,
+        device_coefficients,
+        initial_powers_mw,
+        row_width=len(products),
+    )
     result = linprog(
         -np.ones(len(products)),
         A_ub=np.vstack(rows),
@@ -201,6 +220,7 @@ class _IndustryProblem:
     A_eq: np.ndarray
     b_eq: np.ndarray
     bounds: tuple[tuple[float | None, float | None], ...]
+    A_ub_limited: np.ndarray
 
 
 def _build_industry_problem(
@@ -308,24 +328,15 @@ def _build_industry_problem(
     device_coefficients = tuple(
         remaining_power_coefficients[:, index] for index in range(3)
     )
-    for index in range(remaining_count):
-        for device_index, device in enumerate(devices):
-            coefficient = device_coefficients[device_index][index]
-            increase = np.zeros(variable_count)
-            increase[steel_offset + index] = coefficient
-            decrease = np.zeros(variable_count)
-            decrease[steel_offset + index] = -coefficient
-            if index:
-                previous = device_coefficients[device_index][index - 1]
-                increase[steel_offset + index - 1] = -previous
-                decrease[steel_offset + index - 1] = previous
-                initial = 0.0
-            else:
-                initial = initial_powers_mw[device_index]
-            inequality_rows.extend((increase, decrease))
-            inequality_values.extend(
-                (device.ramp_up_mw + initial, device.ramp_down_mw - initial)
-            )
+    ramp_rows, ramp_limits = _ramp_constraint_rows(
+        devices,
+        device_coefficients,
+        initial_powers_mw,
+        row_width=variable_count,
+        row_offset=steel_offset,
+    )
+    inequality_rows.extend(ramp_rows)
+    inequality_values.extend(ramp_limits)
 
     # Keep a physically reachable production path through every remaining
     # product.  Variables after the look-ahead window carry no objective cost;
@@ -356,6 +367,9 @@ def _build_industry_problem(
     penalty = 10.0 / max(unit.load_profile_deviation, 0.01)
     objective[positive_offset : positive_offset + count] = penalty
     objective[negative_offset : negative_offset + count] = penalty
+    cost_limit_row = np.zeros(variable_count)
+    cost_limit_row[steel_offset : steel_offset + count] = variable_costs
+    A_ub_limited = np.vstack([*inequality_rows, cost_limit_row])
     return _IndustryProblem(
         products=products,
         durations=durations,
@@ -372,6 +386,7 @@ def _build_industry_problem(
         A_eq=np.vstack(equality_rows),
         b_eq=np.array(equality_values),
         bounds=tuple(bounds),
+        A_ub_limited=A_ub_limited,
     )
 
 
@@ -386,12 +401,7 @@ def _solve(
     A_ub = problem.A_ub
     b_ub = problem.b_ub
     if variable_cost_limit is not None:
-        row = np.zeros(problem.variable_count)
-        count = len(problem.products)
-        row[problem.steel_offset : problem.steel_offset + count] = (
-            problem.variable_cost_per_tonne
-        )
-        A_ub = row.reshape(1, -1) if A_ub is None else np.vstack([A_ub, row])
+        A_ub = problem.A_ub_limited
         limit = variable_cost_limit + _TOLERANCE
         b_ub = np.array([limit]) if b_ub is None else np.append(b_ub, limit)
     result = linprog(

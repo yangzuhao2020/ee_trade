@@ -286,14 +286,10 @@ def _build_household_problem(
     )
 
 
-def _solve_household_problem(
-    household: HouseholdUnit,
+def _household_constraint(
     problem: _HouseholdProblem,
-    objective: np.ndarray,
     extra_rows: tuple[tuple[np.ndarray, float, float], ...] = (),
-) -> np.ndarray:
-    _require_household_optimizer()
-    assert milp is not None and LinearConstraint is not None
+) -> LinearConstraint:
     matrix = problem.matrix
     lower = problem.constraint_lower
     upper = problem.constraint_upper
@@ -305,11 +301,23 @@ def _solve_household_problem(
         upper = np.concatenate(
             [upper, np.array([maximum for _, _, maximum in extra_rows])]
         )
+    assert LinearConstraint is not None
+    return LinearConstraint(matrix, lower, upper)
+
+
+def _solve_household_problem(
+    household: HouseholdUnit,
+    problem: _HouseholdProblem,
+    objective: np.ndarray,
+    constraint: LinearConstraint,
+) -> np.ndarray:
+    _require_household_optimizer()
+    assert milp is not None
     result = milp(
         objective,
         integrality=problem.integrality,
         bounds=problem.bounds,
-        constraints=LinearConstraint(matrix, lower, upper),
+        constraints=constraint,
         options={"presolve": True},
     )
     if not result.success or result.x is None:
@@ -317,6 +325,124 @@ def _solve_household_problem(
             f"Household optimization failed for {household.name!r}: {result.message}"
         )
     return np.where(np.abs(result.x) < _TOLERANCE, 0.0, result.x)
+
+
+def _baseline_objective(problem: _HouseholdProblem) -> np.ndarray:
+    count = len(problem.durations)
+    # Fixed heat-pump consumption is a constant in the purchase-cost objective.
+    # Removing that constant keeps the MILP objective near the small battery
+    # scale and prevents solver tolerances from accepting needless cycling.
+    objective = np.zeros(problem.variable_count)
+    objective[problem.charge_offset : problem.charge_offset + count] = (
+        problem.prices * problem.durations
+    )
+    objective[problem.discharge_offset : problem.discharge_offset + count] = (
+        -problem.prices * problem.durations
+    )
+    return objective
+
+
+def _household_plans(
+    household: HouseholdUnit,
+    products: tuple[tuple[datetime, datetime], ...],
+    problem: _HouseholdProblem,
+    solution: np.ndarray,
+) -> tuple[HouseholdPlan, ...]:
+    plans: list[HouseholdPlan] = []
+    for index, (start, end) in enumerate(products):
+        energy_after = solution[problem.energy_offset + index]
+        plans.append(
+            HouseholdPlan(
+                delivery_start=start,
+                delivery_end=end,
+                unit_name=household.name,
+                forecast_price_eur_per_mwh=problem.prices[index],
+                heat_demand_mw_th=problem.heat_demands[index],
+                fixed_power_mw=household.fixed_power_mw,
+                planned_grid_power_mw=solution[problem.grid_offset + index],
+                planned_heat_pump_power_mw=problem.heat_powers[index],
+                planned_battery_charge_power_mw=solution[
+                    problem.charge_offset + index
+                ],
+                planned_battery_discharge_power_mw=solution[
+                    problem.discharge_offset + index
+                ],
+                planned_soc_after=energy_after / household.battery_capacity_mwh,
+            )
+        )
+    return tuple(plans)
+
+
+def _check_household_flexibility(household: HouseholdUnit) -> None:
+    if household.cost_tolerance_percent < 0 or not np.isfinite(
+        household.cost_tolerance_percent
+    ):
+        raise InputValidationError(
+            f"Household {household.name!r} cost_tolerance must be non-negative."
+        )
+
+
+def _flexibility_bounds(
+    household: HouseholdUnit,
+    products: tuple[tuple[datetime, datetime], ...],
+    problem: _HouseholdProblem,
+    baseline_plans: tuple[HouseholdPlan, ...],
+) -> tuple[HouseholdFlexibilityResult, ...]:
+    count = len(products)
+    baseline_cost = sum(
+        problem.prices[index]
+        * baseline_plans[index].planned_grid_power_mw
+        * problem.durations[index]
+        for index in range(count)
+    )
+    cost_limit = baseline_cost + abs(baseline_cost) * (
+        household.cost_tolerance_percent / 100
+    )
+    cost_row = np.zeros(problem.variable_count)
+    cost_row[problem.grid_offset : problem.grid_offset + count] = (
+        problem.prices * problem.durations
+    )
+    constraint = _household_constraint(
+        problem, ((cost_row, -np.inf, cost_limit + _TOLERANCE),)
+    )
+
+    results: list[HouseholdFlexibilityResult] = []
+    for index, (start, end) in enumerate(products):
+        minimum_objective = np.zeros(problem.variable_count)
+        minimum_objective[problem.grid_offset + index] = 1.0
+        minimum_solution = _solve_household_problem(
+            household,
+            problem,
+            minimum_objective,
+            constraint,
+        )
+
+        maximum_objective = np.zeros(problem.variable_count)
+        maximum_objective[problem.grid_offset + index] = -1.0
+        maximum_solution = _solve_household_problem(
+            household,
+            problem,
+            maximum_objective,
+            constraint,
+        )
+        minimum = minimum_solution[problem.grid_offset + index]
+        maximum = maximum_solution[problem.grid_offset + index]
+        baseline = baseline_plans[index].planned_grid_power_mw
+        if minimum > baseline + _TOLERANCE or maximum < baseline - _TOLERANCE:
+            raise InputValidationError(
+                f"Household {household.name!r} flexibility bounds exclude its "
+                f"baseline at {start.isoformat(sep=' ')}."
+            )
+        results.append(
+            HouseholdFlexibilityResult(
+                delivery_start=start,
+                delivery_end=end,
+                unit_name=household.name,
+                minimum_grid_power_mw=minimum,
+                maximum_grid_power_mw=maximum,
+            )
+        )
+    return tuple(results)
 
 
 def optimize_household(
@@ -345,41 +471,13 @@ def optimize_household(
         initial_battery_charge_power_mw,
         initial_battery_discharge_power_mw,
     )
-    count = len(products)
-    objective = np.zeros(problem.variable_count)
-    # Fixed heat-pump consumption is a constant in the purchase-cost objective.
-    # Removing that constant keeps the MILP objective near the small battery
-    # scale and prevents solver tolerances from accepting needless cycling.
-    objective[problem.charge_offset : problem.charge_offset + count] = (
-        problem.prices * problem.durations
+    solution = _solve_household_problem(
+        household,
+        problem,
+        _baseline_objective(problem),
+        _household_constraint(problem),
     )
-    objective[problem.discharge_offset : problem.discharge_offset + count] = (
-        -problem.prices * problem.durations
-    )
-    solution = _solve_household_problem(household, problem, objective)
-    plans: list[HouseholdPlan] = []
-    for index, (start, end) in enumerate(products):
-        energy_after = solution[problem.energy_offset + index]
-        plans.append(
-            HouseholdPlan(
-                delivery_start=start,
-                delivery_end=end,
-                unit_name=household.name,
-                forecast_price_eur_per_mwh=problem.prices[index],
-                heat_demand_mw_th=problem.heat_demands[index],
-                fixed_power_mw=household.fixed_power_mw,
-                planned_grid_power_mw=solution[problem.grid_offset + index],
-                planned_heat_pump_power_mw=problem.heat_powers[index],
-                planned_battery_charge_power_mw=solution[
-                    problem.charge_offset + index
-                ],
-                planned_battery_discharge_power_mw=solution[
-                    problem.discharge_offset + index
-                ],
-                planned_soc_after=energy_after / household.battery_capacity_mwh,
-            )
-        )
-    return tuple(plans)
+    return _household_plans(household, products, problem, solution)
 
 
 def evaluate_household_flexibility(
@@ -409,12 +507,7 @@ def evaluate_household_flexibility(
             f"Household {household.name!r} flexibility requires one matching "
             "baseline plan per product."
         )
-    if household.cost_tolerance_percent < 0 or not np.isfinite(
-        household.cost_tolerance_percent
-    ):
-        raise InputValidationError(
-            f"Household {household.name!r} cost_tolerance must be non-negative."
-        )
+    _check_household_flexibility(household)
 
     problem = _build_household_problem(
         household,
@@ -426,59 +519,71 @@ def evaluate_household_flexibility(
         initial_battery_charge_power_mw,
         initial_battery_discharge_power_mw,
     )
-    count = len(products)
-    baseline_cost = sum(
-        problem.prices[index]
-        * baseline_plans[index].planned_grid_power_mw
-        * problem.durations[index]
-        for index in range(count)
-    )
-    cost_limit = baseline_cost + abs(baseline_cost) * (
-        household.cost_tolerance_percent / 100
-    )
-    cost_row = np.zeros(problem.variable_count)
-    cost_row[problem.grid_offset : problem.grid_offset + count] = (
-        problem.prices * problem.durations
-    )
-    cost_constraint = ((cost_row, -np.inf, cost_limit + _TOLERANCE),)
+    return _flexibility_bounds(household, products, problem, baseline_plans)
 
-    results: list[HouseholdFlexibilityResult] = []
-    for index, (start, end) in enumerate(products):
-        minimum_objective = np.zeros(problem.variable_count)
-        minimum_objective[problem.grid_offset + index] = 1.0
-        minimum_solution = _solve_household_problem(
+
+def plan_household_opening(
+    households: tuple[HouseholdUnit, ...],
+    products: tuple[tuple[datetime, datetime], ...],
+    price_forecast: dict[datetime, float],
+    forecasts: dict[str, dict[datetime, float]],
+    initial_energy_mwh: dict[str, float],
+    initial_heat_pump_power_mw: dict[str, float],
+    initial_battery_charge_power_mw: dict[str, float],
+    initial_battery_discharge_power_mw: dict[str, float],
+) -> tuple[
+    dict[str, tuple[HouseholdPlan, ...]],
+    dict[str, tuple[HouseholdFlexibilityResult, ...]],
+]:
+    """Build each household's problem once for baseline plans and flexibility.
+
+    Baselines are solved for every household before any flexibility bound, so
+    failure ordering matches calling the public entry points per phase.
+    """
+
+    problems: dict[str, _HouseholdProblem] = {}
+    plans_by_household: dict[str, tuple[HouseholdPlan, ...]] = {}
+    for household in households:
+        if not products:
+            plans_by_household[household.name] = ()
+            continue
+        _require_household_optimizer()
+        problem = _build_household_problem(
             household,
+            products,
+            price_forecast,
+            forecasts[f"{household.name}_heat_demand"],
+            initial_energy_mwh[household.name],
+            initial_heat_pump_power_mw[household.name],
+            initial_battery_charge_power_mw[household.name],
+            initial_battery_discharge_power_mw[household.name],
+        )
+        problems[household.name] = problem
+        plans_by_household[household.name] = _household_plans(
+            household,
+            products,
             problem,
-            minimum_objective,
-            cost_constraint,
+            _solve_household_problem(
+                household,
+                problem,
+                _baseline_objective(problem),
+                _household_constraint(problem),
+            ),
         )
 
-        maximum_objective = np.zeros(problem.variable_count)
-        maximum_objective[problem.grid_offset + index] = -1.0
-        maximum_solution = _solve_household_problem(
+    flexibility_by_household: dict[str, tuple[HouseholdFlexibilityResult, ...]] = {}
+    for household in households:
+        if not products:
+            flexibility_by_household[household.name] = ()
+            continue
+        _check_household_flexibility(household)
+        flexibility_by_household[household.name] = _flexibility_bounds(
             household,
-            problem,
-            maximum_objective,
-            cost_constraint,
+            products,
+            problems[household.name],
+            plans_by_household[household.name],
         )
-        minimum = minimum_solution[problem.grid_offset + index]
-        maximum = maximum_solution[problem.grid_offset + index]
-        baseline = baseline_plans[index].planned_grid_power_mw
-        if minimum > baseline + _TOLERANCE or maximum < baseline - _TOLERANCE:
-            raise InputValidationError(
-                f"Household {household.name!r} flexibility bounds exclude its "
-                f"baseline at {start.isoformat(sep=' ')}."
-            )
-        results.append(
-            HouseholdFlexibilityResult(
-                delivery_start=start,
-                delivery_end=end,
-                unit_name=household.name,
-                minimum_grid_power_mw=minimum,
-                maximum_grid_power_mw=maximum,
-            )
-        )
-    return tuple(results)
+    return plans_by_household, flexibility_by_household
 
 
 def dispatch_household(
