@@ -4,22 +4,12 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from .config import load_market_settings
 from .errors import SimulationError
 from .plotting import generate_learning_plots, generate_plots
 from .simulation import run_simulation
-
-
-def _plot_opening(value: str) -> datetime:
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            "--plot-opening must be an ISO-like date and time."
-        ) from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,14 +37,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-plots",
         action="store_true",
         help="Write CSV results only; skip post-simulation PNG generation.",
-    )
-    parser.add_argument(
-        "--plot-opening",
-        type=_plot_opening,
-        help=(
-            "For complex clearing, render detailed plots for this market opening "
-            "(for example '2019-01-01 00:00'). Defaults to the first opening."
-        ),
     )
     parser.add_argument(
         "--learning-mode",
@@ -170,7 +152,6 @@ def main(argv: list[str] | None = None) -> int:
             generate_plots(
                 result,
                 arguments.output_dir / "plots",
-                opening_time=arguments.plot_opening,
                 learning_episode_label=learning_episode_label,
             )
             if learning_metrics_path is not None:

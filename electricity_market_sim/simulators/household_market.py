@@ -280,7 +280,6 @@ def simulate_household_market(
                 )
             dispatch = dispatch_household(
                 household,
-                opening.opening_time,
                 plans_by_household[household.name],
                 accepted_grid_energy,
                 household_energy[household.name],

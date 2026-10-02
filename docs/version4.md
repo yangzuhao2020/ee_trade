@@ -309,7 +309,10 @@ Output_{k,t}^{actual}=\alpha_t Output_{k,t}^{planned}
 $$
 因此，氢气、DRI 和钢的实际产量均按照同一比例缩放，并继续满足本例的物料平衡关系。本例各设备的 `min_power=0`，且爬升、下降能力均等于最大功率，因此采用该执行方式。下一轮滚动优化使用实际钢产量 $Steel_t^{actual}$ 更新剩余生产任务。
 ## 输出
-新增 `industry_results.csv`，主要字段为：
+
+### 工业逐时结果：`industry_results.csv`
+
+`industry_results.csv` 合并逐时生产、实际执行和灵活性结果，共18个字段。原有14个字段顺序保持不变，末尾追加4个灵活性字段：
 ```text
 datetime
 window_id
@@ -325,20 +328,22 @@ planned_energy_mwh
 actual_grid_power_mw
 actual_steel_output_t
 forecast_cost_eur
-```
-其中，设备功率、氢气产量和 DRI 产量字段记录优化得到的计划值；`actual_grid_power_mw` 和 `actual_steel_output_t` 根据实际成交比例计算；`forecast_cost_eur` 记录该交付时段的预测可变成本，不包含参考负荷偏差惩罚。
-新增 `industry_flexibility_results.csv`，主要字段为：
-```text
-datetime
-window_id
-unit_name
-baseline_power_mw
 minimum_power_mw
 maximum_power_mw
 flex_up_mw
 flex_down_mw
 ```
-新增 `industry_optimization_windows.csv`，每个优化窗口只记录一行窗口成本，避免在逐时结果中重复后被误加：
+其中，设备功率、氢气产量和 DRI 产量字段记录优化得到的计划值；`actual_grid_power_mw` 和 `actual_steel_output_t` 根据实际成交比例计算；`forecast_cost_eur` 记录该交付时段的预测可变成本，不包含参考负荷偏差惩罚。
+
+`planned_grid_power_mw` 同时作为灵活性计算的基准功率，因此不重复导出 `baseline_power_mw`。`minimum_power_mw` 和 `maximum_power_mw` 是在其他时段允许重新调度、且满足生产与窗口成本约束时，本时段总购电功率的可行上下限，单位为 MW。`flex_up_mw = maximum_power_mw - planned_grid_power_mw` 表示增加用电的余量；`flex_down_mw = planned_grid_power_mw - minimum_power_mw` 表示减少用电的余量。两者相对计划功率计算，不随实际成交功率变化。
+
+各时段上下限来自独立优化，不能将所有时段的最大值或最小值组合成一套同时执行的生产计划。导出时要求生产与灵活性结果按主体、完整交付区间和优化窗口一一匹配，且基准功率与计划购电功率一致；重复、缺失或基准不一致时给出明确错误。
+
+原 `industry_flexibility_results.csv` 的输出内容已并入本节的 `industry_results.csv`，不再作为独立输出文件或字段小节。合并表成功写出后，清理输出目录中遗留的旧文件。读取旧文件的外部脚本需要改为读取合并表中的4个新增字段；原 `baseline_power_mw` 对应合并表中的 `planned_grid_power_mw`。内部灵活性结果继续用于绘图与计算。
+
+### 工业优化窗口结果：`industry_optimization_windows.csv`
+
+`industry_optimization_windows.csv` 继续独立导出，每个优化窗口只记录一行窗口成本，避免在逐时结果中重复后被误加：
 ```text
 window_id
 unit_name
@@ -349,7 +354,7 @@ commit_end
 baseline_variable_cost_eur
 maximum_flexible_variable_cost_eur
 ```
-其中，`baseline_variable_cost_eur` 是同一优化窗口内基准计划的可变成本总和，`maximum_flexible_variable_cost_eur` 为应用 `cost_tolerance` 后的成本上限；两者均不包含参考负荷偏差惩罚。`window_id` 同时写入该窗口产生的逐时生产和灵活性结果，用于关联三份输出。
+其中，`baseline_variable_cost_eur` 是同一优化窗口内基准计划的可变成本总和，`maximum_flexible_variable_cost_eur` 为应用 `cost_tolerance` 后的成本上限；两者均不包含参考负荷偏差惩罚。`window_id` 同时写入合并后的逐时工业结果和优化窗口结果，用于关联这两份输出。
 
 A360 的报价量、成交量、未成交量和实际支付继续写入已有的 `demand_results.csv`，实际出清价格记录在 `market_results.csv`。取消 `trade_results.csv` 的独立导出。当市场采用 `pay_as_clear` 时，内部成交记录使用该产品最终的统一出清价格结算；同一买单的逐笔成交电量及支付之和必须分别等于 `demand_results.csv` 中的成交电量及支付。
 ## 报价策略

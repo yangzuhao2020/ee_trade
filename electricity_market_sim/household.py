@@ -487,7 +487,6 @@ def evaluate_household_flexibility(
 
 def dispatch_household(
     household: HouseholdUnit,
-    opening_time: datetime,
     plans: tuple[HouseholdPlan, ...],
     accepted_grid_energy_mwh: dict[datetime, float],
     initial_energy_mwh: float,
@@ -588,7 +587,6 @@ def dispatch_household(
         ) * duration
         records.append(
             HouseholdDispatchResult(
-                opening_time=opening_time,
                 delivery_start=plan.delivery_start,
                 delivery_end=plan.delivery_end,
                 unit_name=household.name,

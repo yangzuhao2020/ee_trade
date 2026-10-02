@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 
 from ..errors import PlottingError
 from ..models import SimulationResult
-from .common import _load_matplotlib, _make_unit_colors, _validate_plot_data
+from .common import (
+    _load_matplotlib,
+    _make_unit_colors,
+    _remove_stale_opening_plots,
+    _validate_plot_data,
+)
 from .dispatch import (
     _plot_dispatch_by_unit,
     _plot_operator_profit,
@@ -25,12 +29,7 @@ from .market import (
     _plot_market_overview,
     _plot_market_summary,
 )
-from .opening import (
-    _plot_offer_acceptance,
-    _plot_opening_dispatch,
-    _remove_stale_opening_plots,
-    _select_opening_results,
-)
+
 
 # Keep the stable package-level API intentionally small; chart implementations
 # live in focused modules and are imported by this orchestration entry point.
@@ -44,7 +43,6 @@ _LEARNING_COMPARISON_PLOT = "learning_evaluation_comparison.png"
 def generate_plots(
     result: SimulationResult,
     output_dir: str | Path,
-    opening_time: datetime | None = None,
     learning_episode_label: str = "Actor evaluation",
 ) -> tuple[Path, ...]:
     """Render durable PNG summaries from a complete simulation result.
@@ -113,24 +111,8 @@ def generate_plots(
                 _plot_industry_dispatch(
                     pyplot,
                     dates,
-                    tuple(
-                        sorted(
-                            result.industry_results,
-                            key=lambda industry: (
-                                industry.delivery_start,
-                                industry.unit_name,
-                            ),
-                        )
-                    ),
-                    tuple(
-                        sorted(
-                            result.industry_flexibility_results,
-                            key=lambda flexibility: (
-                                flexibility.delivery_start,
-                                flexibility.unit_name,
-                            ),
-                        )
-                    ),
+                    result.industry_results,
+                    result.industry_flexibility_results,
                     industry_plot_path,
                 )
             )
@@ -154,42 +136,7 @@ def generate_plots(
                 _LEARNING_COMPARISON_PLOT,
             ):
                 (plot_directory / name).unlink(missing_ok=True)
-        if result.settings.market_mechanism == "complex_clearing":
-            # A directory may have been rendered by an older version which
-            # incorrectly treated complex clearing as a simple merit order.
-            (plot_directory / "pay_as_bid_first_product.png").unlink(missing_ok=True)
-            opening_results = _select_opening_results(results, opening_time)
-            selected_opening_time = (
-                opening_results[0].opening_time or opening_results[0].delivery_start
-            )
-            opening_directory = (
-                plot_directory
-                / "openings"
-                / selected_opening_time.strftime("%Y-%m-%d_%H-%M")
-            )
-            _remove_stale_opening_plots(
-                plot_directory / "openings",
-                keep=opening_directory,
-            )
-            opening_directory.mkdir(parents=True, exist_ok=True)
-            paths.extend(
-                (
-                    _plot_opening_dispatch(
-                        pyplot,
-                        dates,
-                        opening_results,
-                        unit_colors,
-                        opening_directory / "price_and_dispatch.png",
-                    ),
-                    _plot_offer_acceptance(
-                        pyplot,
-                        opening_results,
-                        opening_directory / "offer_acceptance.png",
-                    ),
-                )
-            )
-        elif result.settings.market_mechanism == "pay_as_bid":
-            _remove_stale_opening_plots(plot_directory / "openings")
+        if result.settings.market_mechanism == "pay_as_bid":
             paths.append(
                 _plot_first_pay_as_bid_order_book(
                     pyplot,
@@ -199,8 +146,11 @@ def generate_plots(
                 )
             )
         else:
-            _remove_stale_opening_plots(plot_directory / "openings")
+            # A directory may have been rendered by an older version which
+            # incorrectly treated complex clearing as a simple merit order.
             (plot_directory / "pay_as_bid_first_product.png").unlink(missing_ok=True)
+        # Older versions rendered per-opening detail plots under openings/.
+        _remove_stale_opening_plots(plot_directory / "openings")
     except PlottingError:
         raise
     except Exception as exc:

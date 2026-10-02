@@ -32,7 +32,7 @@
 \mathrm{payment} = \mathrm{trade\_energy} \times \mathrm{trade\_price}$$
 `demand_results.csv` 直接读取出清结果中每张买单的成交电量和实际支付，导出时不再重新汇总内部逐笔交易。完全未成交的买单仍记录申报量、未成交量和零支付。
 ### household_results.csv
-记录 A360 的计划及实际设备运行：
+记录 A360 的计划、购电功率灵活性上下界及实际设备运行，按 `(unit_name, delivery_start, delivery_end)` 合并为一行，不再单独导出 `household_flexibility_results.csv`：
 ```
 delivery_start
 delivery_end
@@ -41,6 +41,8 @@ forecast_price_eur_per_mwh
 heat_demand_mw_th
 fixed_power_mw
 planned_grid_power_mw
+minimum_grid_power_mw
+maximum_grid_power_mw
 heat_pump_power_mw
 battery_charge_power_mw
 battery_discharge_power_mw
@@ -49,17 +51,9 @@ soc_after
 unmet_electricity_mwh
 unmet_heat_mwh_th
 ```
-其中，设备功率和 SOC 均为成交后的实际运行结果。买单、成交量、报价及支付统一记录在 `demand_results.csv`，不在此重复保存。
-### household_flexibility_results.csv
-记录各时段的购电功率范围：
-```
-delivery_start
-delivery_end
-unit_name
-minimum_grid_power_mw
-maximum_grid_power_mw
-```
-基准功率读取 `household_results.csv` 中的 `planned_grid_power_mw`；灵活性分析结果不直接用于 EOM 买单。
+其中，`planned_grid_power_mw` 为基准计划购电功率；热泵功率、电池充放电功率和 SOC 均为成交后的实际运行结果。买单、成交量、报价及支付统一记录在 `demand_results.csv`，不在此重复保存。
+
+`minimum_grid_power_mw` 和 `maximum_grid_power_mw` 为出清前按预测电价评估的最低、最高可行购电功率：在相同初始状态、供热及设备约束和整个优化窗口的成本容忍度限制下，对每个时段分别最小化、最大化购电功率。各上下界可能来自不同的完整运行方案，不对应同一行的实际设备运行及 SOC，也不能将整列上下界直接拼接为一套可执行计划。灵活性分析结果不直接用于 EOM 买单。
 ## demand and supply
 ### demand
 - demand_df: 
@@ -146,7 +140,7 @@ $$
 ### 成本容忍度与灵活性
 `objective=min_variable_cost` 得到上面的最低预测成本计划。`flexibility_measure=cost_based_load_shift` 与 `cost_tolerance=10` 用于**另外评估**满足物理约束的负荷转移空间：基准成本为非负时，新计划成本不得高于基准的 `110%`。若支持负成本场景，容忍度按基准成本绝对值加到基准成本上，避免负数乘以 `1.1` 反而缩紧上限。
 
-灵活性评估不能移动 `P_fixed`，也不能越过供热、SOC 或设备功率边界；其结果单独报告。EOM 买单使用最低成本计划 `P_grid`，不把灵活性分析得到的另一套用电量直接当作购电订单。
+灵活性评估不能移动 `P_fixed`，也不能越过供热、SOC 或设备功率边界；其购电功率上下界合并至 `household_results.csv`。EOM 买单使用最低成本计划 `P_grid`，不把灵活性分析得到的另一套用电量直接当作购电订单。
 ## 发电机可分割卖单
 `example_01h` 的 EOM 使用 `pay_as_bid`，发电机对每个 15 分钟产品提交普通可分割卖单。卖单可在 `0` 到全部申报电量之间成交，边际卖单允许部分成交。
 

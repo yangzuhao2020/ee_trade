@@ -190,16 +190,13 @@ def maximum_industry_production(
 class _IndustryProblem:
     products: tuple[tuple[datetime, datetime], ...]
     durations: np.ndarray
-    prices: np.ndarray
-    references: np.ndarray
+
     variable_cost_per_tonne: np.ndarray
     grid_power_per_tonne: np.ndarray
     electrolyser_power_per_tonne: np.ndarray
     dri_power_per_tonne: np.ndarray
     eaf_power_per_tonne: np.ndarray
     steel_offset: int
-    positive_deviation_offset: int
-    negative_deviation_offset: int
     variable_count: int
     objective: np.ndarray
     A_ub: np.ndarray | None
@@ -365,16 +362,12 @@ def _build_industry_problem(
     return _IndustryProblem(
         products=products,
         durations=durations,
-        prices=prices,
-        references=references,
         variable_cost_per_tonne=variable_costs,
         grid_power_per_tonne=grid_power,
         electrolyser_power_per_tonne=electrolyser_power,
         dri_power_per_tonne=dri_power,
         eaf_power_per_tonne=eaf_power,
         steel_offset=steel_offset,
-        positive_deviation_offset=positive_offset,
-        negative_deviation_offset=negative_offset,
         variable_count=variable_count,
         objective=objective,
         A_ub=(np.vstack(inequality_rows) if inequality_rows else None),
@@ -479,8 +472,6 @@ def optimize_industry_window(
                 delivery_start=start,
                 delivery_end=end,
                 unit_name=unit.name,
-                forecast_price_eur_per_mwh=problem.prices[index],
-                reference_power_mw=problem.references[index],
                 electrolyser_power_mw=(
                     problem.electrolyser_power_per_tonne[index] * steel_output
                 ),
@@ -561,7 +552,6 @@ def optimize_industry_window(
 def dispatch_industry(
     plan: IndustrialPlan,
     accepted_energy_mwh: float,
-    opening_time: datetime,
 ) -> IndustrialDispatchResult:
     """Scale a planned production chain by its accepted purchase ratio."""
 
@@ -578,7 +568,6 @@ def dispatch_industry(
         ratio = max(0.0, accepted_energy_mwh) / plan.planned_energy_mwh
     duration = _duration_hours((plan.delivery_start, plan.delivery_end))
     return IndustrialDispatchResult(
-        opening_time=opening_time,
         window_id=plan.window_id,
         delivery_start=plan.delivery_start,
         delivery_end=plan.delivery_end,
@@ -711,11 +700,7 @@ class IndustryRollingCoordinator:
             pending.append((plan, result, accepted))
         pending.sort(key=lambda item: item[0].delivery_start)
         pending_steel = sum(
-            dispatch_industry(
-                plan,
-                accepted,
-                result.opening_time or result.delivery_start,
-            ).actual_steel_output_t
+            dispatch_industry(plan, accepted).actual_steel_output_t
             for plan, result, accepted in pending
         )
         remaining_demand = max(
@@ -795,11 +780,7 @@ class IndustryRollingCoordinator:
             if plan is None or key in self.delivered:
                 continue
             accepted = self._cleared_industry_energy(result, unit.name)
-            dispatch = dispatch_industry(
-                plan,
-                accepted,
-                result.opening_time or result.delivery_start,
-            )
+            dispatch = dispatch_industry(plan, accepted)
             self.dispatch_results.append(dispatch)
             self.actual_steel_t[unit.name] += dispatch.actual_steel_output_t
             self.last_actual_powers_mw[unit.name] = self._actual_device_powers(

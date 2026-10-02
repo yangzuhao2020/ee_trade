@@ -6,10 +6,15 @@ import csv
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import datetime
+from math import isclose
 from pathlib import Path
 
+from .errors import InputValidationError
 from .learning import PRICE_SCALE_EUR_PER_MWH
 from .models import SimulationResult
+
+
+_POWER_TOLERANCE_MW = 1e-7
 
 
 def _timestamp(value: datetime) -> str:
@@ -32,7 +37,7 @@ def _write_rows(path: Path, fields: list[str], rows: Iterable[dict[str, str]]) -
 
 
 def write_results(output_dir: Path, simulation_result: SimulationResult) -> None:
-    """Write the agreed market, unit, and operator result files."""
+    """Write complete unit summaries and split/constrained offers by opening."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
     sorted_results = sorted(
@@ -43,6 +48,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
     market_rows = []
     unit_rows = []
     offer_rows = []
+    detailed_unit_openings: set[tuple[str, str]] = set()
     demand_rows = []
     exchange_rows = []
     operator_totals: dict[str, dict[str, float]] = defaultdict(
@@ -175,6 +181,13 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             )
 
         for unit_name, cleared_offers in sorted(offers_by_unit.items()):
+            if len(cleared_offers) > 1 or any(
+                cleared.offer.bid_type != "SB"
+                or cleared.offer.parent_bid_id
+                or cleared.offer.min_acceptance_ratio != 0.0
+                for cleared in cleared_offers
+            ):
+                detailed_unit_openings.add((opening_id, unit_name))
             first_offer = cleared_offers[0].offer
             offered_energy_mwh = sum(
                 cleared.offer.offered_energy_mwh for cleared in cleared_offers
@@ -203,8 +216,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             startup_cost_eur = sum(
                 cleared.startup_cost_eur for cleared in cleared_offers
             )
-            total_cost_eur = sum(cleared.total_cost_eur for cleared in cleared_offers)
-            profit_eur = sum(cleared.profit_eur for cleared in cleared_offers)
+            total_cost_eur = variable_cost_eur + startup_cost_eur
+            profit_eur = revenue_eur - total_cost_eur
             unit_rows.append(
                 {
                     "opening_id": opening_id,
@@ -262,38 +275,36 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         if import_offer is not None or export_bid is not None:
             if import_offer is None or export_bid is None:
                 raise ValueError("An Exchange market result must contain both orders.")
+            import_revenue_eur = market_result.import_revenue_eur
+            export_payment_eur = market_result.export_payment_eur
             exchange_rows.append(
                 {
                     "opening_id": opening_id,
                     "opening_time": _timestamp(opening_time),
                     "delivery_start": _timestamp(market_result.delivery_start),
                     "delivery_end": _timestamp(market_result.delivery_end),
+                    "duration_hours": _number(duration_hours),
+                    "settlement_method": "pay_as_clear",
                     "exchange_name": import_offer.offer.unit_name,
                     "exchange_operator": import_offer.offer.operator,
                     "offered_import_power_mw": _number(
                         import_offer.offer.offered_power_mw
                     ),
-                    "offered_import_mwh": _number(
-                        import_offer.offer.offered_energy_mwh
-                    ),
                     "cleared_import_power_mw": _number(
                         import_offer.accepted_power_mw
                     ),
-                    "cleared_import_mwh": _number(import_offer.accepted_energy_mwh),
                     "requested_export_power_mw": _number(
-                        export_bid.bid.volume_mwh / market_result.duration_hours
+                        export_bid.bid.volume_mwh / duration_hours
                     ),
-                    "requested_export_mwh": _number(export_bid.bid.volume_mwh),
                     "cleared_export_power_mw": _number(export_bid.accepted_power_mw),
-                    "cleared_export_mwh": _number(export_bid.accepted_energy_mwh),
                     "unfulfilled_export_mwh": _number(
                         export_bid.unserved_energy_mwh
                     ),
                     "net_exchange_mwh": _number(market_result.net_exchange_mwh),
-                    "import_revenue_eur": _number(market_result.import_revenue_eur),
-                    "export_payment_eur": _number(market_result.export_payment_eur),
+                    "import_revenue_eur": _number(import_revenue_eur),
+                    "export_payment_eur": _number(export_payment_eur),
                     "exchange_market_cash_flow_eur": _number(
-                        market_result.exchange_cash_flow_eur
+                        import_revenue_eur - export_payment_eur
                     ),
                 }
             )
@@ -309,6 +320,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "opening_time": _timestamp(storage_result.opening_time),
                 "delivery_start": _timestamp(storage_result.delivery_start),
                 "delivery_end": _timestamp(storage_result.delivery_end),
+                "duration_hours": _number(duration_hours),
                 "unit_name": storage_result.unit_name,
                 "unit_operator": storage_result.operator,
                 "technology": storage_result.technology,
@@ -316,27 +328,15 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "energy_after_mwh": _number(storage_result.energy_after_mwh),
                 "soc_before": _number(storage_result.soc_before),
                 "soc_after": _number(storage_result.soc_after),
-                "offered_charge_power_mw": _number(
-                    storage_result.offered_charge_mwh / duration_hours
-                ),
                 "offered_charge_mwh": _number(storage_result.offered_charge_mwh),
-                "accepted_charge_power_mw": _number(
-                    storage_result.accepted_charge_mwh / duration_hours
-                ),
                 "accepted_charge_mwh": _number(storage_result.accepted_charge_mwh),
                 "charge_bid_price_eur_per_mwh": (
                     ""
                     if storage_result.charge_bid_price_eur_per_mwh is None
                     else _number(storage_result.charge_bid_price_eur_per_mwh)
                 ),
-                "offered_discharge_power_mw": _number(
-                    storage_result.offered_discharge_mwh / duration_hours
-                ),
                 "offered_discharge_mwh": _number(
                     storage_result.offered_discharge_mwh
-                ),
-                "accepted_discharge_power_mw": _number(
-                    storage_result.accepted_discharge_mwh / duration_hours
                 ),
                 "accepted_discharge_mwh": _number(
                     storage_result.accepted_discharge_mwh
@@ -363,6 +363,30 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             }
         )
 
+    household_by_key = {}
+    for result in simulation_result.household_results:
+        key = (result.unit_name, result.delivery_start, result.delivery_end)
+        if key in household_by_key:
+            raise InputValidationError(f"Duplicate household dispatch result: {key!r}.")
+        household_by_key[key] = result
+    flexibility_by_key = {}
+    for result in simulation_result.household_flexibility_results:
+        key = (result.unit_name, result.delivery_start, result.delivery_end)
+        if key in flexibility_by_key:
+            raise InputValidationError(
+                f"Duplicate household flexibility result: {key!r}."
+            )
+        flexibility_by_key[key] = result
+    missing_flexibility = household_by_key.keys() - flexibility_by_key.keys()
+    missing_dispatch = flexibility_by_key.keys() - household_by_key.keys()
+    if missing_flexibility or missing_dispatch:
+        raise InputValidationError(
+            "Household dispatch and flexibility results must match by "
+            "(unit_name, delivery_start, delivery_end); "
+            f"missing flexibility: {sorted(missing_flexibility)!r}; "
+            f"missing dispatch: {sorted(missing_dispatch)!r}."
+        )
+
     household_rows = [
         {
             "delivery_start": _timestamp(result.delivery_start),
@@ -374,6 +398,12 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "heat_demand_mw_th": _number(result.heat_demand_mw_th),
             "fixed_power_mw": _number(result.fixed_power_mw),
             "planned_grid_power_mw": _number(result.planned_grid_power_mw),
+            "minimum_grid_power_mw": _number(
+                flexibility_by_key[key].minimum_grid_power_mw
+            ),
+            "maximum_grid_power_mw": _number(
+                flexibility_by_key[key].maximum_grid_power_mw
+            ),
             "heat_pump_power_mw": _number(result.heat_pump_power_mw),
             "battery_charge_power_mw": _number(
                 result.battery_charge_power_mw
@@ -386,18 +416,58 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "unmet_electricity_mwh": _number(result.unmet_electricity_mwh),
             "unmet_heat_mwh_th": _number(result.unmet_heat_mwh_th),
         }
-        for result in simulation_result.household_results
+        for key, result in household_by_key.items()
     ]
-    flexibility_rows = [
-        {
-            "delivery_start": _timestamp(result.delivery_start),
-            "delivery_end": _timestamp(result.delivery_end),
-            "unit_name": result.unit_name,
-            "minimum_grid_power_mw": _number(result.minimum_grid_power_mw),
-            "maximum_grid_power_mw": _number(result.maximum_grid_power_mw),
-        }
-        for result in simulation_result.household_flexibility_results
-    ]
+    industry_by_key = {}
+    for result in simulation_result.industry_results:
+        key = (
+            result.unit_name,
+            result.delivery_start,
+            result.delivery_end,
+            result.window_id,
+        )
+        if key in industry_by_key:
+            raise InputValidationError(f"Duplicate industrial dispatch result: {key!r}.")
+        industry_by_key[key] = result
+    industry_flexibility_by_key = {}
+    for result in simulation_result.industry_flexibility_results:
+        key = (
+            result.unit_name,
+            result.delivery_start,
+            result.delivery_end,
+            result.window_id,
+        )
+        if key in industry_flexibility_by_key:
+            raise InputValidationError(
+                f"Duplicate industrial flexibility result: {key!r}."
+            )
+        industry_flexibility_by_key[key] = result
+    missing_industry_flexibility = (
+        industry_by_key.keys() - industry_flexibility_by_key.keys()
+    )
+    missing_industry_dispatch = (
+        industry_flexibility_by_key.keys() - industry_by_key.keys()
+    )
+    if missing_industry_flexibility or missing_industry_dispatch:
+        raise InputValidationError(
+            "Industrial dispatch and flexibility results must match by "
+            "(unit_name, delivery_start, delivery_end, window_id); "
+            f"missing flexibility: {sorted(missing_industry_flexibility)!r}; "
+            f"missing dispatch: {sorted(missing_industry_dispatch)!r}."
+        )
+    for key, result in industry_by_key.items():
+        baseline_power = industry_flexibility_by_key[key].baseline_power_mw
+        if not isclose(
+            baseline_power,
+            result.planned_grid_power_mw,
+            rel_tol=0.0,
+            abs_tol=_POWER_TOLERANCE_MW,
+        ):
+            raise InputValidationError(
+                f"Industrial baseline and planned grid power must match for {key!r}: "
+                f"baseline={baseline_power!r} MW, "
+                f"planned={result.planned_grid_power_mw!r} MW."
+            )
     industry_rows = [
         {
             "datetime": _timestamp(result.delivery_start),
@@ -414,21 +484,16 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "actual_grid_power_mw": _number(result.actual_grid_power_mw),
             "actual_steel_output_t": _number(result.actual_steel_output_t),
             "forecast_cost_eur": _number(result.forecast_cost_eur),
+            "minimum_power_mw": _number(
+                industry_flexibility_by_key[key].minimum_power_mw
+            ),
+            "maximum_power_mw": _number(
+                industry_flexibility_by_key[key].maximum_power_mw
+            ),
+            "flex_up_mw": _number(industry_flexibility_by_key[key].flex_up_mw),
+            "flex_down_mw": _number(industry_flexibility_by_key[key].flex_down_mw),
         }
-        for result in simulation_result.industry_results
-    ]
-    industry_flexibility_rows = [
-        {
-            "datetime": _timestamp(result.delivery_start),
-            "window_id": result.window_id,
-            "unit_name": result.unit_name,
-            "baseline_power_mw": _number(result.baseline_power_mw),
-            "minimum_power_mw": _number(result.minimum_power_mw),
-            "maximum_power_mw": _number(result.maximum_power_mw),
-            "flex_up_mw": _number(result.flex_up_mw),
-            "flex_down_mw": _number(result.flex_down_mw),
-        }
-        for result in simulation_result.industry_flexibility_results
+        for key, result in industry_by_key.items()
     ]
     industry_window_rows = [
         {
@@ -578,16 +643,14 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "opening_time",
                 "delivery_start",
                 "delivery_end",
+                "duration_hours",
+                "settlement_method",
                 "exchange_name",
                 "exchange_operator",
                 "offered_import_power_mw",
-                "offered_import_mwh",
                 "cleared_import_power_mw",
-                "cleared_import_mwh",
                 "requested_export_power_mw",
-                "requested_export_mwh",
                 "cleared_export_power_mw",
-                "cleared_export_mwh",
                 "unfulfilled_export_mwh",
                 "net_exchange_mwh",
                 "import_revenue_eur",
@@ -604,6 +667,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "opening_time",
                 "delivery_start",
                 "delivery_end",
+                "duration_hours",
                 "unit_name",
                 "unit_operator",
                 "technology",
@@ -611,14 +675,10 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "energy_after_mwh",
                 "soc_before",
                 "soc_after",
-                "offered_charge_power_mw",
                 "offered_charge_mwh",
-                "accepted_charge_power_mw",
                 "accepted_charge_mwh",
                 "charge_bid_price_eur_per_mwh",
-                "offered_discharge_power_mw",
                 "offered_discharge_mwh",
-                "accepted_discharge_power_mw",
                 "accepted_discharge_mwh",
                 "discharge_bid_price_eur_per_mwh",
                 "clearing_price_eur_per_mwh",
@@ -630,39 +690,17 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             ],
             storage_rows,
         )
-    if any(row["offer_segment"] != "single" for row in offer_rows):
-        _write_rows(
-            output_dir / "offer_results.csv",
-            [
-                "opening_id",
-                "opening_time",
-                "delivery_start",
-                "delivery_end",
-                "unit_name",
-                "unit_operator",
-                "technology",
-                "offer_id",
-                "side",
-                "bid_id",
-                "bid_type",
-                "min_acceptance_ratio",
-                "parent_bid_id",
-                "offer_segment",
-                "marginal_cost_eur_per_mwh",
-                "bid_price_eur_per_mwh",
-                "offered_power_mw",
-                "offered_energy_mwh",
-                "accepted_power_mw",
-                "accepted_energy_mwh",
-                "accepted_price_eur_per_mwh",
-                "revenue_eur",
-                "variable_cost_eur",
-                "startup_cost_eur",
-                "total_cost_eur",
-                "profit_eur",
-            ],
-            offer_rows,
-        )
+    # Retain every product of an opening once a unit needs offer detail.
+    offer_rows = [
+        row
+        for row in offer_rows
+        if (row["opening_id"], row["unit_name"]) in detailed_unit_openings
+    ]
+    offer_path = output_dir / "offer_results.csv"
+    if offer_rows:
+        _write_rows(offer_path, list(offer_rows[0]), offer_rows)
+    else:
+        offer_path.unlink(missing_ok=True)
     if simulation_result.settings.market_mechanism == "pay_as_bid" or household_rows:
         _write_rows(
             output_dir / "household_results.csv",
@@ -674,6 +712,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "heat_demand_mw_th",
                 "fixed_power_mw",
                 "planned_grid_power_mw",
+                "minimum_grid_power_mw",
+                "maximum_grid_power_mw",
                 "heat_pump_power_mw",
                 "battery_charge_power_mw",
                 "battery_discharge_power_mw",
@@ -684,17 +724,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             ],
             household_rows,
         )
-        _write_rows(
-            output_dir / "household_flexibility_results.csv",
-            [
-                "delivery_start",
-                "delivery_end",
-                "unit_name",
-                "minimum_grid_power_mw",
-                "maximum_grid_power_mw",
-            ],
-            flexibility_rows,
-        )
+        (output_dir / "household_flexibility_results.csv").unlink(missing_ok=True)
     if industry_rows:
         _write_rows(
             output_dir / "industry_results.csv",
@@ -713,23 +743,14 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "actual_grid_power_mw",
                 "actual_steel_output_t",
                 "forecast_cost_eur",
-            ],
-            industry_rows,
-        )
-        _write_rows(
-            output_dir / "industry_flexibility_results.csv",
-            [
-                "datetime",
-                "window_id",
-                "unit_name",
-                "baseline_power_mw",
                 "minimum_power_mw",
                 "maximum_power_mw",
                 "flex_up_mw",
                 "flex_down_mw",
             ],
-            industry_flexibility_rows,
+            industry_rows,
         )
+        (output_dir / "industry_flexibility_results.csv").unlink(missing_ok=True)
         _write_rows(
             output_dir / "industry_optimization_windows.csv",
             [

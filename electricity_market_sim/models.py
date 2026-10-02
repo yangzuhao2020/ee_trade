@@ -291,7 +291,6 @@ class HouseholdPlan:
 class HouseholdDispatchResult:
     """Actual building operation after the corresponding buy order clears."""
 
-    opening_time: datetime
     delivery_start: datetime
     delivery_end: datetime
     unit_name: str
@@ -371,8 +370,6 @@ class IndustrialPlan:
     delivery_start: datetime
     delivery_end: datetime
     unit_name: str
-    forecast_price_eur_per_mwh: float
-    reference_power_mw: float
     electrolyser_power_mw: float
     hydrogen_output_mwh: float
     dri_power_mw: float
@@ -388,7 +385,6 @@ class IndustrialPlan:
 class IndustrialDispatchResult:
     """Planned and actual steel production after an industrial bid clears."""
 
-    opening_time: datetime
     window_id: str
     delivery_start: datetime
     delivery_end: datetime
