@@ -443,10 +443,6 @@ class MarketClearingResult:
         return hours_between(self.delivery_start, self.delivery_end)
 
     @property
-    def requested_demand_power_mw(self) -> float:
-        return self.requested_demand_mwh / self.duration_hours
-
-    @property
     def cleared_power_mw(self) -> float:
         return self.cleared_energy_mwh / self.duration_hours
 
@@ -527,12 +523,6 @@ class MarketClearingResult:
     @property
     def export_payment_eur(self) -> float:
         return self.demand_total("payment_eur", bid_type="export")
-
-    @property
-    def exchange_cash_flow_eur(self) -> float:
-        """Positive values are net market receipts for the Exchange participant."""
-
-        return self.import_revenue_eur - self.export_payment_eur
 
     @property
     def transaction_value_eur(self) -> float:

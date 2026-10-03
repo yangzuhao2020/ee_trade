@@ -53,8 +53,7 @@ def generate_plots(
     """
 
     results = tuple(
-        sorted(result.market_results, key=lambda market: market.delivery_start)
-    )
+        sorted(result.market_results, key=lambda market: market.delivery_start))
     storage_results = tuple(
         sorted(
             result.storage_results,
@@ -75,23 +74,19 @@ def generate_plots(
     try:
         paths = [
             _plot_market_overview(
-                pyplot, dates, results, plot_directory / "market_overview.png"
-            ),
+                pyplot, dates, results, plot_directory / "market_overview.png"),
             _plot_market_summary(
-                pyplot, dates, results, plot_directory / "market_summary.png"
-            ),
+                pyplot, dates, results, plot_directory / "market_summary.png"),
             _plot_dispatch_by_unit(
                 pyplot,
                 dates,
                 results,
-                plot_directory / "dispatch_by_unit.png",
-            ),
+                plot_directory / "dispatch_by_unit.png",),
             _plot_operator_profit(
                 pyplot,
                 results,
                 storage_results,
-                plot_directory / "operator_profit.png",
-            ),
+                plot_directory / "operator_profit.png",),
         ]
         storage_plot_path = plot_directory / "storage_dispatch.png"
         if storage_results:

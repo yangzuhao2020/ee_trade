@@ -478,7 +478,6 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
         household = HouseholdUnit(
             name=name,
             operator=_group_field(rows, "unit_operator", path, "building") or "",
-            node=_group_field(rows, "node", path, "building") or "",
             bidding_strategy=strategy,
             objective=_group_field(rows, "objective", path, "building") or "",
             flexibility_measure=_group_field(
@@ -802,7 +801,6 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
             IndustrialUnit(
                 name=name,
                 operator=plant_field(rows, "unit_operator") or "",
-                node=plant_field(rows, "node") or "",
                 bidding_strategy=strategy,
                 objective=objective,
                 flexibility_measure=flexibility,

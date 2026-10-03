@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from math import isfinite
@@ -314,6 +315,44 @@ def _naive_price_forecasts(
     return prices
 
 
+def _forecast_starts(
+    delivery_starts: Iterable[datetime],
+    *,
+    settings: MarketSettings,
+    requires_price_forecast: bool = False,
+    requires_learning_forecast: bool = False,
+    requires_storage_price_forecast: bool = False,
+) -> set[datetime]:
+    """Forecast timestamps each enabled strategy family needs for deliveries.
+
+    Plants look _FORECAST_HOURS + 1 hours ahead, the learning unit only
+    _FORECAST_HOURS, and storage prices an additional symmetric look-back
+    window clipped to the simulation horizon.
+    """
+
+    starts: set[datetime] = set()
+    for delivery_start in delivery_starts:
+        if requires_price_forecast:
+            starts.update(
+                delivery_start + timedelta(hours=offset)
+                for offset in range(_FORECAST_HOURS + 1)
+            )
+        if requires_learning_forecast:
+            starts.update(
+                delivery_start + timedelta(hours=offset)
+                for offset in range(_FORECAST_HOURS)
+            )
+        if requires_storage_price_forecast:
+            starts.update(
+                delivery_start + timedelta(hours=offset)
+                for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1)
+                if settings.start
+                <= delivery_start + timedelta(hours=offset)
+                <= settings.end
+            )
+    return starts
+
+
 def _missing_profile_times(
     profile: dict[datetime, object] | None, required_times: set[datetime]
 ) -> list[datetime]:
@@ -352,28 +391,13 @@ def _opening_coverage_issues(
                 f"{format_timestamp(start)}–{format_timestamp(end)}" for start, end in beyond_end
             )
         )
-    forecast_times: set[datetime] = set()
-    if requires_price_forecast:
-        forecast_times |= {
-            delivery_start + timedelta(hours=offset)
-            for delivery_start in delivery_times
-            for offset in range(_FORECAST_HOURS + 1)
-        }
-    if requires_learning_forecast:
-        forecast_times |= {
-            delivery_start + timedelta(hours=offset)
-            for delivery_start in delivery_times
-            for offset in range(_FORECAST_HOURS)
-        }
-    if requires_storage_price_forecast:
-        forecast_times |= {
-            delivery_start + timedelta(hours=offset)
-            for delivery_start in delivery_times
-            for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1)
-            if settings.start
-            <= delivery_start + timedelta(hours=offset)
-            <= settings.end
-        }
+    forecast_times = _forecast_starts(
+        delivery_times,
+        settings=settings,
+        requires_price_forecast=requires_price_forecast,
+        requires_learning_forecast=requires_learning_forecast,
+        requires_storage_price_forecast=requires_storage_price_forecast,
+    )
     required_times = delivery_times | forecast_times
 
     def add_missing_issue(source: str, missing: list[datetime]) -> None:
@@ -466,8 +490,7 @@ def _record_runtime_states(
             accepted_by_plant[cleared.offer.unit_name] += cleared.accepted_energy_mwh
     for plant_name, state in runtime_states.items():
         state.record_dispatch(
-            accepted_by_plant[plant_name] / market_result.duration_hours,
-            market_result.duration_hours,
+            accepted_by_plant[plant_name] / market_result.duration_hours
         )
 
 
@@ -1176,27 +1199,17 @@ def simulate_eom_market(
         if extension_inputs.market_price_forecasts is not None:
             price_forecasts = extension_inputs.market_price_forecasts
         else:
-            forecast_starts: set[datetime] = set()
-            for opening in valid_openings:
-                for delivery_start, _ in opening.products:
-                    if requires_price_forecast:
-                        forecast_starts.update(
-                            delivery_start + timedelta(hours=offset)
-                            for offset in range(_FORECAST_HOURS + 1)
-                        )
-                    if requires_learning_forecast:
-                        forecast_starts.update(
-                            delivery_start + timedelta(hours=offset)
-                            for offset in range(_FORECAST_HOURS)
-                        )
-                    if requires_storage_price_forecast:
-                        forecast_starts.update(
-                            delivery_start + timedelta(hours=offset)
-                            for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1)
-                            if settings.start
-                            <= delivery_start + timedelta(hours=offset)
-                            <= settings.end
-                        )
+            forecast_starts = _forecast_starts(
+                (
+                    delivery_start
+                    for opening in valid_openings
+                    for delivery_start, _ in opening.products
+                ),
+                settings=settings,
+                requires_price_forecast=requires_price_forecast,
+                requires_learning_forecast=requires_learning_forecast,
+                requires_storage_price_forecast=requires_storage_price_forecast,
+            )
             price_forecasts = _naive_price_forecasts(
                 products=[
                     product
@@ -1218,11 +1231,11 @@ def simulate_eom_market(
         training_times = sorted(
             {start for opening in valid_openings for start, _ in opening.products}
         )
-        forecast_times = {
-            start + timedelta(hours=offset)
-            for start in training_times
-            for offset in range(_FORECAST_HOURS)
-        }
+        forecast_times = _forecast_starts(
+            training_times,
+            settings=settings,
+            requires_learning_forecast=True,
+        )
         residual_forecasts = _residual_load_forecasts(
             forecast_times=forecast_times,
             demand_units=demand_units,
@@ -1249,7 +1262,7 @@ def simulate_eom_market(
             price_scale_eur_per_mwh=settings.learning_config.max_bid_price,
         )
     runtime_states = {
-        plant.name: PlantRuntimeState.initially_off(plant) for plant in runtime_plants
+        plant.name: PlantRuntimeState.initially_off() for plant in runtime_plants
     }
     storage_states = {
         storage.name: StorageRuntimeState.from_initial_soc(storage)

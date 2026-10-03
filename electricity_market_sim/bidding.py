@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
@@ -17,26 +18,18 @@ _FORECAST_HOURS = 12
 class PlantRuntimeState:
     """The sequential state needed by ``powerplant_energy_heuristic_flexable``.
 
-    The V2 contract uses an initially-off unit with zero output.  Its initial
-    downtime is already sufficient to permit an immediate startup.  Ramping,
+    The V2 contract uses an initially-off unit with zero output.  Ramping,
     CHP commitments, and minimum-up/down enforcement are deliberately outside
-    this version's dispatch constraints, but their state parameters are kept
-    explicit here so the bid logic has a stable extension point.
+    this version's dispatch constraints.
     """
 
     is_running: bool
-    power_mw: float
-    down_time_hours: float
     elapsed_periods: int = 0
     operating_periods: int = 0
 
     @classmethod
-    def initially_off(cls, plant: PowerPlant) -> PlantRuntimeState:
-        return cls(
-            is_running=False,
-            power_mw=0.0,
-            down_time_hours=max(plant.min_down_time_hours, 1.0),
-        )
+    def initially_off(cls) -> PlantRuntimeState:
+        return cls(is_running=False)
 
     @property
     def average_operating_time(self) -> float:
@@ -46,17 +39,13 @@ class PlantRuntimeState:
             return 0.0
         return self.operating_periods / self.elapsed_periods
 
-    def record_dispatch(self, accepted_power_mw: float, duration_hours: float) -> None:
+    def record_dispatch(self, accepted_power_mw: float) -> None:
         """Advance the state after the associated delivery period ends."""
 
         self.elapsed_periods += 1
-        self.power_mw = accepted_power_mw if accepted_power_mw > _POWER_TOLERANCE_MW else 0.0
-        self.is_running = self.power_mw > _POWER_TOLERANCE_MW
+        self.is_running = accepted_power_mw > _POWER_TOLERANCE_MW
         if self.is_running:
             self.operating_periods += 1
-            self.down_time_hours = 0.0
-        else:
-            self.down_time_hours += duration_hours
 
 
 @dataclass
@@ -268,6 +257,41 @@ def naive_offer(
     )
 
 
+def segment_supply_offers(
+    plant: PowerPlant,
+    delivery_start: datetime,
+    delivery_end: datetime,
+    segment_specs: Iterable[tuple[str, float, float]],
+    marginal_cost: float,
+) -> list[SupplyOffer]:
+    """Build one ``{plant}::{segment}::{timestamp}`` offer per non-zero tranche."""
+
+    duration_hours = hours_between(delivery_start, delivery_end)
+    timestamp = delivery_start.isoformat()
+    offers: list[SupplyOffer] = []
+    for segment, power_mw, price in segment_specs:
+        if power_mw <= _POWER_TOLERANCE_MW:
+            continue
+        identifier = f"{plant.name}::{segment}::{timestamp}"
+        offers.append(
+            SupplyOffer(
+                unit_name=plant.name,
+                operator=plant.operator,
+                technology=plant.technology,
+                delivery_start=delivery_start,
+                delivery_end=delivery_end,
+                offered_power_mw=power_mw,
+                offered_energy_mwh=power_mw * duration_hours,
+                bid_price_eur_per_mwh=price,
+                marginal_cost_eur_per_mwh=marginal_cost,
+                offer_id=identifier,
+                offer_segment=segment,
+                bid_id=identifier,
+            )
+        )
+    return offers
+
+
 def heuristic_flexible_offers(
     plant: PowerPlant,
     state: PlantRuntimeState,
@@ -323,27 +347,9 @@ def heuristic_flexible_offers(
         segment_specs.append(("inflexible", inflexible_power, inflexible_price))
     if flexible_power > _POWER_TOLERANCE_MW:
         segment_specs.append(("flexible", flexible_power, marginal_cost))
-    offers: list[SupplyOffer] = []
-    timestamp = delivery_start.isoformat()
-    for segment, power_mw, price in segment_specs:
-        identifier = f"{plant.name}::{segment}::{timestamp}"
-        offers.append(
-            SupplyOffer(
-                unit_name=plant.name,
-                operator=plant.operator,
-                technology=plant.technology,
-                delivery_start=delivery_start,
-                delivery_end=delivery_end,
-                offered_power_mw=power_mw,
-                offered_energy_mwh=power_mw * duration_hours,
-                bid_price_eur_per_mwh=price,
-                marginal_cost_eur_per_mwh=marginal_cost,
-                offer_id=identifier,
-                offer_segment=segment,
-                bid_id=identifier,
-            )
-        )
-    return offers
+    return segment_supply_offers(
+        plant, delivery_start, delivery_end, segment_specs, marginal_cost
+    )
 
 
 def heuristic_block_offers(

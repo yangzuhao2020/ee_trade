@@ -232,7 +232,6 @@ class HouseholdUnit:
 
     name: str
     operator: str
-    node: str
     bidding_strategy: str
     objective: str
     flexibility_measure: str
@@ -282,9 +281,7 @@ class HouseholdPlan:
     fixed_power_mw: float
     planned_grid_power_mw: float
     planned_heat_pump_power_mw: float
-    planned_battery_charge_power_mw: float
     planned_battery_discharge_power_mw: float
-    planned_soc_after: float
 
 
 @dataclass(frozen=True)
@@ -345,7 +342,6 @@ class IndustrialUnit:
 
     name: str
     operator: str
-    node: str
     bidding_strategy: str
     objective: str
     flexibility_measure: str

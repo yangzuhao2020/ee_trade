@@ -4,7 +4,4 @@ examples/input/*/*
 !examples/input/*/config.yaml
 outputs
 tests/*
-!tests/test_v3_trading.py
-!tests/test_market_contracts.py
 *.pyc
-!tests/test_optimization_internals.py

@@ -21,6 +21,7 @@ _MAX_DISPLAYED_OPERATORS = 20
 
 
 def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
+    """pyplot 用于创建图表，dates 是时间序列，results 是市场结果，path 是保存路径。"""
     times = [market.delivery_start for market in results]
     accepted_energy_by_unit: dict[str, float] = defaultdict(float)
     for market in results:
@@ -70,7 +71,7 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
             cumulative_power += unit_power
         demand_power.append(market.cleared_power_mw)
 
-    figure, axis = pyplot.subplots(figsize=(16, 7.5))
+    figure, axis = pyplot.subplots(figsize=(16, 7.5)) # 创建画布
     if series_names:
         series_colors = [
             (
@@ -87,7 +88,7 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
             colors=series_colors,
             alpha=0.78,
             step="mid",
-        )
+        ) # 各机组接受出力的堆叠面积
     else:
         axis.plot(
             times,
@@ -107,7 +108,7 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
         linewidth=1.2,
         label="Cleared demand power",
         zorder=4,
-    )
+    ) # Cleared demand power 黑色阶梯线
     if marginal_times:
         axis.scatter(
             marginal_times,
@@ -119,7 +120,7 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
             linewidths=0.35,
             label="Marginal unit",
             zorder=5,
-        )
+        ) # Marginal unit 菱形点
     title = "Accepted dispatch by unit"
     if other_unit_names:
         title += (

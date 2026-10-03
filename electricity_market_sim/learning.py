@@ -13,6 +13,7 @@ from math import isfinite
 
 import numpy as np
 
+from .bidding import segment_supply_offers
 from .errors import InputValidationError
 from .market_models import MarketClearingResult, SupplyOffer
 from .models import LearningStepResult, LearningTransition, PowerPlant
@@ -147,29 +148,15 @@ def learning_offers(
             high_price,
         ),
     )
-    offers: list[SupplyOffer] = []
-    timestamp = delivery_start.isoformat()
-    for segment, power_mw, price in segment_specs:
-        if power_mw <= _POWER_TOLERANCE_MW:
-            continue
-        identifier = f"{plant.name}::{segment}::{timestamp}"
-        offers.append(
-            SupplyOffer(
-                unit_name=plant.name,
-                operator=plant.operator,
-                technology=plant.technology,
-                delivery_start=delivery_start,
-                delivery_end=delivery_end,
-                offered_power_mw=power_mw,
-                offered_energy_mwh=power_mw * duration_hours,
-                bid_price_eur_per_mwh=price,
-                marginal_cost_eur_per_mwh=marginal_cost_eur_per_mwh,
-                offer_id=identifier,
-                bid_id=identifier,
-                offer_segment=segment,
-            )
+    return tuple(
+        segment_supply_offers(
+            plant,
+            delivery_start,
+            delivery_end,
+            segment_specs,
+            marginal_cost_eur_per_mwh,
         )
-    return tuple(offers)
+    )
 
 
 def _valid_clearing_price(market_result: MarketClearingResult) -> float | None:
