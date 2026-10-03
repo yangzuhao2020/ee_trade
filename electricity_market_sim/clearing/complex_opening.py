@@ -1,9 +1,7 @@
 """Joint multi-product clearing for complex orders (block/linked bids, storage)."""
 
 from __future__ import annotations
-
 from collections import defaultdict
-
 import numpy as np
 
 try:
