@@ -1,14 +1,12 @@
 """Market orders, trades, and clearing-result data structures."""
 
 from __future__ import annotations
-
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from math import isclose, isfinite
 from operator import attrgetter
-
 from .time_utils import hours_between
 
 
@@ -97,7 +95,6 @@ class DemandBid:
 @dataclass(frozen=True)
 class SupplyOffer:
     """A sell order. Energy is used for clearing; power is retained for reporting."""
-
     unit_name: str
     operator: str
     technology: str
@@ -139,20 +136,16 @@ class SupplyOffer:
         if self.bid_type == "BB" and self.min_acceptance_ratio != 1.0:
             raise ValueError("Version two supports BB orders only with MAR=1.")
         if self.bid_type in {"SB", "LB"} and self.min_acceptance_ratio != 0.0:
-            raise ValueError(
-                "Version two supports SB and LB orders only with MAR=0."
-            )
+            raise ValueError("Version two supports SB and LB orders only with MAR=0.")
 
     @property
     def identifier(self) -> str:
         """Return the unique order key, retaining V1's unit-name default."""
-
         return self.offer_id or self.unit_name
 
     @property
     def complex_identifier(self) -> str:
         """Return the order identity shared by legs of a block bid."""
-
         return self.bid_id or self.identifier
 
     @property
@@ -163,7 +156,6 @@ class SupplyOffer:
 @dataclass(frozen=True)
 class ClearedSupplyOffer:
     """The clearing outcome for one offer, including zero-acceptance outcomes."""
-
     offer: SupplyOffer
     accepted_energy_mwh: float
     clearing_price_eur_per_mwh: float
@@ -198,7 +190,6 @@ class ClearedSupplyOffer:
 @dataclass(frozen=True)
 class ClearedDemandBid:
     """The cleared quantity and settlement payment for one demand bid."""
-
     bid: DemandBid
     accepted_energy_mwh: float
     clearing_price_eur_per_mwh: float
@@ -228,7 +219,6 @@ def sum_cleared_demand(
     bid_type: str | None = None,
 ) -> float:
     """Sum a demand field in order, before or after assembling a market result."""
-
     value_of = attrgetter(attribute)
     return sum(
         value_of(demand)
@@ -241,7 +231,6 @@ def sum_cleared_demand(
 @dataclass(frozen=True)
 class Trade:
     """One immutable buyer-seller match in a pay-as-bid product."""
-
     delivery_start: datetime
     delivery_end: datetime
     buyer_bid_id: str
@@ -265,7 +254,6 @@ class Trade:
 @dataclass(frozen=True)
 class MarketClearingResult:
     """One delivery product's cleared market state."""
-
     delivery_start: datetime
     delivery_end: datetime
     requested_demand_mwh: float
@@ -282,7 +270,6 @@ class MarketClearingResult:
 
     def __post_init__(self) -> None:
         """Guard the physical and financial quantities used by reporting and plots."""
-
         if self.delivery_end <= self.delivery_start:
             raise ValueError("A market product must have a positive delivery duration.")
         if self.opening_time is not None and self.opening_time > self.delivery_start:
@@ -348,8 +335,7 @@ class MarketClearingResult:
             for cleared in self.offers
         ):
             raise ValueError(
-                "Supply offers must be power_plant, import, or storage_discharge offers."
-            )
+                "Supply offers must be power_plant, import, or storage_discharge offers.")
 
         requested_demand = self.demand_total("bid.volume_mwh")
         if not isclose(
@@ -430,16 +416,13 @@ class MarketClearingResult:
                 )
             ]
             if not marginal_offers:
-                raise ValueError(
-                    "The marginal unit must have an accepted offer at the clearing price."
-                )
+                raise ValueError("The marginal unit must have an accepted offer at the clearing price.")
         elif self.pricing_method == "merit_order" and self.marginal_unit_name is not None:
             raise ValueError("An uncleared market cannot have a marginal unit.")
 
     @property
     def duration_hours(self) -> float:
         """Delivery duration used to convert energy quantities into power."""
-
         return hours_between(self.delivery_start, self.delivery_end)
 
     @property
@@ -463,7 +446,6 @@ class MarketClearingResult:
     @property
     def unserved_demand_mwh(self) -> float:
         """All unaccepted demand, including price-responsive elastic bids."""
-
         return self.demand_total("unserved_energy_mwh")
 
     @property
@@ -611,9 +593,7 @@ class MarketClearingResult:
                     rel_tol=0.0,
                     abs_tol=_ENERGY_TOLERANCE_MWH,
                 ):
-                    raise ValueError(
-                        "A pay-as-bid seller must settle at its own offer price."
-                    )
+                    raise ValueError("A pay-as-bid seller must settle at its own offer price.")
         for identifier, cleared in bids.items():
             accepted = traded_by_bid[identifier]
             if not isclose(

@@ -200,7 +200,6 @@ def run_simulation(
     input_dir: str | Path,
     output_dir: str | Path,
     scenario: str = "base",
-    *,
     learning_action_provider: ActionProvider | None = None,
     learning_transition_consumer: TransitionConsumer | None = None,
     learning_load_base_mw: float | None = None,

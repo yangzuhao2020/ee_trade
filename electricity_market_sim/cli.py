@@ -1,16 +1,14 @@
 """Command-line entry point for the electricity-market simulator."""
 
 from __future__ import annotations
-
 import argparse
 import sys
 from pathlib import Path
-
 from .config import load_market_settings
 from .errors import SimulationError
 from .plotting import generate_learning_plots, generate_plots
 from .simulation import run_simulation
-
+from .training import evaluate_learning_scenario, train_learning_scenario
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -77,17 +75,12 @@ def main(argv: list[str] | None = None) -> int:
         settings = load_market_settings(
             arguments.input_dir / "config.yaml", scenario=arguments.scenario
         )
-        is_learning = (
-            settings.learning_config is not None
-            and settings.learning_config.learning_mode
-        )
+        is_learning = (settings.learning_config is not None
+                       and settings.learning_config.learning_mode)
+        # 存在学习配置 且学习模式不为None，说明是第五版学习场景
         learning_episode_label = "Actor evaluation"
-        if is_learning:
-            from .training import (
-                evaluate_learning_scenario,
-                train_learning_scenario,
-            )
 
+        if is_learning: # 对应第五版学习场景，用于训练和评估机组报价。
             learning_mode = arguments.learning_mode or "train"
             if (
                 learning_mode == "evaluate"
@@ -128,16 +121,7 @@ def main(argv: list[str] | None = None) -> int:
                 learning_metrics_path = (
                     arguments.output_dir / "learning_evaluation_metrics.csv"
                 )
-        else:
-            if (
-                arguments.learning_mode is not None
-                or arguments.checkpoint is not None
-                or arguments.training_episodes is not None
-                or arguments.training_runs is not None
-            ):
-                raise SimulationError(
-                    "Learning command-line options require a Version 5 learning scenario."
-                )
+        else: # 对应 1~4 版场景，直接运行模拟
             result = run_simulation(
                 input_dir=arguments.input_dir,
                 output_dir=arguments.output_dir,
