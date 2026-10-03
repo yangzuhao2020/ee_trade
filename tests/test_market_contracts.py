@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from electricity_market_sim.bidding import available_power_mw
-from electricity_market_sim.clearing.algorithms import (
+from electricity_market_sim.clearing import (
     clear_complex_opening,
     clear_pay_as_bid,
     clear_pay_as_clear,

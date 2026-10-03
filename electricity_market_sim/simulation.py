@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-
 from .config import load_market_settings
 from .errors import InputValidationError
 from .learning import ActionProvider, TransitionConsumer
 from .models import MarketOpening, MarketSettings, SimulationResult
 from .reporting import write_results
-from .simulators.eom import simulate_eom_market
+from .simulators.v5 import simulate_v5_market
 from .simulators.household_market import simulate_household_market
 from .simulators.v1_v2 import simulate_v1_v2_market
 from .simulators.v4 import simulate_v4_market
@@ -83,25 +82,18 @@ def market_openings(settings: MarketSettings) -> list[MarketOpening]:
     if settings.market_mechanism == "pay_as_bid":
         opening_time = settings.start
         seen_products: set[tuple[datetime, datetime]] = set()
+        
         while opening_time + settings.first_delivery < settings.end:
             first_start = opening_time + settings.first_delivery
-            products = tuple(
-                product
-                for index in range(settings.product_count)
-                if (
-                    product := (
-                        first_start + index * settings.product_duration,
-                        first_start + (index + 1) * settings.product_duration,
-                    )
-                )[1]
-                <= settings.end
-                and product not in seen_products
-            )
+            products = tuple(product for index in range(settings.product_count)
+                if (product := (first_start + index * settings.product_duration,
+                                first_start + (index + 1) * settings.product_duration,
+                    ))[1]<= settings.end and product not in seen_products)
+            
             if products:
-                openings.append(
-                    MarketOpening(opening_time=opening_time, products=products)
-                )
+                openings.append(MarketOpening(opening_time=opening_time, products=products))
                 seen_products.update(products)
+            
             opening_time += settings.opening_frequency
         return openings
 
@@ -130,7 +122,6 @@ def market_openings(settings: MarketSettings) -> list[MarketOpening]:
 def simulate(
     input_dir: str | Path,
     scenario: str = "base",
-    *,
     learning_action_provider: ActionProvider | None = None,
     learning_transition_consumer: TransitionConsumer | None = None,
     learning_load_base_mw: float | None = None,
@@ -141,15 +132,13 @@ def simulate(
     input_path = Path(input_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
     openings = tuple(market_openings(settings))
-    is_learning = (
-        settings.learning_config is not None and settings.learning_config.learning_mode
-    )
-    if is_learning:
+    is_learning = (settings.learning_config is not None and settings.learning_config.learning_mode)
+    
+    if is_learning: # 强化学习部分
         if learning_action_provider is None:
-            raise InputValidationError(
-                "Version 5 simulate() requires a learning_action_provider."
-            )
-        return simulate_eom_market(
+            raise InputValidationError("Version 5 simulate() requires a learning_action_provider.")
+        
+        return simulate_v5_market(
             input_path,
             settings,
             openings,
@@ -157,23 +146,14 @@ def simulate(
             learning_transition_consumer=learning_transition_consumer,
             learning_load_base_mw=learning_load_base_mw,
             learning_enforce_action_bounds=learning_enforce_action_bounds,
-        )
-    if any(
-        value is not None
-        for value in (
-            learning_action_provider,
-            learning_transition_consumer,
-            learning_load_base_mw,
-        )
-    ):
-        raise InputValidationError(
-            "Learning callbacks and load base require learning_config.learning_mode."
-        )
+        ) # 第五版
+
     if settings.industrial_dsm_units_file is not None:
-        return simulate_v4_market(input_path, settings, openings)
+        return simulate_v4_market(input_path, settings, openings) # 第四版本
     if settings.market_mechanism == "pay_as_bid":
-        return simulate_household_market(input_path, settings, openings)
-    return simulate_v1_v2_market(input_path, settings, openings)
+        return simulate_household_market(input_path, settings, openings) # 第三版本
+    
+    return simulate_v1_v2_market(input_path, settings, openings) # 第一、二版本
 
 
 def simulate_learning_episode(

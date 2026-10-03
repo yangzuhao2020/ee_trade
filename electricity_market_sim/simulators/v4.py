@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -14,13 +15,15 @@ from ..inputs import (
     load_aligned_time_series_profiles,
     load_industrial_units,
 )
-from ..market_models import DemandBid, MarketClearingResult
+from ..market_models import DemandBid, MarketClearingResult, SupplyOffer
 from ..models import (
     IndustrialUnit,
     MarketOpening,
     MarketSettings,
+    PowerPlant,
     SimulationResult,
 )
+from .base_market import BaseMarket
 from .eom import (
     EomExtensionInputs,
     ScheduledProductKey,
@@ -30,6 +33,8 @@ from .eom import (
 
 class _IndustryMarketExtension:
     """Connect industrial rolling optimization to the shared EOM event loop."""
+
+    settle_before_opening = False
 
     def __init__(
         self,
@@ -44,7 +49,8 @@ class _IndustryMarketExtension:
         self.fuel_price_profiles: dict[datetime, dict[str, float]] = {}
         self.coordinator: IndustryRollingCoordinator | None = None
 
-    def prepare(self, *, requires_market_price_forecast: bool) -> EomExtensionInputs:
+    def prepare(self, market: BaseMarket) -> EomExtensionInputs:
+        requires_market_price_forecast = market.requires_market_price_forecast
         external_forecast_columns = (
             {"electricity_price"} if requires_market_price_forecast else set()
         )
@@ -87,7 +93,8 @@ class _IndustryMarketExtension:
             market_price_forecasts=market_price_forecasts,
         )
 
-    def initialize(self, openings: tuple[MarketOpening, ...]) -> None:
+    def initialize(self, market: BaseMarket) -> None:
+        openings = market.valid_openings
         product_list = [
             product
             for opening in openings
@@ -130,6 +137,19 @@ class _IndustryMarketExtension:
 
     def record_delivery(self, result: MarketClearingResult) -> None:
         self._require_coordinator().record_delivery(result)
+
+    def offers_for_plant(
+        self,
+        plant: PowerPlant,
+        products: tuple[tuple[datetime, datetime], ...],
+        available_powers: dict[datetime, float],
+        marginal_cost_at: Callable[[datetime], float],
+        scheduled_results: dict[ScheduledProductKey, MarketClearingResult],
+    ) -> tuple[SupplyOffer, ...] | None:
+        return None
+
+    def record_delivery_start(self, result: MarketClearingResult) -> None:
+        pass
 
     def finalize(self, result: SimulationResult) -> SimulationResult:
         coordinator = self._require_coordinator()
@@ -199,9 +219,6 @@ def simulate_v4_market(
 
     units = _load_and_validate_industrial_units(input_path, settings)
     extension = _IndustryMarketExtension(input_path, settings, units)
-    return simulate_eom_market(
-        input_path,
-        settings,
-        openings,
-        extension=extension,
-    )
+    market = BaseMarket(input_path, settings, openings)
+    market.prepare(extension)
+    return simulate_eom_market(market)
