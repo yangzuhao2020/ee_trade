@@ -2,6 +2,8 @@
 
 from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
@@ -10,7 +12,10 @@ from electricity_market_sim.clearing import clear_pay_as_clear
 from electricity_market_sim.errors import InputValidationError
 from electricity_market_sim.learning import LearningEpisodeSession
 from electricity_market_sim.market_models import DemandBid, SupplyOffer
-from electricity_market_sim.models import DemandUnit, MarketOpening, MarketSettings, PowerPlant
+from electricity_market_sim.models import (
+    DemandUnit, MarketOpening, MarketSettings, PowerPlant, SimulationResult,
+)
+from electricity_market_sim.reporting import write_results
 from electricity_market_sim.simulators.base_market.forecasts import _opening_coverage_issues
 from electricity_market_sim.simulators.base_market.plants import (
     _apply_startup_costs, _offers_for_opening, _record_runtime_states,
@@ -227,6 +232,24 @@ class LearningActionContracts(unittest.TestCase):
         for bounded in (True, False):
             with self.subTest(bounded=bounded):
                 self.assertEqual(self.quote(self.session((1.7, -2.5), bounded), 0.0), ())
+
+
+class ReportingContracts(unittest.TestCase):
+    def test_optional_tables_left_by_an_earlier_run_are_removed(self):
+        bid, offer = orders(START)
+        result = SimulationResult(SETTINGS, (clear_pay_as_clear([bid], [offer]),))
+        stale = ("exchange_results.csv", "storage_results.csv", "offer_results.csv",
+                 "household_results.csv", "household_flexibility_results.csv",
+                 "industry_results.csv", "industry_flexibility_results.csv",
+                 "industry_optimization_windows.csv", "learning_results.csv")
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            for name in stale:
+                (output / name).write_text("stale\n", encoding="utf-8")
+            write_results(output, result)
+            self.assertEqual(sorted(path.name for path in output.iterdir()),
+                             ["demand_results.csv", "market_results.csv",
+                              "operator_results.csv", "unit_results.csv"])
 
 
 if __name__ == "__main__":

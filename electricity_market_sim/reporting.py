@@ -641,6 +641,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             ],
             exchange_rows,
         )
+    else:
+        # Optional tables must not survive from an earlier run in the same directory.
+        (output_dir / "exchange_results.csv").unlink(missing_ok=True)
     if storage_rows:
         _write_rows(
             output_dir / "storage_results.csv",
@@ -672,6 +675,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             ],
             storage_rows,
         )
+    else:
+        (output_dir / "storage_results.csv").unlink(missing_ok=True)
     # Retain every product of an opening once a unit needs offer detail.
     offer_rows = [
         row
@@ -707,6 +712,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             household_rows,
         )
         (output_dir / "household_flexibility_results.csv").unlink(missing_ok=True)
+    else:
+        for name in ("household_results.csv", "household_flexibility_results.csv"):
+            (output_dir / name).unlink(missing_ok=True)
     if industry_rows:
         _write_rows(
             output_dir / "industry_results.csv",
@@ -747,6 +755,13 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             ],
             industry_window_rows,
         )
+    else:
+        for name in (
+            "industry_results.csv",
+            "industry_flexibility_results.csv",
+            "industry_optimization_windows.csv",
+        ):
+            (output_dir / name).unlink(missing_ok=True)
     if learning_rows:
         _write_rows(
             output_dir / "learning_results.csv",
@@ -765,3 +780,5 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             ],
             learning_rows,
         )
+    else:
+        (output_dir / "learning_results.csv").unlink(missing_ok=True)
