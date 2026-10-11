@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+# Compatibility exports; the canonical market-order classes live in market_models.
 from .market_models import (
     ClearedDemandBid,
     ClearedSupplyOffer,
@@ -95,6 +96,7 @@ class MarketSettings:
     end: datetime
     time_step: timedelta
     opening_frequency: timedelta
+    # Required and validated on load; currently unused by event scheduling.
     opening_duration: timedelta
     product_duration: timedelta
     product_count: int
@@ -174,6 +176,7 @@ class PowerPlant:
     # columns are absent from ``powerplant_units.csv``.
     start_cost_eur: float = 0.0
     min_operating_time_hours: float = 1.0
+    # Loaded and validated for compatibility; minimum downtime is not enforced.
     min_down_time_hours: float = 1.0
 
     def marginal_cost(self, fuel_prices: dict[str, float]) -> float:

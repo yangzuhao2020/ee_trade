@@ -1,6 +1,7 @@
-"""Version one and two EOM simulation entry point.
+"""V1/V2 and V4 entry points for the shared EOM market and event engine.
 
-Version four industrial demand-side management simulation."""
+V1/V2 use the base market directly; V4 adds industrial demand-side management.
+"""
 
 from __future__ import annotations
 

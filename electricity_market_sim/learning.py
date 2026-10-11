@@ -121,24 +121,21 @@ def learning_offers(
     delivery_end: datetime,
     available_power_mw: float,
     marginal_cost_eur_per_mwh: float,
-    action: Sequence[float],
-    enforce_action_bounds: bool = True,
+    action: tuple[float, float],
     price_scale_eur_per_mwh: float = PRICE_SCALE_EUR_PER_MWH,
 ) -> tuple[SupplyOffer, ...]:
-    """Map an unsorted action to independently clearable minimum/flexible offers."""
+    """Map an executed action to independently clearable minimum/flexible offers.
 
-    if enforce_action_bounds:
-        executed_action = clip_learning_action(action)
-    else:
-        values = _validated_learning_action(action)
-        executed_action = float(values[0]), float(values[1])
+    The caller must validate two finite values and apply any required bounds.
+    Action order is retained in experience; only the offer prices are sorted.
+    """
     if available_power_mw < plant.min_power_mw - _POWER_TOLERANCE_MW:
         return ()
     duration_hours = hours_between(delivery_start, delivery_end)
     if duration_hours <= 0:
         raise ValueError("Learning offer duration must be positive.")
     low_price, high_price = sorted(
-        value * price_scale_eur_per_mwh for value in executed_action
+        value * price_scale_eur_per_mwh for value in action
     )
     segment_specs = (
         ("learning_minimum", min(plant.min_power_mw, available_power_mw), low_price),
@@ -391,7 +388,6 @@ class LearningEpisodeSession:
             available_power_mw=available_power_mw,
             marginal_cost_eur_per_mwh=marginal_cost_eur_per_mwh,
             action=action,
-            enforce_action_bounds=self.enforce_action_bounds,
             price_scale_eur_per_mwh=self.price_scale_eur_per_mwh,
         )
 
