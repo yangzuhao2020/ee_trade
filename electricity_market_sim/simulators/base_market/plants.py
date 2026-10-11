@@ -1,12 +1,10 @@
 """Conventional plant quoting, startup settlement and delivered runtime state."""
 
 from __future__ import annotations
-
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING
-
 from ...bidding import (
     PlantRuntimeState, available_power_mw, heuristic_block_offers,
     heuristic_flexible_offers, naive_offer,
@@ -135,7 +133,7 @@ def _offers_for_opening(
     extension: EomMarketExtension | None = None,
     scheduled_results: dict[ScheduledProductKey, MarketClearingResult] | None = None,
 ) -> list[SupplyOffer]:
-    """Build an entire opening using its common gate-closure state snapshot."""
+    """机组卖单；启用 Exchange 时加入进口卖单"""
 
     offers: list[SupplyOffer] = []
     for plant in plants:

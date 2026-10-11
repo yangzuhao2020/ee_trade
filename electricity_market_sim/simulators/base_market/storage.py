@@ -148,7 +148,11 @@ def _storage_orders_for_opening(
     list[SupplyOffer],
     tuple[StorageClearingContext, ...],
 ]:
-    """Generate storage orders and matching physical clearing contexts."""
+    """根据各储能单元的预计交付初始电量和电价预测，生成本次开市各产品的充电买单与放电卖单。
+
+    同时整理初始电量、电量上下限和充放电效率，供复杂出清约束实际成交后的储能电量变化。
+    返回充电买单列表、放电卖单列表，以及各储能单元的物理约束数据元组。
+    """
 
     charge_bids: list[DemandBid] = []
     discharge_offers: list[SupplyOffer] = []

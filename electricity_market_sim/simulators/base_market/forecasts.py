@@ -1,10 +1,8 @@
 """Marginal-cost price forecasts and complete-opening input preflight."""
 
 from __future__ import annotations
-
 from collections.abc import Iterable
 from datetime import datetime, timedelta
-
 from ...bidding import naive_offer
 from ...clearing import clear_pay_as_clear
 from ...models import ExchangeSchedule, ExchangeUnit, MarketOpening, MarketSettings, PowerPlant

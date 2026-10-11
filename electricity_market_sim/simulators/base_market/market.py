@@ -225,31 +225,49 @@ class BaseMarket:
     def clear_opening(self, opening: MarketOpening,
                       scheduled_results: dict[ScheduledProductKey, MarketClearingResult]
                       ) -> tuple[MarketClearingResult, ...]:
+        # 对本次开市的全部产品组织报价并出清，返回各产品的 MarketClearingResult 元组。
+        # opening 指定开市时间及交付时段；scheduled_results 保存此前已出清的产品结果。
+
+        # 获取扩展模块提供的额外需求报价（例如 V4 的工业用电需求）；没有扩展时使用空元组。
         additional_demand_bids = (
             self.extension.bids_for_products(opening.products, scheduled_results)
             if self.extension is not None else ()
         )
+
+        # 以当前已记录的储能电量为基础，计入首个产品开始交付前会结束的已成交充放电等影响。
+        # 得到各储能单元在首个交付时段开始时的预计电量（MWh），供储能报价使用。
+        # 此处仅预测电量，实际储能状态由交付结束事件更新。
         storage_initial_energies = _project_storage_energies(
             opening=opening,
             storages=self.storages,
             storage_states=self.storage_states,
             scheduled_results=scheduled_results,
         )
+
+        # 由公共出清函数生成并汇总需求、发电、储能及扩展报价，按配置的市场机制执行出清。
+        # 返回的是市场出清结果；交付开始时需要计入的机组启动成本由 start_delivery 后续补计。
         return _clear_opening(
+            # 本次开市信息与市场规则。
             opening=opening,
             settings=self.settings,
+            # 发电机组参数及当前已记录的运行状态。
             plants=self.plants,
             runtime_states=self.runtime_states,
+            # 常规需求单元及其随时间变化的用电需求。
             demand_units=self.demand_units,
             demand_profiles=self.demand_profiles,
+            # 机组可用出力、发电成本数据及报价策略所需的电价预测。
             availability_profiles=self.availability_profiles,
             marginal_costs=self.marginal_costs,
             fuel_price_profiles=self.fuel_price_profiles,
             price_forecasts=self.price_forecasts,
+            # 外部电力交换单元及各时段的交换计划。
             exchange_unit=self.exchange_unit,
             exchange_profiles=self.exchange_profiles,
+            # 储能参数及预测的交付初始电量，用于生成充放电报价和构建物理约束。
             storages=self.storages,
             storage_initial_energies_mwh=storage_initial_energies,
+            # 额外需求报价及扩展接口；此前出清结果也供扩展发电报价策略使用。
             additional_demand_bids=additional_demand_bids,
             extension=self.extension,
             scheduled_results=scheduled_results,
@@ -283,7 +301,11 @@ def _clear_opening(
     extension: EomMarketExtension | None = None,
     scheduled_results: dict[ScheduledProductKey, MarketClearingResult] | None = None,
 ) -> tuple[MarketClearingResult, ...]:
-    """Quote and clear one opening from its gate-closure state snapshot."""
+    """根据开市时已知的机组运行状态、预计储能电量和预测数据，为本次开市的各产品生成报价。
+
+    汇总需求买单和供给卖单（含外部电力交换、储能及扩展报价），检查报价是否符合价格规则，
+    再按配置的市场机制逐产品出清或联合出清，返回各产品的市场出清结果元组。
+    """
 
     all_demand_bids: list[DemandBid] = []
     exchange_schedules: dict[datetime, ExchangeSchedule | None] = {}
@@ -296,7 +318,7 @@ def _clear_opening(
             delivery_start=delivery_start,
             delivery_end=delivery_end,
             maximum_bid_price=settings.maximum_bid_price,
-        )
+        ) # 本地刚性负荷买单与弹性负荷买单
         all_demand_bids.extend(demand_bids)
         exchange_schedules[delivery_start] = schedule
     all_demand_bids.extend(additional_demand_bids)
@@ -313,7 +335,7 @@ def _clear_opening(
         exchange_schedules=exchange_schedules,
         extension=extension,
         scheduled_results=scheduled_results,
-    )
+    ) # 机组卖单
     storage_contexts: tuple[StorageClearingContext, ...] = ()
     if storages:
         if storage_initial_energies_mwh is None:
@@ -329,8 +351,8 @@ def _clear_opening(
         all_demand_bids.extend(storage_bids)
         offers.extend(storage_offers)
 
-    validate_demand_prices(all_demand_bids, settings)
-    validate_offer_prices(offers, settings)
+    validate_demand_prices(all_demand_bids, settings) # 验证买单报价
+    validate_offer_prices(offers, settings) # 验证卖单报价
     if settings.market_mechanism == "complex_clearing":
         return clear_complex_opening(
             all_demand_bids,
@@ -342,18 +364,23 @@ def _clear_opening(
             "Block and linked EOM strategies require market_mechanism: "
             "complex_clearing."
         )
-    return tuple(
-        clear_pay_as_clear(
-            [
-                bid
-                for bid in all_demand_bids
-                if (bid.delivery_start, bid.delivery_end) == (start, end)
-            ],
-            [
-                offer
-                for offer in offers
-                if (offer.delivery_start, offer.delivery_end) == (start, end)
-            ],
-        )
-        for start, end in opening.products
-    )
+    clearing_results = []
+
+    for start, end in opening.products:
+        # 1. 收集当前产品的买单。
+        product_bids = []
+        for bid in all_demand_bids:
+            if (bid.delivery_start, bid.delivery_end) == (start, end):
+                product_bids.append(bid)
+
+        # 2. 收集当前产品的卖单。
+        product_offers = []
+        for offer in offers:
+            if (offer.delivery_start, offer.delivery_end) == (start, end):
+                product_offers.append(offer)
+
+        # 3. 执行出清，保存当前产品的结果。
+        result = clear_pay_as_clear(product_bids, product_offers)
+        clearing_results.append(result)
+
+    return tuple(clearing_results)

@@ -1,4 +1,4 @@
-"""V2 generation availability, state tracking, and bidding strategies."""
+"""V2 的发电可用容量、状态跟踪和报价策略。"""
 
 from __future__ import annotations
 
@@ -16,11 +16,11 @@ _FORECAST_HOURS = 12
 
 @dataclass
 class PlantRuntimeState:
-    """The sequential state needed by ``powerplant_energy_heuristic_flexable``.
+    """``powerplant_energy_heuristic_flexable`` 所需的时序运行状态。
 
-    The V2 contract uses an initially-off unit with zero output.  Ramping,
-    CHP commitments, and minimum-up/down enforcement are deliberately outside
-    this version's dispatch constraints.
+    V2 约定机组初始处于停机状态，出力为零。本版本的调度约束
+    有意不包含爬坡约束、热电联产（CHP）的供热承诺，
+    以及最小连续运行和停机时间约束。
     """
 
     is_running: bool
@@ -33,14 +33,14 @@ class PlantRuntimeState:
 
     @property
     def average_operating_time(self) -> float:
-        """V2's historical on-period share (not a continuous run duration)."""
+        """V2 中历史运行时段占总时段的比例，而非连续运行时长。"""
 
         if self.elapsed_periods == 0:
             return 0.0
         return self.operating_periods / self.elapsed_periods
 
     def record_dispatch(self, accepted_power_mw: float) -> None:
-        """Advance the state after the associated delivery period ends."""
+        """在对应交付时段结束后更新运行状态。"""
 
         self.elapsed_periods += 1
         self.is_running = accepted_power_mw > _POWER_TOLERANCE_MW
@@ -50,10 +50,10 @@ class PlantRuntimeState:
 
 @dataclass
 class StorageRuntimeState:
-    """The delivered physical energy of one storage unit.
+    """单个储能单元在已完成交付后的实际储能量。
 
-    Future accepted products are kept by the simulation scheduler and projected
-    separately.  This state changes only when a delivery period has ended.
+    未来已成交的产品由仿真调度器保存，并单独推算其影响。
+    此状态仅在交付时段结束后更新。
     """
 
     energy_mwh: float
@@ -69,7 +69,7 @@ class StorageRuntimeState:
         accepted_discharge_mwh: float,
         duration_hours: float = 1.0,
     ) -> float:
-        """Return the next internal energy using grid-side accepted quantities."""
+        """根据电网侧成交的充放电量，计算下一时刻的内部储能量。"""
 
         return (
             self.energy_mwh
@@ -85,7 +85,7 @@ class StorageRuntimeState:
         accepted_discharge_mwh: float,
         duration_hours: float = 1.0,
     ) -> tuple[float, float]:
-        """Apply one delivered product and return its before/after energy."""
+        """执行一个已交付产品的调度，并返回调度前后的储能量。"""
 
         before = self.energy_mwh
         after = self.energy_after_dispatch(
@@ -97,8 +97,8 @@ class StorageRuntimeState:
                 f"Storage {storage.name!r} dispatch falls below min_soc: "
                 f"{after:.9f} MWh < {storage.min_energy_mwh:.9f} MWh."
             )
-        # Natural inflow above the available headroom is spilled. Submitted
-        # charge orders are already sized after applying that inflow.
+        # 自然流入超过剩余储能容量的部分会被弃用。
+        # 提交的充电订单电量已在计入自然流入后确定。
         self.energy_mwh = min(
             storage.max_energy_mwh, max(storage.min_energy_mwh, after)
         )
@@ -114,13 +114,12 @@ def storage_heuristic_orders(
     forecast_start: datetime | None = None,
     forecast_end: datetime | None = None,
 ) -> tuple[list[DemandBid], list[SupplyOffer]]:
-    """Build mutually exclusive hourly charge or discharge orders.
+    """构建每小时互斥的充电或放电订单。
 
-    The reference energy trajectory assumes that every submitted order clears in
-    full.  It is used only to size sensible bids.  Complex clearing separately
-    constrains the trajectory formed by the *accepted* quantities.  At the
-    simulation boundaries the centered price window is truncated to the
-    available forecast interval, matching ASSUME's boundary treatment.
+    参考储能量轨迹假设每个提交的订单均全额成交，仅用于确定合理的报价电量。
+    复杂出清会另行约束由*实际成交*电量形成的储能量轨迹。
+    在仿真边界处，以交付时刻为中心的价格窗口会被截断到可用预测区间，
+    与 ASSUME 的边界处理方式一致。
     """
 
     charge_bids: list[DemandBid] = []
@@ -153,8 +152,8 @@ def storage_heuristic_orders(
                 headroom_mwh / storage.efficiency_charge,
             )
             if charge_energy_mwh > _POWER_TOLERANCE_MW:
-                # Match ASSUME's storage heuristic: additional charging costs
-                # affect realised profit, but not the submitted bid price.
+                # 与 ASSUME 的储能启发式策略一致：额外充电成本
+                # 影响实际利润，但不影响提交的报价。
                 bid_price = average_price * storage.efficiency_charge
                 charge_bids.append(
                     DemandBid(
@@ -181,8 +180,8 @@ def storage_heuristic_orders(
                 available_internal_mwh * storage.efficiency_discharge,
             )
             if discharge_energy_mwh > _POWER_TOLERANCE_MW:
-                # Match ASSUME's storage heuristic: additional discharging
-                # costs are settled after dispatch rather than marked up here.
+                # 与 ASSUME 的储能启发式策略一致：额外放电成本
+                # 在调度后结算，不在此处加价。
                 bid_price = average_price / storage.efficiency_discharge
                 identifier = f"{storage.name}::discharge::{timestamp}"
                 discharge_offers.append(
@@ -216,7 +215,7 @@ def available_power_mw(
     delivery_start: datetime,
     availability_profiles: dict[str, dict[datetime, float]],
 ) -> float:
-    """Return a plant's capacity after its optional availability factor."""
+    """返回按可选可用率系数折算后的机组可用容量。"""
 
     profile = availability_profiles.get(plant.name)
     if profile is None:
@@ -238,7 +237,7 @@ def naive_offer(
     available_power: float,
     marginal_cost: float,
 ) -> SupplyOffer:
-    """Build V1's one-part marginal-cost offer with V2 availability applied."""
+    """按 V2 的可用容量构建 V1 的单段边际成本报价。"""
 
     duration_hours = hours_between(delivery_start, delivery_end)
     offer_id = f"{plant.name}::single::{delivery_start.isoformat()}"
@@ -264,7 +263,7 @@ def segment_supply_offers(
     segment_specs: Iterable[tuple[str, float, float]],
     marginal_cost: float,
 ) -> list[SupplyOffer]:
-    """Build one ``{plant}::{segment}::{timestamp}`` offer per non-zero tranche."""
+    """为每个非零出力段构建一条标识为 ``{plant}::{segment}::{timestamp}`` 的报价。"""
 
     duration_hours = hours_between(delivery_start, delivery_end)
     timestamp = delivery_start.isoformat()
@@ -301,18 +300,16 @@ def heuristic_flexible_offers(
     marginal_cost: float,
     price_forecast: dict[datetime, float],
 ) -> list[SupplyOffer]:
-    """Split an eligible plant into inflexible and flexible V2 offers.
+    """将符合条件的机组拆分为 V2 的非灵活出力段和灵活出力段报价。
 
-    The flexible tranche is always offered at marginal cost.  An off plant
-    distributes its startup cost across the minimum-stable tranche.  A running
-    plant may bid that tranche at zero when the specified 13-point outlook says
-    that retaining operation has non-negative future value.
+    灵活出力段始终按边际成本报价。停机机组将启动成本分摊到最低稳定出力段。
+    对于运行中的机组，若指定的 13 个时间点的预测表明维持运行的未来价值
+    非负，则该出力段可以按零价格报价。
     """
 
     duration_hours = hours_between(delivery_start, delivery_end)
-    # A unit that cannot physically reach its minimum stable output does not
-    # submit an offer.  This is distinct from clearing: a submitted minimum
-    # tranche may still be partially accepted by the market.
+    # 可用容量不足以达到最低稳定出力的机组不提交报价。
+    # 这与出清规则不同：已提交的最低出力段仍可能仅部分成交。
     if available_power < plant.min_power_mw:
         return []
 
@@ -362,10 +359,10 @@ def heuristic_block_offers(
     opening_time: datetime,
     linked: bool,
 ) -> list[SupplyOffer]:
-    """Create one minimum-output BB and its hourly flexible legs for an opening.
+    """为一次开市创建一个最低出力块报价（BB）及其逐小时灵活出力报价。
 
-    ``state`` is deliberately not advanced while the offers are built: V2 prices
-    all products of one day-ahead opening from the gate-closure state snapshot.
+    构建报价时有意不更新 ``state``：V2 使用报价截止时的状态快照，
+    为同一次日前开市的所有产品定价。
     """
 
     inflexible_legs: list[SupplyOffer] = []

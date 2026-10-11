@@ -167,7 +167,6 @@ def simulate_learning_episode(
     enforce_action_bounds: bool = True,
 ) -> SimulationResult:
     """Run one Version 5 episode with injected policy and replay callbacks."""
-
     return simulate(
         input_dir,
         scenario=scenario,

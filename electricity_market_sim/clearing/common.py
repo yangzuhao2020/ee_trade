@@ -41,7 +41,10 @@ def validate_offer_prices(
 def validate_demand_prices(
     demand_bids: list[DemandBid], settings: MarketSettings
 ) -> None:
-    """Reject demand prices outside the configured market limits."""
+    """检查每笔需求买单的报价是否在市场配置的最低报价与最高报价之间（含边界值）。
+
+    遇到越界报价时抛出 InputValidationError，并提示订单标识和报价；全部通过时返回 None。
+    """
 
     _validate_price_limits(
         demand_bids, "price_eur_per_mwh", "Demand bid price", settings

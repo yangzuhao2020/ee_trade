@@ -9,10 +9,8 @@
 """
 
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-
 # Compatibility exports; the canonical market-order classes live in market_models.
 from .market_models import (
     ClearedDemandBid,
@@ -114,10 +112,9 @@ class MarketSettings:
 
 @dataclass(frozen=True)
 class MarketOpening:
-    """All delivery products offered together at one market opening."""
-
-    opening_time: datetime
-    products: tuple[tuple[datetime, datetime], ...]
+    """一次市场开市时同时提供的所有交付产品。"""
+    opening_time: datetime # 本次市场开盘/开市的时刻，时间点。
+    products: tuple[tuple[datetime, datetime], ...] # 本次开市可交易的各交付时段，比如 10:00 到 11:00
 
 
 @dataclass(frozen=True)

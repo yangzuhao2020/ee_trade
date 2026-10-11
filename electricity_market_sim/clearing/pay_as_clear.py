@@ -29,14 +29,13 @@ from .common import (
 def clear_pay_as_clear(
     demand_bids: list[DemandBid], supply_offers: list[SupplyOffer]
 ) -> MarketClearingResult:
-    """Clear one product using stable merit order and uniform settlement.
+    """按稳定的报价优先顺序对单个产品进行出清，并采用统一价格结算。
 
-    Supply is ordered by `(price, unit_name)`. Demand is ordered by
-    `(-price, unit_name)`. These stable keys deliberately replace ASSUME's random
-    tie break so a learning scenario produces reproducible results. At equal
-    price, a learning unit's minimum-output segment clears before its flexible
-    segment so accepted energy has a deterministic segment attribution. This
-    tie break does not impose a minimum dispatched output on the unit.
+    供给按 `(price, unit_name)` 排序，需求按 `(-price, unit_name)` 排序。
+    这些稳定的排序键有意替代 ASSUME 在同价时的随机排序方式，
+    使学习场景的结果可复现。同价时，学习机组的最小出力报价段
+    优先于其灵活出力报价段出清，从而使成交电量的报价段归属确定。
+    这种同价排序规则并不强制机组达到最小调度出力。
     """
 
     if not demand_bids and not supply_offers:

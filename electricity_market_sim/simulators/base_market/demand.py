@@ -75,7 +75,7 @@ def _demand_bids_for_product(
     maximum_bid_price: float,
     include_elastic: bool = True,
 ) -> tuple[list[DemandBid], ExchangeSchedule | None]:
-    """Create local-load, elastic-load, and optional exchange demand orders."""
+    """本地刚性负荷买单与弹性负荷买单（include_elastic 为真时）；启用 Exchange 时加入出口买单."""
 
     duration_hours = hours_between(delivery_start, delivery_end)
     demand_bids: list[DemandBid] = []
