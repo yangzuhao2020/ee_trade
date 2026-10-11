@@ -1,4 +1,6 @@
-"""Version four industrial demand-side management simulation."""
+"""Version one and two EOM simulation entry point.
+
+Version four industrial demand-side management simulation."""
 
 from __future__ import annotations
 
@@ -29,6 +31,18 @@ from .eom import (
     ScheduledProductKey,
     simulate_eom_market,
 )
+
+
+def simulate_v1_v2_market(
+    input_path: Path,
+    settings: MarketSettings,
+    openings: tuple[MarketOpening, ...],
+) -> SimulationResult:
+    """Calculate one V1/V2 scenario from validated settings and openings."""
+
+    market = BaseMarket(input_path, settings, openings) # 创建对象，保存输入数据目录，
+    market.prepare()
+    return simulate_eom_market(market)
 
 
 class _IndustryMarketExtension:
