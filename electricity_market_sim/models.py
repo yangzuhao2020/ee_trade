@@ -8,7 +8,6 @@
 它还提供成交电量转成交功率、收入、成本、利润等基础计算，并检查能量守恒。
 """
 
-from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from .market_models import MarketClearingResult

@@ -1,6 +1,5 @@
 """Conventional plant quoting, startup settlement and delivered runtime state."""
 
-from __future__ import annotations
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime
@@ -12,7 +11,7 @@ from ...bidding import (
 from ...errors import InputValidationError
 from ...market_models import MarketClearingResult, SupplyOffer
 from ...models import ExchangeSchedule, ExchangeUnit, MarketOpening, MarketSettings, PowerPlant
-from ...time_utils import format_timestamp
+from ...utils import format_timestamp
 from .demand import _exchange_import_offer
 
 if TYPE_CHECKING:
@@ -36,7 +35,13 @@ def _validate_strategy_configuration(
     settings: MarketSettings,
     plants: tuple[PowerPlant, ...],
 ) -> None:
-    """Reject linked-bid configurations before availability or bidding is read."""
+    """有关联报价机组时，检查出清机制和报价字段配置。
+
+    若任一机组使用 powerplant_energy_heuristic_linked 策略，则要求：
+    1. market_mechanism 为 complex_clearing；
+    2. additional_fields 包含 bid_type、min_acceptance_ratio、parent_bid_id。
+    不满足要求时抛出 InputValidationError；没有关联报价机组时直接返回。
+    """
 
     linked_plants = [
         plant.name

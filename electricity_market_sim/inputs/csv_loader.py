@@ -1,8 +1,8 @@
 """CSV readers and input validation for the supported V1/V2 data contract."""
 
 import csv
-from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections import defaultdict
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
@@ -1246,28 +1246,3 @@ def load_hourly_exchange_profiles(
         )
         for hour, import_power in hourly[import_column].items()
     }
-
-
-def validate_fuel_coverage(plants: tuple[PowerPlant, ...], fuel_prices: dict[str, float]) -> None:
-    missing = sorted(
-        {
-            plant.fuel_type
-            for plant in plants
-            if plant.fuel_type != "renewable"
-        }
-        - fuel_prices.keys()
-    )
-    if missing:
-        raise InputValidationError(
-            "fuel_prices_df.csv is missing prices for: " + ", ".join(missing)
-        )
-
-
-def validate_unique_names(names: Iterable[str], scope: str) -> None:
-    duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
-    if duplicates:
-        raise InputValidationError(
-            f"Participant names must be unique across {scope}: "
-            + ", ".join(duplicates)
-            + "."
-        )

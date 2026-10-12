@@ -1,12 +1,11 @@
 """V2 的发电可用容量、状态跟踪和报价策略。"""
 
-from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from .market_models import DemandBid, SupplyOffer
 from .models import PowerPlant, StorageUnit
-from .time_utils import format_timestamp, hours_between
+from .utils import format_timestamp, hours_between
 
 _POWER_TOLERANCE_MW = 1e-9
 _FORECAST_HOURS = 12

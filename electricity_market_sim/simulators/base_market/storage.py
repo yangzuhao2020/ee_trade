@@ -1,7 +1,6 @@
-"""Storage bids, projected commitments and delivered SOC bookkeeping."""
+"""储能报价、已成交交付时段的电量推算，以及实际交付后的 SOC 记录。"""
 
 from datetime import datetime
-
 from ...bidding import StorageRuntimeState, storage_heuristic_orders
 from ...errors import InputValidationError
 from ...market_models import DemandBid, MarketClearingResult, SupplyOffer
@@ -9,7 +8,7 @@ from ...models import (
     MarketOpening, MarketSettings, StorageClearingContext,
     StorageDispatchResult, StorageUnit,
 )
-from ...time_utils import format_timestamp
+from ...utils import format_timestamp
 
 _POWER_TOLERANCE_MW = 1e-9
 
@@ -18,39 +17,49 @@ def _validate_storage_configuration(
     settings: MarketSettings,
     storages: tuple[StorageUnit, ...],
 ) -> None:
-    """Validate the clearing assumptions used by the storage implementation."""
-
+    """有储能参与时，检查以下市场配置要求：
+    1. opening_frequency >= product_duration * product_count，
+       避免不同开市覆盖的交付时段重叠。
+    2. product_count > 1 时，market_mechanism 必须为 complex_clearing，
+       以便处理跨时段荷电状态（SOC）约束。
+    3. 采用 complex_clearing 时，所有储能的 natural_inflow_mw
+       必须 <= _POWER_TOLERANCE_MW，当前复杂出清不支持超过容差的自然流入。
+    不满足要求时抛出 InputValidationError；没有储能时直接返回。
+    自然流入：即使没有通过用电抽水，储存的能量也可能增加。
+    """
     if not storages:
         return
 
     product_horizon = settings.product_duration * settings.product_count
     if settings.opening_frequency < product_horizon:
         raise InputValidationError(
-            "Storage market openings must not overlap: EOM opening_frequency "
-            f"({settings.opening_frequency}) must be at least the complete "
-            f"product horizon ({product_horizon}). Overlapping storage "
-            "commitments are not supported yet."
+            "储能各次开市覆盖的交付时段不能重叠：EOM opening_frequency "
+            f"（{settings.opening_frequency}）不得小于本次开市全部交付时段的总长度"
+            f"（{product_horizon}）。"
         )
 
     if settings.product_count > 1 and settings.market_mechanism != "complex_clearing":
         raise InputValidationError(
-            "Storage participating in a multi-product opening requires "
-            "market_mechanism: complex_clearing so accepted quantities obey "
-            "cross-period SOC constraints."
+            "储能一次参与多个交付时段的交易时，必须设置 "
+            "market_mechanism: complex_clearing，以满足跨时段 SOC 约束。"
         )
     if settings.market_mechanism == "complex_clearing" and any(
         storage.natural_inflow_mw > _POWER_TOLERANCE_MW for storage in storages
     ):
         raise InputValidationError(
-            "Non-zero storage natural_inflow is currently supported for "
-            "single-product pay_as_clear openings only."
+            "非零的自然流入（natural_inflow）目前仅支持 "
+            "product_count = 1 的 pay_as_clear 市场。"
         )
 
 def _storage_market_quantities(
     market_result: MarketClearingResult,
     storage_name: str,
 ) -> tuple[float, float, float | None, float, float, float | None]:
-    """Return offered/accepted charge and discharge data for one product."""
+    """统计指定储能单元在一个交付时段中的充放电报价电量、成交电量和报价价格。
+
+    返回值依次为：充电报价电量、充电成交电量、充电报价价格、
+    放电报价电量、放电成交电量、放电报价价格；没有对应订单时，报价价格为 None。
+    """
 
     charge_orders = [
         cleared
@@ -88,7 +97,12 @@ def _project_storage_energies(
     storage_states: dict[str, StorageRuntimeState],
     scheduled_results: dict[tuple[datetime, datetime, datetime], MarketClearingResult],
 ) -> dict[str, float]:
-    """Project delivered state through accepted commitments before first delivery."""
+    """根据当前电量和已成交的交付安排，推算本次开市首个交付时段开始前的储能量。
+
+    计入开市后至首个交付时段开始时结束的交易，依次考虑自然流入、充放电成交电量和效率。
+    推算结果超出 SOC 允许范围时抛出 InputValidationError。
+    返回以储能名称为键、预计储能量（MWh）为值的字典。
+    """
 
     first_delivery = opening.products[0][0]
     pending_before_delivery = sorted(
@@ -125,8 +139,8 @@ def _project_storage_energies(
             <= storage.max_energy_mwh + tolerance
         ):
             raise InputValidationError(
-                f"Accepted commitments project storage {storage.name!r} outside "
-                f"its SOC bounds before {format_timestamp(first_delivery)}."
+                f"根据已成交交易推算，储能 {storage.name!r} 在本次开市首个交付时段"
+                f"开始前（{format_timestamp(first_delivery)}）的预计电量超出了 SOC 允许范围。"
             )
         projected[storage.name] = min(
             storage.max_energy_mwh, max(storage.min_energy_mwh, energy)
@@ -147,7 +161,6 @@ def _storage_orders_for_opening(
     tuple[StorageClearingContext, ...],
 ]:
     """根据各储能单元的预计交付初始电量和电价预测，生成本次开市各产品的充电买单与放电卖单。
-
     同时整理初始电量、电量上下限和充放电效率，供复杂出清约束实际成交后的储能电量变化。
     返回充电买单列表、放电卖单列表，以及各储能单元的物理约束数据元组。
     """
@@ -184,7 +197,10 @@ def _record_storage_states(
     storages: tuple[StorageUnit, ...],
     storage_states: dict[str, StorageRuntimeState],
 ) -> list[StorageDispatchResult]:
-    """Apply delivered storage dispatch and produce auditable SOC records."""
+    """在交付时段结束后，根据自然流入和实际成交的充放电量更新各储能单元的电量。
+
+    返回交付前后电量、充放电报价与成交电量，以及交易收支等记录，供 SOC 核对和结果输出使用。
+    """
 
     opening_time = market_result.opening_time or market_result.delivery_start
     records: list[StorageDispatchResult] = []

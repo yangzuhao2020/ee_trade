@@ -1,7 +1,5 @@
 """Shared event engine: openings, delivery starts/ends and participant extensions."""
 
-from __future__ import annotations
-
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -19,14 +17,13 @@ ScheduledProductKey = tuple[datetime, datetime, datetime]
 
 @dataclass(frozen=True)
 class EomExtensionInputs:
-    """Extra inputs and forecast requirements declared before opening preflight."""
-
-    participant_names: tuple[str, ...] = ()
-    fuel_prices: dict[str, float] | None = None
-    fuel_price_profiles: dict[datetime, dict[str, float]] | None = None
-    market_price_forecasts: dict[datetime, float] | None = None
-    forecast_offsets: tuple[int, ...] = ()
-    incomplete_opening_error: str | None = None
+    """市场扩展提供的额外输入和预测需求，供开市前的数据检查使用。"""
+    participant_names: tuple[str, ...] = ()  # 额外参与者名称，用于检查市场单位名称是否重复。
+    fuel_prices: dict[str, float] | None = None  # 扩展提供的燃料价格，优先于基础市场从 CSV 加载的价格。
+    fuel_price_profiles: dict[datetime, dict[str, float]] | None = None  # 各时段的燃料价格，用于计算边际成本。
+    market_price_forecasts: dict[datetime, float] | None = None  # 扩展提供的电价预测，优先于基础市场自行生成的预测。
+    forecast_offsets: tuple[int, ...] = ()  # 相对交付开始时间的小时偏移，指定扩展额外需要的预测时间点。
+    incomplete_opening_error: str | None = None  # 设置后，开市数据不完整时以此说明报错；默认警告并跳过开市。
 
 
 class EomMarketExtension(Protocol):

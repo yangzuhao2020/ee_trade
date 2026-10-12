@@ -15,12 +15,12 @@ from ..inputs import (
     load_household_units,
     load_powerplants,
     load_time_series_profiles,
-    validate_fuel_coverage,
-    validate_unique_names,
 )
 from ..market_models import DemandBid, MarketClearingResult, SupplyOffer
 from ..models import MarketOpening, MarketSettings, SimulationResult
-from ..time_utils import format_timestamp, hours_between
+from ..utils import (
+    format_timestamp, hours_between, validate_fuel_coverage, validate_unique_names,
+)
 
 
 _POWER_TOLERANCE_MW = 1e-9

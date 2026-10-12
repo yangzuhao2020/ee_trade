@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from ...bidding import naive_offer
 from ...clearing import clear_pay_as_clear
 from ...models import ExchangeSchedule, ExchangeUnit, MarketOpening, MarketSettings, PowerPlant
-from ...time_utils import format_timestamp
+from ...utils import format_timestamp
 from .demand import _demand_bids_for_product, _exchange_import_offer
 from .plants import _available_power
 

@@ -4,7 +4,7 @@ from datetime import datetime
 from ...errors import InputValidationError
 from ...market_models import DemandBid, SupplyOffer
 from ...models import ExchangeSchedule, ExchangeUnit
-from ...time_utils import format_timestamp, hours_between
+from ...utils import format_timestamp, hours_between
 
 
 def _profile_power(

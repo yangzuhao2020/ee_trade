@@ -12,7 +12,7 @@ from .models import (
     HouseholdPlan,
     HouseholdUnit,
 )
-from .time_utils import hours_between
+from .utils import hours_between
 
 
 _TOLERANCE = 1e-8

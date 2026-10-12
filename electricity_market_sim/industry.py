@@ -4,10 +4,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
-
 import numpy as np
 from scipy.optimize import linprog
-
 from .errors import InputValidationError
 from .market_models import DemandBid, MarketClearingResult
 from .models import (
@@ -18,7 +16,7 @@ from .models import (
     IndustrialPlan,
     IndustrialUnit,
 )
-from .time_utils import hours_between
+from .utils import hours_between
 
 
 _TOLERANCE = 1e-7

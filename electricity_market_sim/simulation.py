@@ -68,7 +68,6 @@ def market_openings(settings: MarketSettings) -> list[MarketOpening]:
     所有产品及其所需输入是否齐备，会在后续检查；因此第二版的日前开市
     可能被整体跳过，并给出说明原因的警告。
     """
-
     openings: list[MarketOpening] = []
     if settings.market_mechanism == "pay_as_bid":
         opening_time = settings.start
@@ -106,6 +105,7 @@ def market_openings(settings: MarketSettings) -> list[MarketOpening]:
         )
         openings.append(MarketOpening(opening_time=opening_time, products=products))
         opening_time += settings.opening_frequency
+        
     return openings
 
 
@@ -121,7 +121,7 @@ def simulate(
 
     input_path = Path(input_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
-    openings = tuple(market_openings(settings))
+    openings = tuple(market_openings(settings)) # 开市报价的时间。
     is_learning = (settings.learning_config is not None and settings.learning_config.learning_mode)
     
     if is_learning: # 强化学习部分

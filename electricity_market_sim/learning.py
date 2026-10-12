@@ -15,7 +15,7 @@ from .bidding import segment_supply_offers
 from .errors import InputValidationError
 from .market_models import MarketClearingResult, SupplyOffer
 from .models import LearningStepResult, LearningTransition, PowerPlant
-from .time_utils import hours_between
+from .utils import hours_between
 
 OBSERVATION_SIZE = 38
 ACTION_SIZE = 2

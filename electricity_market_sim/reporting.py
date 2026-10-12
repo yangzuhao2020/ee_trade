@@ -11,7 +11,7 @@ from typing import Any
 from .errors import InputValidationError
 from .learning import PRICE_SCALE_EUR_PER_MWH
 from .models import SimulationResult
-from .time_utils import format_timestamp, hours_between
+from .utils import format_timestamp, hours_between
 
 
 _POWER_TOLERANCE_MW = 1e-7

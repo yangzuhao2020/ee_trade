@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from math import isclose, isfinite
 from operator import attrgetter
-from .time_utils import hours_between
+from .utils import hours_between
 
 
 _ENERGY_TOLERANCE_MWH = 1e-7

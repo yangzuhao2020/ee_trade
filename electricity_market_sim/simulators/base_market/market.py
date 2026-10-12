@@ -14,14 +14,13 @@ from ...inputs import (
     load_demand_units, load_exchange_unit, load_fuel_prices,
     load_hourly_availability_profiles, load_hourly_demand_profiles,
     load_hourly_exchange_profiles, load_powerplants, load_storage_units,
-    validate_fuel_coverage, validate_unique_names,
 )
 from ...market_models import DemandBid, MarketClearingResult
 from ...models import (
     ExchangeSchedule, ExchangeUnit, MarketOpening, MarketSettings, PowerPlant,
     StorageClearingContext, StorageDispatchResult, StorageUnit,
 )
-from ...time_utils import format_timestamp
+from ...utils import format_timestamp, validate_fuel_coverage, validate_unique_names
 from ..eom import EomExtensionInputs, EomMarketExtension, ScheduledProductKey
 from .demand import _demand_bids_for_product
 from .forecasts import _forecast_starts, _naive_price_forecasts, _opening_coverage_issues
@@ -60,30 +59,28 @@ class BaseMarket:
         self.storages = load_storage_units(input_path / "storage_units.csv")
         _validate_storage_configuration(settings, self.storages)
         self.demand_units = load_demand_units(input_path / "demand_units.csv")
+        # 读取发电机组、储能和需求侧的数据，并检查它们是否符合当前市场规则。
         self.runtime_plants = tuple(
             plant for plant in self.plants
             if plant.bidding_strategy != "powerplant_energy_naive"
-        )
+        ) # 排除使用 powerplant_energy_naive 报价策略的机组。
         self.requires_price_forecast = any(
             plant.bidding_strategy in _FORECAST_STRATEGIES
             and plant.min_power_mw > _POWER_TOLERANCE_MW
             for plant in self.runtime_plants
-        )
+        ) # 判断是否存在至少一个需要预测电价的发电机组。
         self.requires_storage_price_forecast = bool(self.storages)
         self.requires_market_price_forecast = (
-            self.requires_price_forecast or self.requires_storage_price_forecast
-        )
+            self.requires_price_forecast or self.requires_storage_price_forecast)
         self.demand_profiles = load_hourly_demand_profiles(
-            input_path / "demand_df.csv", self.demand_units
-        )
+            input_path / "demand_df.csv", self.demand_units) # 读取需求侧的负荷预测数据。
         self.availability_profiles = load_hourly_availability_profiles(
-            input_path / "availability_df.csv", self.plants
-        )
+            input_path / "availability_df.csv", self.plants) # 读取发电机组的可用性预测数据。
         extension_inputs = (
-            extension.prepare(self) if extension is not None else EomExtensionInputs()
-        )
+            extension.prepare(self) if extension is not None else EomExtensionInputs())
         self.extension_inputs = extension_inputs
         self.requires_market_price_forecast |= bool(extension_inputs.forecast_offsets)
+        # 扩展模块的预测需求合并到市场的预测开关中
         validate_unique_names(
             [
                 *(plant.name for plant in self.plants),
@@ -97,9 +94,10 @@ class BaseMarket:
             extension_inputs.fuel_prices
             if extension_inputs.fuel_prices is not None
             else load_fuel_prices(input_path / "fuel_prices_df.csv")
-        )
+        ) # 读取燃料价格数据，优先使用扩展模块提供的燃料价格。
         self.fuel_price_profiles = extension_inputs.fuel_price_profiles
         validate_fuel_coverage(self.plants, self.fuel_prices)
+        
         self.exchange_unit = None
         self.exchange_profiles: dict[datetime, ExchangeSchedule] = {}
         if settings.exchange_units_file is not None:

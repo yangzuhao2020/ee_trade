@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..models import StorageDispatchResult
-from ..time_utils import hours_between
+from ..utils import hours_between
 from .common import (
     _ENERGY_TOLERANCE_MWH,
     _UNIT_COLORS,
