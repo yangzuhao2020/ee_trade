@@ -1,4 +1,5 @@
-"""CSV readers and input validation for the supported V1/V2 data contract."""
+"""电力市场仿真的 CSV 输入加载与校验，覆盖发电、储能、需求、居民和工业参与者。
+支持原始分辨率、逐小时均值及按产品时长对齐的时间序列读取。"""
 
 import csv
 from collections import defaultdict

@@ -1,4 +1,4 @@
-"""Behavior contracts for shared events and extension-controlled plant offers."""
+"""共享市场事件时序、扩展报价替换、学习动作处理及结果输出的行为测试。"""
 
 from dataclasses import replace
 from datetime import datetime, timedelta

@@ -1,4 +1,4 @@
-"""Version 5 learning-unit, training-curve, and Actor/baseline visualisations."""
+"""第五版学习机组报价与奖励、训练和验证曲线，以及 Actor 与边际成本基准策略的评估对比图表。"""
 
 import csv
 from pathlib import Path

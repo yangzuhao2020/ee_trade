@@ -1,4 +1,4 @@
-"""Accepted dispatch, storage, and operator-result visualisations."""
+"""机组成交出力、储能充放电与 SOC，以及运营商利润的 PNG 图表。"""
 
 from collections import defaultdict
 from datetime import datetime

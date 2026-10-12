@@ -1,4 +1,4 @@
-"""CSV result writers with stable, documented schemas."""
+"""按照稳定且有文档说明的字段结构，将仿真结果写入 CSV 文件。"""
 
 import csv
 from collections import defaultdict

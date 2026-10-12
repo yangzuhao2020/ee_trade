@@ -1,8 +1,7 @@
-"""Streamlit viewer for the simulation results in outputs/<dataset>/<scenario>.
-
-Run from the project root inside the ee_trade environment:
-    streamlit run UI/dashboard.py
-"""
+"""使用 Streamlit 浏览 outputs/<数据集>/<场景> 下的仿真结果。
+展示基于 CSV 的交互式图表，并在存在时显示学习场景的 PNG 图表。
+在项目根目录的 ee_trade 环境中运行：
+    streamlit run UI/dashboard.py"""
 
 from pathlib import Path
 

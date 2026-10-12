@@ -1,4 +1,5 @@
-"""Rolling steel-production optimization and post-clearing dispatch."""
+"""第四版工业需求响应：钢铁生产滚动优化、购电功率灵活性评估及出清后执行记录。
+根据预测价格、参考负荷和生产约束制定计划，并按实际成交电量更新钢产量与设备出力。"""
 
 from collections.abc import Sequence
 from dataclasses import dataclass

@@ -1,9 +1,5 @@
-"""Interactive Plotly charts rebuilt from the CSV files written by write_results().
-
-Each chart mirrors the PNG renderer of the same name in
-electricity_market_sim/plotting, but reads outputs/<dataset>/<scenario>/*.csv
-instead of an in-memory SimulationResult.
-"""
+"""从仿真结果 CSV 文件构建交互式 Plotly 图表。
+展示市场供需、成交价格与出力、运营商利润，以及可用的储能、工业和按报价结算订单簿数据。"""
 
 from pathlib import Path
 

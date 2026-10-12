@@ -1,4 +1,4 @@
-"""Single-product merit-order clearing settled at each seller's own bid."""
+"""按报价排序撮合单个交付产品的买卖订单，并按各卖单报价结算。"""
 
 from collections import defaultdict
 from ..market_models import (

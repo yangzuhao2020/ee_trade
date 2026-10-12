@@ -1,4 +1,5 @@
-"""Shared event engine: openings, delivery starts/ends and participant extensions."""
+"""第一、二、四、五版共用的能量市场事件引擎和参与者扩展接口。
+按时间处理开市、交付开始与结束事件，并调用扩展完成额外报价、状态记录及结果汇总。"""
 
 from collections import defaultdict
 from collections.abc import Callable

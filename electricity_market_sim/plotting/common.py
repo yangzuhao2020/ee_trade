@@ -1,4 +1,4 @@
-"""Shared rendering utilities for PNG market plots."""
+"""市场 PNG 图表共用的绘图库加载、数据校验、配色、时间轴格式化、文件保存及旧图清理工具。"""
 
 from math import isclose
 from pathlib import Path

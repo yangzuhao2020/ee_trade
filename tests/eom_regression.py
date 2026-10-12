@@ -1,9 +1,8 @@
-"""Snapshot example CSVs and learning callbacks before/after an EOM refactor.
-
-Run in ee_trade with ``python -B tests/eom_regression.py baseline ARCHIVE``
-or ``python -B tests/eom_regression.py compare ARCHIVE``. The archive is separate
-from normal example outputs. Original YAML files are never changed.
-"""
+"""示例场景仿真结果、学习回调、警告及 CSV 输出的回归快照记录与对比。
+在项目根目录运行：
+    python -B tests/eom_regression.py baseline ARCHIVE
+    python -B tests/eom_regression.py compare ARCHIVE
+快照与常规输出分开保存；场景配置调整仅在测试内存中生效。"""
 
 import argparse
 from math import tanh

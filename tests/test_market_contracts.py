@@ -1,4 +1,5 @@
-"""Input and clearing contracts: python -m unittest discover -s tests -v."""
+"""CSV 输入与市场出清行为的契约测试。
+运行方式：python -B -m unittest discover -s tests -v"""
 
 from dataclasses import replace
 from datetime import datetime, timedelta

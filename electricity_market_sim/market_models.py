@@ -1,4 +1,5 @@
-"""Market orders, trades, and clearing-result data structures."""
+"""市场买卖订单、成交记录及单时段出清结果的数据结构。
+提供成交电量与功率换算、交易收支和利润计算，并校验成交电量平衡与结算一致性。"""
 
 from collections import defaultdict
 from collections.abc import Iterable

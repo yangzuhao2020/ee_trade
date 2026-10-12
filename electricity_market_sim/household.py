@@ -1,4 +1,7 @@
-"""Forecast planning and post-clearing dispatch for V3 household participants."""
+"""第三版居民参与者的购电计划优化、灵活性评估及出清后设备调度。
+根据预测电价和热需求制定购电与电池充放电计划，评估成本容忍度下的购电功率上下界。
+出清后按实际成交电量安排热泵和电池运行，更新电池 SOC，并记录未满足的用电与供热需求。
+"""
 
 from dataclasses import dataclass
 from datetime import datetime

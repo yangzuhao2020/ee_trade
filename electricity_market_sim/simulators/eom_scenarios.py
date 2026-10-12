@@ -1,7 +1,5 @@
-"""V1/V2 and V4 entry points for the shared EOM market and event engine.
-
-V1/V2 use the base market directly; V4 adds industrial demand-side management.
-"""
+"""第一、二版基础市场与第四版工业需求响应场景的仿真入口。
+第一、二版直接使用基础市场，第四版通过扩展接入工业滚动优化与交付记录。"""
 
 import warnings
 from collections.abc import Callable

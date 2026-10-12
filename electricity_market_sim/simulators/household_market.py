@@ -1,4 +1,4 @@
-"""V3 household optimization and divisible pay-as-bid market simulation."""
+"""第三版居民购电计划优化、灵活性评估及采用按报价结算的市场仿真。"""
 
 from dataclasses import replace
 from datetime import datetime

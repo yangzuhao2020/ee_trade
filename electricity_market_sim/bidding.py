@@ -1,4 +1,4 @@
-"""V2 的发电可用容量、状态跟踪和报价策略。"""
+"""发电机组与储能的运行状态管理、机组可用容量计算及报价生成。"""
 
 from collections.abc import Iterable
 from dataclasses import dataclass, replace

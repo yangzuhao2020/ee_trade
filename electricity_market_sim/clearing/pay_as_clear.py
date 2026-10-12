@@ -1,12 +1,7 @@
-"""Deterministic, single-node pay-as-clear market clearing.
-
-按报价从低到高排序卖单；
-按买方愿付价格从高到低匹配需求；
-依次成交，允许最后一台机组部分成交；
-记录成交电量、未满足负荷、边际机组；
-用最后被接受卖单的价格作为统一出清价；
-返回该时段的 MarketClearingResult。
-"""
+"""采用稳定排序的单节点、单产品统一价格出清。
+按报价排序撮合买卖订单，允许订单部分成交。
+以已成交卖单的最高报价作为统一结算价；无成交时价格为 0。
+返回成交记录、未满足需求和边际参与者等单时段出清结果。"""
 
 from collections import defaultdict
 from ..market_models import (

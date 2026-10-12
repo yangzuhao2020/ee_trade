@@ -1,4 +1,4 @@
-"""Market-wide and pay-as-bid visualisations."""
+"""市场供需与价格概览、成交汇总及按报价结算市场的首个供给订单簿 PNG 图表。"""
 
 from math import isfinite
 from pathlib import Path

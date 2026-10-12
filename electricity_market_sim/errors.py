@@ -1,4 +1,4 @@
-"""Domain-specific exceptions with user-actionable messages."""
+"""电力市场仿真的输入、运行状态及绘图异常类型。"""
 
 # 基类：__main__.py 捕获它后只打印一行错误信息并以退出码 2 结束，不输出堆栈。
 # KeyError、ZeroDivisionError 等不属于此体系的异常视为程序缺陷，会带完整堆栈抛出。

@@ -1,8 +1,5 @@
-"""Version 5 observation, bidding, reward, and episode bookkeeping.
-
-This module deliberately has no PyTorch dependency.  It is the market-facing
-boundary of the learning system and can therefore be tested with a fixed policy.
-"""
+"""第五版学习机组的状态构造、报价生成、奖励计算及回合记录。
+通过策略回调接入报价决策，不依赖 PyTorch；训练网络和参数更新由 training.py 负责。"""
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass

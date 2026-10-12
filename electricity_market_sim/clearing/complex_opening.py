@@ -1,4 +1,4 @@
-"""Joint multi-product clearing for complex orders (block/linked bids, storage)."""
+"""考虑块报价、关联报价及跨时段储能 SOC 约束的多产品联合出清。"""
 
 from collections import defaultdict
 import numpy as np

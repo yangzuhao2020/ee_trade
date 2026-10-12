@@ -1,4 +1,4 @@
-"""Single-agent MATD3 training and evaluation for Version 5 scenarios."""
+"""用于第五版场景的单智能体 MATD3 训练与评估。"""
 
 import csv
 import json

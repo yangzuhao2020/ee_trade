@@ -1,4 +1,4 @@
-"""V5 learning participant extension over the conventional EOM market."""
+"""第五版学习机组的市场扩展：准备预测输入、生成学习报价并记录奖励与状态转移。"""
 
 from collections.abc import Callable
 from dataclasses import replace

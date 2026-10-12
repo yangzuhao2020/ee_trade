@@ -1,4 +1,4 @@
-"""Public entry point for simulation PNG visualisations."""
+"""仿真结果 PNG 绘图入口，涵盖市场、机组、储能、工业及第五版训练与评估图表。"""
 
 from pathlib import Path
 

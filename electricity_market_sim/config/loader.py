@@ -1,4 +1,4 @@
-"""YAML parsing and validation for the supported single-node market design."""
+"""从 YAML 读取并校验单节点市场配置、时间参数及第五版学习设置。"""
 
 import re
 from datetime import datetime, timedelta

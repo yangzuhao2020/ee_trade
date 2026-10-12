@@ -1,4 +1,4 @@
-"""Version 5 episode-metric columns shared by the trainer and learning plots."""
+"""第五版训练与绘图共享的回合指标字段及输出精度定义。"""
 
 LEARNING_METRIC_DECIMALS = {
     "total_reward": 12,

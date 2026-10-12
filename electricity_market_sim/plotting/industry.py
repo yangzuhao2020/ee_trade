@@ -1,4 +1,4 @@
-"""Industrial production, execution, and flexibility visualisations."""
+"""工业生产计划、实际执行结果及各交付时段购电功率上下界的 PNG 图表。"""
 
 from collections import defaultdict
 from pathlib import Path

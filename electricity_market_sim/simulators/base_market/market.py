@@ -1,4 +1,4 @@
-"""Prepare and operate the conventional market shared by V1/V2, V4 and V5."""
+"""第一、二、四、五版共用的基础市场：加载参与者、准备预测、组织出清并更新交付状态。"""
 
 import warnings
 from datetime import datetime

@@ -1,4 +1,4 @@
-"""Rigid/elastic demand orders and planned Exchange imports/exports."""
+"""刚性与弹性需求买单生成，以及计划进口卖单和出口买单的构建。"""
 
 from datetime import datetime
 from ...errors import InputValidationError

@@ -1,4 +1,4 @@
-"""Conventional plant quoting, startup settlement and delivered runtime state."""
+"""发电机组可用出力与报价生成、策略配置校验、启动成本结算及交付后的运行状态更新。"""
 
 from collections import defaultdict
 from dataclasses import replace

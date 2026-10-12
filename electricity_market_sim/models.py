@@ -1,11 +1,12 @@
-"""Small, explicit data structures used by the electricity-market simulator.
-例如：
-- 市场配置：MarketSettings
-- 发电机组与需求单元：PowerPlant、DemandUnit
-- 买单和卖单：DemandBid、SupplyOffer
-- 单时段出清结果：MarketClearingResult
+"""电力市场仿真的配置、参与者参数及运行结果数据结构。
+包括：
+- 市场与学习配置：MarketSettings、LearningConfig
+- 市场开市安排：MarketOpening
+- 发电机组、需求、储能、居民及工业参与者的参数
+- 储能、居民、工业及学习过程的运行结果
 - 完整仿真结果：SimulationResult
-它还提供成交电量转成交功率、收入、成本、利润等基础计算，并检查能量守恒。
+还提供边际成本、储能量与 SOC 换算、净现金流及工业灵活性幅度等派生计算。
+市场订单、成交记录和单时段出清结果的数据结构定义在 market_models.py 中。
 """
 
 from dataclasses import dataclass, field

@@ -1,4 +1,4 @@
-"""Shared validation and result helpers for the clearing algorithms."""
+"""各出清算法共享的报价限价、订单标识与交付时段校验，以及需求统计。"""
 
 from datetime import datetime
 from ..errors import InputValidationError

@@ -1,4 +1,4 @@
-"""CSV input loading and validation for market simulations."""
+"""市场仿真所需的 CSV 数据加载与输入校验接口。"""
 
 from .csv_loader import (
     load_aligned_fuel_price_profiles,

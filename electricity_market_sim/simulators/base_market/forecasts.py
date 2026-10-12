@@ -1,4 +1,4 @@
-"""Marginal-cost price forecasts and complete-opening input preflight."""
+"""基于边际成本的朴素电价预测、策略所需的预测时间点及开市数据完整性检查。"""
 
 from collections.abc import Iterable
 from datetime import datetime, timedelta
