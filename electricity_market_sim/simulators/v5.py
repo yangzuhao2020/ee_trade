@@ -1,7 +1,5 @@
 """V5 learning participant extension over the conventional EOM market."""
 
-from __future__ import annotations
-
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta

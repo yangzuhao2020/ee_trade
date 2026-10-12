@@ -1,7 +1,5 @@
 """Prepare and operate the conventional market shared by V1/V2, V4 and V5."""
 
-from __future__ import annotations
-
 import warnings
 from datetime import datetime
 from pathlib import Path

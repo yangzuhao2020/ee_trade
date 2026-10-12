@@ -1,7 +1,5 @@
 """V3 household optimization and divisible pay-as-bid market simulation."""
 
-from __future__ import annotations
-
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path

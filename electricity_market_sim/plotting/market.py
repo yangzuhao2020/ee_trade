@@ -1,7 +1,5 @@
 """Market-wide and pay-as-bid visualisations."""
 
-from __future__ import annotations
-
 from math import isfinite
 from pathlib import Path
 

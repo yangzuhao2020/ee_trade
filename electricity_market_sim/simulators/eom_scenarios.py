@@ -3,8 +3,6 @@
 V1/V2 use the base market directly; V4 adds industrial demand-side management.
 """
 
-from __future__ import annotations
-
 import warnings
 from collections.abc import Callable
 from dataclasses import replace

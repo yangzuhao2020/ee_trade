@@ -1,6 +1,5 @@
-"""Command-line entry point for the electricity-market simulator."""
+"""电力市场仿真器的命令行入口。"""
 
-from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
@@ -133,22 +132,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if not arguments.no_plots:
         try:
-            generate_plots(
-                result,
-                arguments.output_dir / "plots",
-                learning_episode_label=learning_episode_label,
-            )
+            generate_plots(result, arguments.output_dir / "plots",
+                learning_episode_label=learning_episode_label,)
             if learning_metrics_path is not None:
-                generate_learning_plots(
-                    learning_metrics_path, arguments.output_dir / "plots"
-                )
+                generate_learning_plots(learning_metrics_path,
+                                        arguments.output_dir / "plots")
         except Exception as exc:
-            # CSV output is already durable at this point. Plot failures must
-            # not change a successful simulation into a lost result.
-            print(
-                f"Simulation completed, but PNG generation failed: {exc}",
-                file=sys.stderr,
-            )
+            # 此时 CSV 结果已经保存到磁盘。
+            # 即使绘图失败，也应保留已成功完成的仿真结果。
+            print(f"Simulation completed, but PNG generation failed: {exc}",file=sys.stderr,)
 
     print(
         f"Simulation complete: {len(result.market_results)} delivery products written to "

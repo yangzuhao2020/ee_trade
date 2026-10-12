@@ -1,6 +1,4 @@
-"""Public orchestration for all supported electricity-market simulations."""
-
-from __future__ import annotations
+"""统一协调所有受支持的电力市场仿真。"""
 
 from datetime import datetime
 from pathlib import Path
@@ -16,17 +14,9 @@ from .simulators.eom_scenarios import (
     simulate_v4_market,
 )
 
-__all__ = [
-    "LearningEpisodeRunner",
-    "market_openings",
-    "run_simulation",
-    "simulate",
-    "simulate_learning_episode",
-]
-
 
 class LearningEpisodeRunner:
-    """Run multiple episodes with one immutable observation normalization base."""
+    """使用同一个固定的观测归一化基准运行多轮仿真。"""
 
     def __init__(
         self,
@@ -41,7 +31,7 @@ class LearningEpisodeRunner:
 
     @property
     def load_base_mw(self) -> float | None:
-        """Return the base to persist in or restore from a checkpoint."""
+        """返回用于保存到检查点或从检查点恢复的归一化基准。"""
 
         return self._load_base_mw
 
@@ -52,7 +42,7 @@ class LearningEpisodeRunner:
         *,
         enforce_action_bounds: bool = True,
     ) -> SimulationResult:
-        """Run an episode, calculating the shared base only on the first call."""
+        """运行一轮仿真，仅在首次调用时计算各轮共用的归一化基准。"""
 
         result = simulate_learning_episode(
             self.input_dir,
@@ -73,11 +63,10 @@ class LearningEpisodeRunner:
 
 
 def market_openings(settings: MarketSettings) -> list[MarketOpening]:
-    """Schedule candidate openings without silently shortening their products.
-
-    A candidate is included while its first delivery begins inside the simulation
-    horizon. Whether all products and supporting inputs exist is checked later,
-    so a V2 day-ahead opening can be skipped whole with a useful warning.
+    """生成候选开市安排，保留完整的交易产品集合。
+    首个产品的交付开始时间位于仿真范围内时，纳入候选开市。
+    所有产品及其所需输入是否齐备，会在后续检查；因此第二版的日前开市
+    可能被整体跳过，并给出说明原因的警告。
     """
 
     openings: list[MarketOpening] = []
@@ -100,10 +89,9 @@ def market_openings(settings: MarketSettings) -> list[MarketOpening]:
         return openings
 
     opening_time = settings.start
-    # For a multi-product opening, retain the boundary opening whose first
-    # delivery starts exactly at ``end``. Its preflight will deliberately skip
-    # the whole opening and emit the required incomplete-product warning. The
-    # one-product V1 path retains its established strict boundary.
+    # 多产品开市保留首个产品的交付开始时间恰好等于 end 的边界开市。
+    # 预检查会整体跳过该次开市，并按要求发出产品不完整的警告。
+    # 第一版的单产品流程继续使用原有的严格边界。
     includes_end_boundary = settings.product_count > 1
     while opening_time + settings.first_delivery < settings.end or (
         includes_end_boundary and opening_time + settings.first_delivery == settings.end
@@ -129,7 +117,7 @@ def simulate(
     learning_load_base_mw: float | None = None,
     learning_enforce_action_bounds: bool = True,
 ) -> SimulationResult:
-    """Calculate one supported scenario without writing result files."""
+    """计算一个受支持场景的仿真结果，不写入结果文件。"""
 
     input_path = Path(input_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
@@ -166,7 +154,7 @@ def simulate_learning_episode(
     load_base_mw: float | None = None,
     enforce_action_bounds: bool = True,
 ) -> SimulationResult:
-    """Run one Version 5 episode with injected policy and replay callbacks."""
+    """使用传入的策略和经验回放回调，运行第五版的一轮仿真。"""
     return simulate(
         input_dir,
         scenario=scenario,
@@ -185,7 +173,7 @@ def run_simulation(
     learning_transition_consumer: TransitionConsumer | None = None,
     learning_load_base_mw: float | None = None,
 ) -> SimulationResult:
-    """Run a simulation and persist the CSV results before optional plotting."""
+    """运行仿真并保存 CSV 结果，随后可按需绘图。"""
 
     result = simulate(
         input_dir=input_dir,

@@ -1,21 +1,12 @@
 """Rolling steel-production optimization and post-clearing dispatch."""
 
-from __future__ import annotations
-
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
 
 import numpy as np
-
-try:
-    from scipy.optimize import linprog
-except (ImportError, AttributeError) as exc:  # pragma: no cover - environment dependent
-    linprog = None
-    _SCIPY_IMPORT_ERROR: Exception | None = exc
-else:
-    _SCIPY_IMPORT_ERROR = None
+from scipy.optimize import linprog
 
 from .errors import InputValidationError
 from .market_models import DemandBid, MarketClearingResult
@@ -31,15 +22,6 @@ from .time_utils import hours_between
 
 
 _TOLERANCE = 1e-7
-
-
-def _require_optimizer() -> None:
-    if linprog is None:
-        detail = f": {_SCIPY_IMPORT_ERROR}" if _SCIPY_IMPORT_ERROR else ""
-        raise InputValidationError(
-            "Industrial optimization requires SciPy with scipy.optimize.linprog "
-            f"available{detail}."
-        )
 
 
 @dataclass(frozen=True)
@@ -166,7 +148,6 @@ def maximum_industry_production(
 
     if not products:
         return 0.0
-    _require_optimizer()
     coefficients = process_coefficients(unit)
     durations = np.array([hours_between(*product) for product in products])
     bounds = [
@@ -397,7 +378,6 @@ def _solve(
     *,
     variable_cost_limit: float | None = None,
 ) -> np.ndarray:
-    _require_optimizer()
     A_ub = problem.A_ub
     b_ub = problem.b_ub
     if variable_cost_limit is not None:

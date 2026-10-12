@@ -1,7 +1,5 @@
 """Shared timestamp formatting and delivery-duration conversion."""
 
-from __future__ import annotations
-
 from datetime import datetime
 
 

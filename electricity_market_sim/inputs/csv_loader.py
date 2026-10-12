@@ -1,7 +1,5 @@
 """CSV readers and input validation for the supported V1/V2 data contract."""
 
-from __future__ import annotations
-
 import csv
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Sequence

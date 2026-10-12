@@ -1,7 +1,5 @@
 """Public entry point for simulation PNG visualisations."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 from ..errors import PlottingError
@@ -30,10 +28,6 @@ from .market import (
     _plot_market_summary,
 )
 
-
-# Keep the stable package-level API intentionally small; chart implementations
-# live in focused modules and are imported by this orchestration entry point.
-__all__ = ["generate_learning_plots", "generate_plots"]
 
 _LEARNING_UNIT_PLOT = "learning_unit.png"
 _LEARNING_CURVES_PLOT = "learning_curves.png"

@@ -1,7 +1,5 @@
 """Version 5 episode-metric columns shared by the trainer and learning plots."""
 
-from __future__ import annotations
-
 LEARNING_METRIC_DECIMALS = {
     "total_reward": 12,
     "discounted_reward": 12,

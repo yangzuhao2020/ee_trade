@@ -4,8 +4,6 @@ This module deliberately has no PyTorch dependency.  It is the market-facing
 boundary of the learning system and can therefore be tested with a fixed policy.
 """
 
-from __future__ import annotations
-
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta

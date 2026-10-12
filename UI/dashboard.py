@@ -4,8 +4,6 @@ Run from the project root inside the ee_trade environment:
     streamlit run UI/dashboard.py
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import streamlit as st

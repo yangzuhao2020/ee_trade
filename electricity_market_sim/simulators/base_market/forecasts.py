@@ -1,6 +1,5 @@
 """Marginal-cost price forecasts and complete-opening input preflight."""
 
-from __future__ import annotations
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 from ...bidding import naive_offer

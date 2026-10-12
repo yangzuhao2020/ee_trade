@@ -1,7 +1,5 @@
 """Version 5 learning-unit, training-curve, and Actor/baseline visualisations."""
 
-from __future__ import annotations
-
 import csv
 from pathlib import Path
 from statistics import fmean, pstdev

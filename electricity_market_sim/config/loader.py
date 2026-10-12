@@ -1,7 +1,5 @@
 """YAML parsing and validation for the supported single-node market design."""
 
-from __future__ import annotations
-
 import re
 from datetime import datetime, timedelta
 from math import isfinite

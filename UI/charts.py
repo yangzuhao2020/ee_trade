@@ -5,8 +5,6 @@ electricity_market_sim/plotting, but reads outputs/<dataset>/<scenario>/*.csv
 instead of an in-memory SimulationResult.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import pandas as pd

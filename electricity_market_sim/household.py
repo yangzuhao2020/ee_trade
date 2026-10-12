@@ -1,21 +1,9 @@
 """Forecast planning and post-clearing dispatch for V3 household participants."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from datetime import datetime
-
 import numpy as np
-
-try:
-    from scipy.optimize import Bounds, LinearConstraint, milp
-except (ImportError, AttributeError) as exc:  # pragma: no cover - environment dependent
-    Bounds = None
-    LinearConstraint = None
-    milp = None
-    _SCIPY_IMPORT_ERROR: Exception | None = exc
-else:
-    _SCIPY_IMPORT_ERROR = None
+from scipy.optimize import Bounds, LinearConstraint, milp
 
 from .errors import InputValidationError
 from .models import (
@@ -28,15 +16,6 @@ from .time_utils import hours_between
 
 
 _TOLERANCE = 1e-8
-
-
-def _require_household_optimizer() -> None:
-    if milp is None or Bounds is None or LinearConstraint is None:
-        detail = f": {_SCIPY_IMPORT_ERROR}" if _SCIPY_IMPORT_ERROR else ""
-        raise InputValidationError(
-            "Household optimization requires SciPy with scipy.optimize.milp "
-            f"available{detail}."
-        )
 
 
 @dataclass(frozen=True)
@@ -301,7 +280,6 @@ def _household_constraint(
         upper = np.concatenate(
             [upper, np.array([maximum for _, _, maximum in extra_rows])]
         )
-    assert LinearConstraint is not None
     return LinearConstraint(matrix, lower, upper)
 
 
@@ -311,8 +289,6 @@ def _solve_household_problem(
     objective: np.ndarray,
     constraint: LinearConstraint,
 ) -> np.ndarray:
-    _require_household_optimizer()
-    assert milp is not None
     result = milp(
         objective,
         integrality=problem.integrality,
@@ -459,7 +435,6 @@ def plan_household_opening(
         if not products:
             plans_by_household[household.name] = ()
             continue
-        _require_household_optimizer()
         problem = _build_household_problem(
             household,
             products,

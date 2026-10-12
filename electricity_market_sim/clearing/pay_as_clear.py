@@ -8,7 +8,6 @@
 返回该时段的 MarketClearingResult。
 """
 
-from __future__ import annotations
 from collections import defaultdict
 from ..market_models import (
     ClearedDemandBid,

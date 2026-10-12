@@ -1,9 +1,6 @@
 """Rigid/elastic demand orders and planned Exchange imports/exports."""
 
-from __future__ import annotations
-
 from datetime import datetime
-
 from ...errors import InputValidationError
 from ...market_models import DemandBid, SupplyOffer
 from ...models import ExchangeSchedule, ExchangeUnit

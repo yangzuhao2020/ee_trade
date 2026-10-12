@@ -1,7 +1,5 @@
 """Industrial production, execution, and flexibility visualisations."""
 
-from __future__ import annotations
-
 from collections import defaultdict
 from pathlib import Path
 

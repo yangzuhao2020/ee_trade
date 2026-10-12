@@ -1,6 +1,5 @@
 """Single-product merit-order clearing settled at each seller's own bid."""
 
-from __future__ import annotations
 from collections import defaultdict
 from ..market_models import (
     ClearedDemandBid,

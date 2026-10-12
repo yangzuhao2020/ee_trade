@@ -1,6 +1,5 @@
 """Shared validation and result helpers for the clearing algorithms."""
 
-from __future__ import annotations
 from datetime import datetime
 from ..errors import InputValidationError
 from ..market_models import (

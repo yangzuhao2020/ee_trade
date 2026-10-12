@@ -1,7 +1,5 @@
 """Shared rendering utilities for PNG market plots."""
 
-from __future__ import annotations
-
 from math import isclose
 from pathlib import Path
 

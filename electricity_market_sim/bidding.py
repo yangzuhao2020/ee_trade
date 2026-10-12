@@ -1,11 +1,9 @@
 """V2 的发电可用容量、状态跟踪和报价策略。"""
 
 from __future__ import annotations
-
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-
 from .market_models import DemandBid, SupplyOffer
 from .models import PowerPlant, StorageUnit
 from .time_utils import format_timestamp, hours_between
@@ -17,7 +15,6 @@ _FORECAST_HOURS = 12
 @dataclass
 class PlantRuntimeState:
     """``powerplant_energy_heuristic_flexable`` 所需的时序运行状态。
-
     V2 约定机组初始处于停机状态，出力为零。本版本的调度约束
     有意不包含爬坡约束、热电联产（CHP）的供热承诺，
     以及最小连续运行和停机时间约束。

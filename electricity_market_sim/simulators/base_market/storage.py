@@ -1,7 +1,5 @@
 """Storage bids, projected commitments and delivered SOC bookkeeping."""
 
-from __future__ import annotations
-
 from datetime import datetime
 
 from ...bidding import StorageRuntimeState, storage_heuristic_orders

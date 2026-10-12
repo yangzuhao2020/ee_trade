@@ -1,7 +1,5 @@
 """CSV result writers with stable, documented schemas."""
 
-from __future__ import annotations
-
 import csv
 from collections import defaultdict
 from collections.abc import Iterable

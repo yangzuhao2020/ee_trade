@@ -1,7 +1,5 @@
 """Single-agent MATD3 training and evaluation for Version 5 scenarios."""
 
-from __future__ import annotations
-
 import csv
 import json
 import shutil
@@ -9,12 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from statistics import fmean, pstdev
 from typing import Any
-
 import numpy as np
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
-
 from .config import load_market_settings
 from .errors import InputValidationError
 from .learning import ACTION_SIZE, OBSERVATION_SIZE
