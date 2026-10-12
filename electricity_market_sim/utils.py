@@ -1,5 +1,6 @@
 """共享工具：时间格式化、交付时长计算及参与者与燃料价格校验。"""
 
+from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable
 from datetime import datetime

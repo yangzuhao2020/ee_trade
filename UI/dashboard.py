@@ -30,7 +30,7 @@ def scenarios_with_results(dataset: str) -> list[str]:
 
 
 def results_state(run_dir: Path) -> tuple:
-    """Existence, modification time and size of every CSV the charts read."""
+    """返回图表读取的每个 CSV 文件是否存在、修改时间和文件大小。"""
 
     state = []
     for filename in charts.TABLES.values():
@@ -45,7 +45,7 @@ def results_state(run_dir: Path) -> tuple:
 
 @st.cache_data(show_spinner="正在读取结果 CSV…", max_entries=8)
 def load_charts(run_dir: str, files_state: tuple):
-    """Build the run's figures; files_state invalidates the cache when any CSV changes."""
+    """构建本次运行的图表；任一 CSV 发生变化时，files_state 会使缓存失效。"""
 
     return charts.build_charts(charts.load_run(Path(run_dir)))
 

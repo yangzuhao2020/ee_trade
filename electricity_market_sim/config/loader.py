@@ -15,7 +15,7 @@ _DURATION_PATTERN = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>min|m|h|d)$")
 
 
 def parse_duration(value: Any, field_name: str) -> timedelta:
-    """Parse the compact duration notation used by ASSUME-style YAML files."""
+    """解析 ASSUME 风格 YAML 文件中使用的简写时长（如 '1h'、'15m'）。"""
 
     if not isinstance(value, str):
         raise InputValidationError(f"{field_name} must be a duration such as '1h'.")
@@ -51,7 +51,7 @@ def _parse_datetime(value: Any, field_name: str) -> datetime:
 
 
 def _parse_additional_fields(eom: dict[str, Any]) -> frozenset[str]:
-    """Read optional ASSUME order metadata fields without silently discarding them."""
+    """读取可选的 ASSUME 订单元数据字段（additional_fields），不会静默丢弃这些字段。"""
 
     raw_fields = eom.get("additional_fields", [])
     if not isinstance(raw_fields, list) or any(
@@ -201,7 +201,7 @@ def _load_learning_config(
 
 
 def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSettings:
-    """Read one scenario's EOM settings, including V2 complex openings."""
+    """读取一个场景的 EOM 市场配置，包括 V2 复杂开市的配置。"""
     if not config_path.is_file():
         raise InputValidationError(f"Missing configuration file: {config_path}")
 

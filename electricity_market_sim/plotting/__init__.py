@@ -39,11 +39,10 @@ def generate_plots(
     output_dir: str | Path,
     learning_episode_label: str = "Actor evaluation",
 ) -> tuple[Path, ...]:
-    """Render durable PNG summaries from a complete simulation result.
+    """根据完整的仿真结果生成持久保存的 PNG 汇总图。
 
-    This function deliberately owns no simulation or CSV-writing work. Call it
-    only after ``write_results`` has completed so a rendering failure cannot
-    discard valid market results.
+    此函数刻意不承担任何仿真计算或 CSV 写出工作。只能在 ``write_results`` 完成后
+    调用，这样即使绘图失败，也不会丢失有效的市场结果。
     """
 
     results = tuple(
@@ -152,10 +151,10 @@ def generate_learning_plots(
     metrics_path: str | Path,
     output_dir: str | Path,
 ) -> tuple[Path, ...]:
-    """Render Version 5 learning curves and the Actor/baseline comparison.
+    """绘制第五版的学习曲线，以及 Actor 与基准策略的对比图。
 
-    The metrics CSV written by training or evaluation is the only input, so the
-    learning API keeps returning a plain ``SimulationResult``.
+    唯一的输入是训练或评估写出的指标 CSV，因此学习接口仍只返回普通的
+    ``SimulationResult``。
     """
 
     rows = _read_learning_metrics(Path(metrics_path))

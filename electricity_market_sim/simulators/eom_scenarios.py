@@ -35,7 +35,7 @@ def simulate_v1_v2_market(
     settings: MarketSettings,
     openings: tuple[MarketOpening, ...],
 ) -> SimulationResult:
-    """Calculate one V1/V2 scenario from validated settings and openings."""
+    """根据已校验的配置和开市安排，计算一个 V1/V2 场景。"""
 
     market = BaseMarket(input_path, settings, openings) # 创建对象，保存输入数据目录，
     market.prepare()
@@ -226,7 +226,7 @@ def simulate_v4_market(
     settings: MarketSettings,
     openings: tuple[MarketOpening, ...],
 ) -> SimulationResult:
-    """Calculate one V4 scenario with industrial rolling optimization."""
+    """计算一个包含工业滚动优化的 V4 场景。"""
 
     units = _load_and_validate_industrial_units(input_path, settings)
     extension = _IndustryMarketExtension(input_path, settings, units)

@@ -1,6 +1,7 @@
 """第一、二、四、五版共用的能量市场事件引擎和参与者扩展接口。
 按时间处理开市、交付开始与结束事件，并调用扩展完成额外报价、状态记录及结果汇总。"""
 
+from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -33,17 +34,17 @@ class EomMarketExtension(Protocol):
     settle_before_opening: bool
 
     def prepare(self, market: BaseMarket) -> EomExtensionInputs:
-        """Inspect loaded conventional participants and declare extra inputs."""
+        """检查已加载的常规参与者，并声明扩展所需的额外输入。"""
 
     def initialize(self, market: BaseMarket) -> None:
-        """Initialize after preflight, price forecasts and runtime states are ready."""
+        """在预检、价格预测和运行状态都准备就绪后进行初始化。"""
 
     def bids_for_products(
         self,
         products: tuple[tuple[datetime, datetime], ...],
         scheduled_results: dict[ScheduledProductKey, MarketClearingResult],
     ) -> tuple[DemandBid, ...]:
-        """Return extra demand orders for the opening."""
+        """返回本次开市的额外需求订单。"""
 
     def offers_for_plant(
         self,
@@ -53,16 +54,16 @@ class EomMarketExtension(Protocol):
         marginal_cost_at: Callable[[datetime], float],
         scheduled_results: dict[ScheduledProductKey, MarketClearingResult],
     ) -> tuple[SupplyOffer, ...] | None:
-        """Replace one plant's bids; None leaves conventional quoting in charge."""
+        """替换某台机组的报价；返回 None 时仍由常规报价逻辑负责。"""
 
     def record_delivery_start(self, result: MarketClearingResult) -> None:
-        """Receive the delivered product after its startup costs are attached."""
+        """在启动成本计入之后，接收开始交付的产品结果。"""
 
     def record_delivery(self, result: MarketClearingResult) -> None:
-        """Commit an ended delivery to the extension's state."""
+        """将已结束的交付写入扩展模块的状态。"""
 
     def finalize(self, result: SimulationResult) -> SimulationResult:
-        """Attach extension-specific results after all events have completed."""
+        """所有事件完成后，附加扩展模块特有的结果。"""
 
 
 def simulate_eom_market(market: BaseMarket) -> SimulationResult:

@@ -16,7 +16,7 @@ from .common import (
 def _market_price_series(
     results: tuple[MarketClearingResult, ...],
 ) -> tuple[list[float], str]:
-    """Return the price measure that exists for the market's settlement method."""
+    """根据市场的结算方式，返回该方式下存在的价格指标。"""
 
     uses_pay_as_bid = [market.pricing_method == "pay_as_bid" for market in results]
     if any(uses_pay_as_bid) and not all(uses_pay_as_bid):
@@ -138,11 +138,10 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
 
 
 def _plot_market_summary(pyplot, dates, results, path: Path) -> Path:
-    """Plot cleared EOM volume and the applicable price across all products.
+    """绘制所有产品的 EOM 出清电量及对应的价格。
 
-    Supply and demand are deliberately plotted separately even though a cleared
-    product balances them by definition.  The two series make that balance
-    visible and match the market-summary convention used by ASSUME.
+    尽管按定义每个已出清产品的供需相等，这里仍刻意分别绘制供给和需求。
+    两条曲线能直观展示这种平衡，也与 ASSUME 市场汇总图的惯例一致。
     """
 
     times = [market.delivery_start for market in results]
@@ -235,7 +234,7 @@ def _plot_market_summary(pyplot, dates, results, path: Path) -> Path:
 
 
 def _summary_row(values: list[float], unit: str, decimals: int) -> tuple[str, str, str]:
-    """Return display-ready minimum, maximum and mean values for a plot table."""
+    """返回可直接显示在图表表格中的最小值、最大值和平均值。"""
 
     finite_values = [value for value in values if isfinite(value)]
     if not finite_values:
@@ -248,7 +247,7 @@ def _summary_row(values: list[float], unit: str, decimals: int) -> tuple[str, st
 
 
 def _plot_first_pay_as_bid_order_book(pyplot, market, unit_colors, path: Path) -> Path:
-    """Plot one pay-as-bid supply book with traded energy and its average price."""
+    """绘制一个按报价结算市场的供给订单簿，并标出成交电量及其平均成交价格。"""
 
     figure, axis = pyplot.subplots(figsize=(11, 6.5))
     offers = sorted(

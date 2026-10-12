@@ -9,6 +9,7 @@
 市场订单、成交记录和单时段出清结果的数据结构定义在 market_models.py 中。
 """
 
+from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from .market_models import MarketClearingResult
@@ -137,10 +138,9 @@ class PowerPlant:
     min_down_time_hours: float = 1.0
 
     def marginal_cost(self, fuel_prices: dict[str, float]) -> float:
-        """Return the ASSUME-compatible variable marginal cost.
+        """返回与 ASSUME 一致的可变边际成本。
 
-        Input emission factors are interpreted per unit of fuel input, hence both
-        fuel and CO2 costs are divided by the electrical efficiency.
+        输入的排放因子按单位燃料投入计，因此燃料成本和 CO2 成本都要除以发电效率。
         """
 
         # Variable renewables in the supplied V2 examples have no fuel-price

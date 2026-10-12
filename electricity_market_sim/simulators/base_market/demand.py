@@ -26,7 +26,7 @@ def _elastic_demand_bids(
     delivery_start: datetime,
     delivery_end: datetime,
 ) -> list[DemandBid]:
-    """Discretise V2's isoelastic demand curve into descending-value buy bids."""
+    """将 V2 的等弹性需求曲线离散化为价格逐段递减的买单。"""
 
     assert demand_unit.max_power_mw is not None
     assert demand_unit.elasticity is not None

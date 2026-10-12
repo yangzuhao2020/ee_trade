@@ -37,7 +37,7 @@ class _ProcessCoefficients:
 
 
 def process_coefficients(unit: IndustrialUnit) -> _ProcessCoefficients:
-    """Return the linear material and electricity requirements per tonne steel."""
+    """返回每吨钢的线性原料需求和电力需求系数。"""
 
     dri = unit.eaf.specific_dri_demand
     hydrogen = dri * unit.dri_plant.specific_hydrogen_consumption
@@ -70,7 +70,7 @@ def _price(prices: dict[str, float], *names: str) -> float:
 def missing_industrial_price_names(
     fuel_price_profiles: dict[datetime, dict[str, float]],
 ) -> tuple[str, ...]:
-    """Return raw-material prices that will use the documented zero default."""
+    """返回缺少价格数据、将按文档规定默认取 0 的原料名称。"""
 
     columns = set(next(iter(fuel_price_profiles.values()), {}))
     missing: list[str] = []
@@ -113,7 +113,7 @@ def _ramp_constraint_rows(
     row_width: int,
     row_offset: int = 0,
 ) -> tuple[list[np.ndarray], list[float]]:
-    """Adjacent-step ramp-up/down rows, ordered by step then device."""
+    """生成相邻时步之间的上/下爬坡约束行，先按时步、再按设备排序。"""
 
     rows: list[np.ndarray] = []
     limits: list[float] = []
@@ -143,7 +143,7 @@ def maximum_industry_production(
     products: tuple[tuple[datetime, datetime], ...],
     initial_powers_mw: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> float:
-    """Maximize steel production under device capacity and ramp constraints."""
+    """在设备容量和爬坡约束下最大化钢产量。"""
 
     if not products:
         return 0.0
@@ -414,7 +414,7 @@ def optimize_industry_window(
     tuple[IndustrialFlexibilityResult, ...],
     IndustrialOptimizationWindowResult,
 ]:
-    """Solve one rolling baseline and pointwise flexibility bounds."""
+    """求解一个滚动窗口的基准计划，以及逐时段的灵活性上下界。"""
 
     maximum = maximum_industry_production(
         unit, remaining_products, initial_powers_mw
@@ -539,7 +539,7 @@ def dispatch_industry(
     plan: IndustrialPlan,
     accepted_energy_mwh: float,
 ) -> IndustrialDispatchResult:
-    """Scale a planned production chain by its accepted purchase ratio."""
+    """按购电量的成交比例缩放计划生产链的产量。"""
 
     if accepted_energy_mwh < -_TOLERANCE or (
         accepted_energy_mwh > plan.planned_energy_mwh + _TOLERANCE
@@ -720,7 +720,7 @@ class IndustryRollingCoordinator:
         products: tuple[tuple[datetime, datetime], ...],
         scheduled_results: dict[tuple[datetime, datetime, datetime], MarketClearingResult],
     ) -> list[DemandBid]:
-        """Ensure committed plans exist and create non-negative industrial bids."""
+        """确保已有承诺计划，并生成非负的工业购电报价。"""
 
         bids: list[DemandBid] = []
         eligible_products = tuple(
@@ -758,7 +758,7 @@ class IndustryRollingCoordinator:
         return bids
 
     def record_delivery(self, result: MarketClearingResult) -> None:
-        """Apply one completed product to actual steel production."""
+        """将一个已完成交付的产品计入实际钢产量。"""
 
         for unit in self.units:
             key = (unit.name, result.delivery_start)
@@ -775,7 +775,7 @@ class IndustryRollingCoordinator:
             self.delivered.add(key)
 
     def validate_completion(self) -> None:
-        """Reject a run whose final market deliveries cannot satisfy steel demand."""
+        """最终的市场交付无法满足钢需求时，拒绝本次运行（抛出异常）。"""
 
         for unit in self.units:
             shortfall = unit.demand_t - self.actual_steel_t[unit.name]

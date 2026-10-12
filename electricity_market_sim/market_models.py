@@ -73,7 +73,7 @@ class DemandBid:
 
     @property
     def identifier(self) -> str:
-        """Return a stable order identifier for detailed demand reporting."""
+        """返回稳定的订单标识，供需求明细结果报告使用。"""
 
         return self.bid_id or self.unit_name
 
@@ -107,7 +107,7 @@ class SupplyOffer:
     parent_bid_id: str | None = None
 
     def __post_init__(self) -> None:
-        """Enforce the deliberately narrow V2 minimum-acceptance contract."""
+        """校验交付时长、报价功率、电量、价格、边际成本和报价类型，并强制执行 V2 有意收窄的最小接受比例约定。"""
 
         if self.delivery_end <= self.delivery_start:
             raise ValueError("A supply offer must have a positive delivery duration.")
@@ -130,12 +130,12 @@ class SupplyOffer:
 
     @property
     def identifier(self) -> str:
-        """Return the unique order key, retaining V1's unit-name default."""
+        """返回唯一的订单键；沿用 V1 的默认做法，未指定时使用机组名称。"""
         return self.offer_id or self.unit_name
 
     @property
     def complex_identifier(self) -> str:
-        """Return the order identity shared by legs of a block bid."""
+        """返回块报价各分段共用的订单标识。"""
         return self.bid_id or self.identifier
 
     @property
@@ -169,7 +169,7 @@ class ClearedSupplyOffer:
 
     @property
     def total_cost_eur(self) -> float:
-        """Variable cost plus a possible whole-unit startup cost."""
+        """可变成本加上可能产生的整台机组启动成本。"""
         return self.variable_cost_eur + self.startup_cost_eur
 
     @property
@@ -208,7 +208,7 @@ def sum_cleared_demand(
     demand_type: str | None = None,
     bid_type: str | None = None,
 ) -> float:
-    """Sum a demand field in order, before or after assembling a market result."""
+    """按顺序累加需求出清结果的某个字段，组装市场结果之前或之后都可使用。"""
     value_of = attrgetter(attribute)
     return sum(
         value_of(demand)
@@ -259,7 +259,7 @@ class MarketClearingResult:
     trades: tuple[Trade, ...] = ()
 
     def __post_init__(self) -> None:
-        """Guard the physical and financial quantities used by reporting and plots."""
+        """校验结果报告和绘图所用的物理量与财务量。"""
         if self.delivery_end <= self.delivery_start:
             raise ValueError("A market product must have a positive delivery duration.")
         if self.opening_time is not None and self.opening_time > self.delivery_start:
@@ -412,7 +412,7 @@ class MarketClearingResult:
 
     @property
     def duration_hours(self) -> float:
-        """Delivery duration used to convert energy quantities into power."""
+        """交付时长（小时），用于将电量换算为功率。"""
         return hours_between(self.delivery_start, self.delivery_end)
 
     @property
@@ -435,7 +435,7 @@ class MarketClearingResult:
 
     @property
     def unserved_demand_mwh(self) -> float:
-        """All unaccepted demand, including price-responsive elastic bids."""
+        """全部未被接受的需求，包括对价格敏感的弹性需求报价。"""
         return self.demand_total("unserved_energy_mwh")
 
     @property
@@ -480,7 +480,7 @@ class MarketClearingResult:
 
     @property
     def net_exchange_mwh(self) -> float:
-        """Positive values are net imports into the local market."""
+        """正值表示向本地市场的净进口。"""
 
         return self.cleared_import_mwh - self.cleared_export_mwh
 
@@ -512,7 +512,7 @@ class MarketClearingResult:
         )
 
     def _validate_trades(self) -> None:
-        """Reconcile immutable trades with accepted order quantities and prices."""
+        """核对不可变的成交记录与订单的成交电量和价格是否一致。"""
 
         if any(
             trade.delivery_start != self.delivery_start

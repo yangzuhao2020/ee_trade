@@ -426,10 +426,10 @@ def plan_household_opening(
     dict[str, tuple[HouseholdPlan, ...]],
     dict[str, tuple[HouseholdFlexibilityResult, ...]],
 ]:
-    """Build each household's problem once for baseline plans and flexibility.
+    """每个家庭的优化问题只构建一次，同时用于求解基准计划和灵活性。
 
-    Baselines are solved for every household before any flexibility bound, so
-    failure ordering matches calling the public entry points per phase.
+    先为所有家庭求解基准计划，再求解任何灵活性上下界，因此出错的先后顺序
+    与按阶段分别调用各公开入口函数时一致。
     """
 
     problems: dict[str, _HouseholdProblem] = {}
@@ -486,7 +486,7 @@ def dispatch_household(
     initial_battery_charge_power_mw: float = 0.0,
     initial_battery_discharge_power_mw: float = 0.0,
 ) -> tuple[HouseholdDispatchResult, ...]:
-    """Apply fixed market acceptances and update physical SOC sequentially."""
+    """按已确定的市场成交结果执行调度，并按时间顺序依次更新实际 SOC。"""
 
     energy = initial_energy_mwh
     previous_heat_pump = initial_heat_pump_power_mw

@@ -20,7 +20,7 @@ from .common import (
 def clear_pay_as_bid(
     demand_bids: list[DemandBid], supply_offers: list[SupplyOffer]
 ) -> MarketClearingResult:
-    """Clear one product and settle every match at the seller's offer price."""
+    """对单个产品出清，每笔撮合成交都按卖方报价结算。"""
 
     if not demand_bids and not supply_offers:
         raise ValueError("Cannot clear an empty market.")

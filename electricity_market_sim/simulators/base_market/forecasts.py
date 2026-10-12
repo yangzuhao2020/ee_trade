@@ -25,7 +25,7 @@ def _naive_price_forecasts(
     exchange_profiles: dict[datetime, ExchangeSchedule],
     forecast_starts: set[datetime] | None = None,
 ) -> dict[datetime, float]:
-    """Calculate naïve EOM prices needed by plant and storage strategies."""
+    """计算机组和储能报价策略所需的简单（naïve）EOM 价格预测。"""
 
     if forecast_starts is None:
         forecast_starts = {
@@ -75,10 +75,11 @@ def _forecast_starts(
     extra_forecast_offsets: tuple[int, ...] = (),
     requires_storage_price_forecast: bool = False,
 ) -> set[datetime]:
-    """Forecast timestamps each enabled strategy family needs for deliveries.
+    """返回各个已启用的策略类别为给定交付时段所需的预测时间点。
 
-    Plants look _FORECAST_HOURS + 1 hours ahead. Extensions declare their
-    offsets explicitly; storage adds a symmetric window clipped to the horizon.
+    机组需要从交付开始时刻起共 _FORECAST_HOURS + 1 个小时的预测。扩展模块显式
+    声明各自所需的时间偏移；储能额外需要以交付时刻为中心的对称窗口，并截取在
+    仿真时间范围内。
     """
 
     starts: set[datetime] = set()
@@ -123,7 +124,7 @@ def _opening_coverage_issues(
     extra_forecast_offsets: tuple[int, ...] = (),
     requires_storage_price_forecast: bool = False,
 ) -> list[str]:
-    """Return every known reason an opening cannot be quoted completely."""
+    """返回一次开市无法完整报价的全部已知原因。"""
 
     issues: list[str] = []
     delivery_times = {delivery_start for delivery_start, _ in opening.products}

@@ -223,7 +223,7 @@ def _plot_storage_dispatch(
     storage_results: tuple[StorageDispatchResult, ...],
     path: Path,
 ) -> Path:
-    """Plot delivered storage power and the resulting physical SOC trajectory."""
+    """绘制储能实际交付的功率及由此形成的实际 SOC 轨迹。"""
 
     by_unit: dict[str, list[StorageDispatchResult]] = defaultdict(list)
     for storage in storage_results:

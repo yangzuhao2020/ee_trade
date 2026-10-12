@@ -14,7 +14,7 @@ def _plot_industry_dispatch(
     flexibility_results: tuple[IndustrialFlexibilityResult, ...],
     path: Path,
 ) -> Path:
-    """Plot committed industrial plans, execution, and pointwise power bounds."""
+    """绘制工业用户的承诺计划、实际执行情况以及逐时段的功率上下界。"""
 
     dispatch_by_unit: dict[str, list[IndustrialDispatchResult]] = defaultdict(list)
     for result in results:

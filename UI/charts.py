@@ -62,10 +62,9 @@ def has_results(run_dir: Path) -> bool:
 
 
 def load_run(run_dir: Path) -> dict[str, pd.DataFrame]:
-    """Read the CSV tables of one run directory, parsing timestamp columns.
+    """读取一次运行目录下的各个 CSV 表，并解析时间列。
 
-    Optional tables that are missing or have no rows are left out, so the charts
-    depending on them are skipped.
+    缺失或没有数据行的可选表会被略过，依赖这些表的图表也随之跳过。
     """
 
     tables = {}
@@ -87,7 +86,7 @@ def load_run(run_dir: Path) -> dict[str, pd.DataFrame]:
 
 
 def build_charts(tables: dict[str, pd.DataFrame]) -> list[go.Figure]:
-    """Return every chart that applies to the run, in display priority order."""
+    """按显示优先级顺序，返回适用于本次运行的所有图表。"""
 
     if tables["market"].empty:
         return []
@@ -354,7 +353,7 @@ def industry_dispatch(tables: dict[str, pd.DataFrame]) -> go.Figure:
 
 
 def pay_as_bid_order_book(tables: dict[str, pd.DataFrame]) -> go.Figure:
-    """Supply order book of the first product; pay-as-bid markets only have plant offers."""
+    """第一个产品的供给订单簿；按报价结算市场中只有发电机组的报价。"""
 
     market = tables["market"].iloc[0]
     start = market["delivery_start"]
@@ -404,7 +403,7 @@ def pay_as_bid_order_book(tables: dict[str, pd.DataFrame]) -> go.Figure:
 
 
 def _price(market: pd.DataFrame) -> tuple[pd.Series, str]:
-    """Return the price measure that exists for the market's settlement method."""
+    """根据市场的结算方式，返回该方式下存在的价格指标。"""
 
     if (market["pricing_method"] == "pay_as_bid").all():
         return market["average_trade_price_eur_per_mwh"], "Average trade price"
@@ -412,7 +411,7 @@ def _price(market: pd.DataFrame) -> tuple[pd.Series, str]:
 
 
 def _demand_by_type(tables: dict[str, pd.DataFrame], column: str) -> pd.DataFrame:
-    """Sum one demand_results.csv column per market product (row) and demand type."""
+    """按市场产品（行）和需求类型，汇总 demand_results.csv 中的某一列。"""
 
     return (
         tables["demand"]
@@ -424,7 +423,7 @@ def _demand_by_type(tables: dict[str, pd.DataFrame], column: str) -> pd.DataFram
 
 
 def _accepted_supply(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Accepted power and energy per unit and product across all supply offer types."""
+    """跨所有供给报价类型，统计每个单元在每个产品上被接受的功率和电量。"""
 
     columns = ["delivery_start", "unit_name", "power_mw", "energy_mwh"]
     unit = tables["unit"]
@@ -450,7 +449,7 @@ def _accepted_supply(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def _line(x, y, name: str, color: str, *, shape: str = "hvh", dash: str | None = None, width: float = 1.5, **trace) -> go.Scatter:
-    """A line trace; the default "hvh" shape steps at midpoints like matplotlib's where="mid"."""
+    """创建一条折线轨迹；默认的 "hvh" 形状在中点处换阶，效果类似 matplotlib 的 where="mid"。"""
 
     return go.Scatter(
         x=x,
@@ -463,7 +462,7 @@ def _line(x, y, name: str, color: str, *, shape: str = "hvh", dash: str | None =
 
 
 def _segments(starts, ends, book: pd.DataFrame, name: str, color: str, width: float) -> go.Scatter:
-    """Horizontal order-book segments, with a midpoint so hovering anywhere shows the offer."""
+    """绘制订单簿的水平线段，并为每段加入中点，使悬停在线段任意位置都能显示该报价。"""
 
     x, y, text = [], [], []
     for start, end, price, unit in zip(starts, ends, book["bid_price_eur_per_mwh"], book["unit_name"]):
@@ -482,7 +481,7 @@ def _segments(starts, ends, book: pd.DataFrame, name: str, color: str, width: fl
 
 
 def _repeat_last(values: pd.Series) -> list[float]:
-    """Repeat the final value so a step line also covers the last delivery product."""
+    """重复最后一个值，使阶梯线也能覆盖最后一个交付产品。"""
 
     values = values.tolist()
     return [*values, values[-1]]

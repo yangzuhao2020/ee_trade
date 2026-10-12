@@ -24,7 +24,7 @@ _FORECAST_HOURS = 12
 def _learning_plant(
     settings: MarketSettings, plants: tuple[PowerPlant, ...]
 ) -> PowerPlant | None:
-    """Validate and return Version 5's sole learning participant."""
+    """校验并返回第五版唯一的学习型参与者。"""
 
     learning_plants = tuple(
         plant
@@ -75,7 +75,7 @@ def _residual_load_forecasts(
     plants: tuple[PowerPlant, ...],
     availability_profiles: dict[str, dict[datetime, float]],
 ) -> dict[datetime, float]:
-    """Return demand minus forecast wind/solar production for each hour."""
+    """返回每小时的需求减去风电/光伏预测出力后的结果。"""
 
     variable_renewables = tuple(
         plant
@@ -219,7 +219,7 @@ def simulate_v5_market(
     learning_load_base_mw: float | None = None,
     learning_enforce_action_bounds: bool = True,
 ) -> SimulationResult:
-    """Prepare a conventional market with deterministic or training policy hooks."""
+    """准备一个挂接了确定性策略或训练策略钩子的常规市场。"""
 
     market = BaseMarket(input_path, settings, openings)
     market.prepare(_LearningMarketExtension(

@@ -26,7 +26,7 @@ TransitionConsumer = Callable[[LearningTransition], None]
 
 
 def calculate_load_base(residual_loads_mw: Sequence[float]) -> float:
-    """Return the fixed signed-load normalization base for the training split."""
+    """返回训练数据段使用的固定的带符号负荷归一化基数。"""
 
     values = tuple(float(value) for value in residual_loads_mw)
     if not values or any(not isfinite(value) for value in values):
@@ -48,7 +48,7 @@ def build_learning_observation(
     load_base_mw: float,
     price_scale_eur_per_mwh: float = PRICE_SCALE_EUR_PER_MWH,
 ) -> tuple[float, ...]:
-    """Build the documented 38-vector, rejecting incomplete future windows."""
+    """构建文档规定的 38 维观测向量；未来时间窗口的数据不完整时报错。"""
 
     if rated_power_mw <= 0 or load_base_mw <= 0:
         raise ValueError("Rated power and load base must be positive.")
@@ -102,7 +102,7 @@ def _validated_learning_action(action: Sequence[float]) -> np.ndarray:
 
 
 def clip_learning_action(action: Sequence[float]) -> tuple[float, float]:
-    """Validate and clip the executed two-dimensional action."""
+    """校验并裁剪实际执行的二维动作。"""
 
     values = _validated_learning_action(action)
     clipped = np.clip(values, -1.0, 1.0)
@@ -119,10 +119,10 @@ def learning_offers(
     action: tuple[float, float],
     price_scale_eur_per_mwh: float = PRICE_SCALE_EUR_PER_MWH,
 ) -> tuple[SupplyOffer, ...]:
-    """Map an executed action to independently clearable minimum/flexible offers.
+    """将实际执行的动作映射为可各自独立出清的最低出力段报价和灵活出力段报价。
 
-    The caller must validate two finite values and apply any required bounds.
-    Action order is retained in experience; only the offer prices are sorted.
+    调用方必须先校验这两个值都是有限数，并施加所需的边界限制。
+    经验数据中保留动作的原始顺序，只对报价价格进行排序。
     """
     if available_power_mw < plant.min_power_mw - _POWER_TOLERANCE_MW:
         return ()
@@ -152,7 +152,7 @@ def learning_offers(
 
 
 def _valid_clearing_price(market_result: MarketClearingResult) -> float | None:
-    """Return the EOM price, or None when no accepted supply order set it."""
+    """返回 EOM 出清价格；没有被接受的供给报价确定该价格时返回 None。"""
 
     price = market_result.clearing_price_eur_per_mwh
     if (
@@ -174,7 +174,7 @@ def learning_step_result(
     action: tuple[float, float],
     available_power_mw: float,
 ) -> LearningStepResult:
-    """Calculate profit, regret shaping, and normalized reward after clearing."""
+    """出清后计算利润、遗憾（regret）塑形项和归一化奖励。"""
 
     price = _valid_clearing_price(market_result)
     if price is None:
@@ -274,7 +274,7 @@ class LearningEpisodeSession:
         next_state: tuple[float, ...],
         done: bool,
     ) -> None:
-        """Publish one completed transition exactly once."""
+        """发布一个已完成的状态转移，每个转移只发布一次。"""
 
         if delivery_start in self._emitted_starts:
             return
@@ -300,7 +300,7 @@ class LearningEpisodeSession:
     def _emit_previous_transition(
         self, delivery_start: datetime, state: tuple[float, ...]
     ) -> None:
-        """Complete the preceding step before requesting the current action."""
+        """在请求当前动作之前，先完成上一步的状态转移。"""
 
         pending_starts = sorted(self._pending.keys() - self._emitted_starts)
         if not pending_starts:

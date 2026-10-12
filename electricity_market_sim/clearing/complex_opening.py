@@ -40,12 +40,11 @@ def clear_complex_opening(
     supply_offers: list[SupplyOffer],
     storage_contexts: tuple[StorageClearingContext, ...] = (),
 ) -> tuple[MarketClearingResult, ...]:
-    """Jointly clear all products of one complex EOM market opening.
+    """对一次复杂 EOM 开市中的所有产品进行联合出清。
 
-    The solver follows the V2 ASSUME-compatible process: solve the order-book
-    MILP, fix block accept/reject decisions, recover hourly prices from the
-    balance-constraint duals of the resulting LP, then remove exactly one
-    lowest-surplus accepted BB or linked family and repeat when necessary.
+    求解流程与 V2 兼容 ASSUME 的做法一致：先求解订单簿 MILP，固定块报价的接受/拒绝决策，
+    再从所得 LP 的供需平衡约束对偶值中恢复各交付时段的价格；必要时每轮只移除一个
+    剩余（surplus）最低的已接受块报价（BB）或关联报价族，然后重新出清。
     """
 
     _require_complex_optimizer()
@@ -122,7 +121,7 @@ def clear_complex_opening(
 
 
 def _validate_complex_offers(supply_offers: list[SupplyOffer]) -> None:
-    """Validate relationships which only exist in a complex opening."""
+    """校验只在复杂开市中才存在的报价关系。"""
 
     offer_ids_by_product: dict[tuple, set[str]] = defaultdict(set)
     parent_ids = {
@@ -153,12 +152,11 @@ def _solve_complex_order_book(
     product_rows: dict[tuple, int],
     storage_contexts: tuple[StorageClearingContext, ...] = (),
 ) -> tuple[dict[str, float], list[float], dict[tuple, float]]:
-    """Solve MILP then LP and return energy acceptances and dual prices.
+    """先求解 MILP 再求解 LP，返回各订单的成交电量和对偶价格。
 
-    Storage energy variables describe the end of every product.  Their balance
-    equations use accepted grid-side charge and discharge energy, so rejected
-    bids never change SOC and a multi-product opening cannot over-charge or
-    over-discharge a unit.
+    储能电量变量表示每个产品结束时的储能量。其电量平衡方程使用电网侧被接受的
+    充电和放电电量，因此被拒绝的报价不会改变 SOC，多产品开市也不会使储能单元
+    过充或过放。
     """
 
     variables: list[dict] = []
@@ -387,7 +385,7 @@ def _lowest_negative_parent_bid(
     accepted_supply: dict[str, float],
     prices: dict[tuple, float],
 ) -> str | None:
-    """Return the parent/standalone BB to remove in this re-clearing round."""
+    """返回本轮重新出清需要移除的父块报价或独立块报价（BB）。"""
 
     blocks: dict[str, list[SupplyOffer]] = defaultdict(list)
     children: dict[str, list[SupplyOffer]] = defaultdict(list)
@@ -430,7 +428,7 @@ def _complex_results(
     prices: dict[tuple, float],
     products: tuple[tuple, ...],
 ) -> tuple[MarketClearingResult, ...]:
-    """Project a jointly solved opening back into one result per product."""
+    """将联合求解的开市结果拆分回每个产品各自的出清结果。"""
 
     results: list[MarketClearingResult] = []
     for delivery_start, delivery_end in products:

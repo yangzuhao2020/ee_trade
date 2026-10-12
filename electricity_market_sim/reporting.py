@@ -65,7 +65,10 @@ def _write_rows(path: Path, fields: list[str], rows: Iterable[dict[str, str]]) -
 
 
 def write_results(output_dir: Path, simulation_result: SimulationResult) -> None:
-    """Write complete unit summaries and split/constrained offers by opening."""
+    """写出市场、需求、机组和运营商结果 CSV，并按需写出外部电网、储能、报价明细、家庭、工业和学习结果。
+
+    机组汇总保留全部机组；报价明细只按开市保留分段或带约束的报价。本次未写出的可选结果文件会被删除。
+    """
 
     output_dir.mkdir(parents=True, exist_ok=True)
     sorted_results = sorted(

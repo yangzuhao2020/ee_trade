@@ -67,7 +67,7 @@ def _optional_float(
     path: Path,
     row_number: int,
 ) -> float:
-    """Read an optional numeric CSV column, using the documented V2 default."""
+    """读取可选的数值型 CSV 列；列缺失或为空时返回文档规定的 V2 默认值。"""
 
     raw = row.get(column)
     if raw is None or not raw.strip():
@@ -86,7 +86,7 @@ def _optional_float(
 
 
 def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
-    """Read V1 naïve and V2 heuristic plants from `powerplant_units.csv`."""
+    """从 `powerplant_units.csv` 读取 V1 简单报价（naïve）、V2 启发式报价和 V5 学习报价的发电机组。"""
 
     rows = _read_rows(path)
     plants: list[PowerPlant] = []
@@ -158,7 +158,7 @@ def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
 
 
 def load_storage_units(path: Path) -> tuple[StorageUnit, ...]:
-    """Read optional V2 storage participants from ``storage_units.csv``."""
+    """从 ``storage_units.csv`` 读取可选的 V2 储能参与者。"""
 
     if not path.is_file():
         return ()
@@ -275,7 +275,7 @@ def load_storage_units(path: Path) -> tuple[StorageUnit, ...]:
 
 
 def load_demand_units(path: Path) -> tuple[DemandUnit, ...]:
-    """Read EOM demand participants and ignore rows belonging only to CRM."""
+    """读取 EOM 需求参与者，忽略只属于 CRM 的行。"""
 
     rows = _read_rows(path)
     units: list[DemandUnit] = []
@@ -424,7 +424,7 @@ def _devices_by_technology(
 
 
 def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
-    """Merge heat-pump and battery rows into building-level V3 participants."""
+    """将热泵行和电池行合并为以建筑为单位的 V3 参与者。"""
 
     if not path.is_file():
         return ()
@@ -594,7 +594,7 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
 
 
 def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
-    """Merge electrolyser, DRI, and EAF rows into steel-plant participants."""
+    """将电解槽、DRI（直接还原铁）和 EAF（电弧炉）行合并为钢厂参与者。"""
 
     if not path.is_file():
         return ()
@@ -867,11 +867,11 @@ def _by_column(
 def _hourly_means(
     rows: dict[datetime, dict[str, float]], columns: Sequence[str]
 ) -> dict[str, dict[datetime, float]]:
-    """Average the available samples in each hour with equal sample weights.
+    """对每个小时内的可用样本按相同权重求平均。
 
-    Partial hours and irregular sampling are accepted. A single sample represents
-    its whole hour; an hour with no samples remains absent. This is not a
-    time-weighted average or the complete-bucket policy of aligned profiles.
+    允许不完整的小时和不规则采样。只有一个样本时，该样本代表整个小时；没有样本的
+    小时不会出现在结果中。这既不是按时间加权的平均，也不同于对齐曲线所用的
+    “时段数据必须完整”规则。
     """
 
     buckets: dict[str, dict[datetime, list[float]]] = {
@@ -912,7 +912,7 @@ def load_time_series_profiles(
     *,
     warn_unused_columns: bool = False,
 ) -> dict[str, dict[datetime, float]]:
-    """Load exact-resolution V3 profiles without hourly aggregation."""
+    """按原始分辨率读取 V3 时间序列曲线，不做小时聚合。"""
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
@@ -945,12 +945,11 @@ def load_aligned_time_series_profiles(
     required_columns: tuple[str, ...],
     product_duration: timedelta,
 ) -> dict[str, dict[datetime, float]]:
-    """Load numeric profiles at product resolution, averaging finer data.
+    """按产品分辨率读取数值曲线，更细粒度的数据取平均值。
 
-    The source cadence must be regular and divide the market product duration.
-    A product bucket is retained only when all expected source observations are
-    present, so later product lookup reports missing input instead of averaging
-    an incomplete interval.
+    源数据的时间间隔必须固定，并且能整除市场产品时长。只有当某个产品时段内
+    预期的源数据点全部存在时才保留该时段，这样后续按产品查找时会报告输入缺失，
+    而不是对不完整的区间求平均。
     """
 
     exact = load_time_series_profiles(path, required_columns)
@@ -1006,7 +1005,7 @@ def load_aligned_time_series_profiles(
 def load_aligned_fuel_price_profiles(
     path: Path, product_duration: timedelta
 ) -> dict[datetime, dict[str, float]]:
-    """Load every fuel-price column at the configured product resolution."""
+    """按配置的产品分辨率读取所有燃料价格列。"""
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
@@ -1034,7 +1033,7 @@ def load_aligned_fuel_price_profiles(
 
 
 def load_fuel_price_profiles(path: Path) -> dict[datetime, dict[str, float]]:
-    """Load time-indexed fuel and CO2 prices used by the 15-minute scenario."""
+    """读取 15 分钟场景使用的、按时间索引的燃料价格和 CO2 价格。"""
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
@@ -1052,7 +1051,7 @@ def load_fuel_price_profiles(path: Path) -> dict[datetime, dict[str, float]]:
 def load_exact_availability_profiles(
     path: Path, plants: tuple[PowerPlant, ...]
 ) -> dict[str, dict[datetime, float]]:
-    """Load exact plant-name profiles; absent plants use availability 1.0."""
+    """按原始分辨率读取以机组名称为列的可用率曲线；没有曲线的机组可用率按 1.0 处理。"""
 
     if not path.is_file():
         return {}
@@ -1066,7 +1065,7 @@ def load_exact_availability_profiles(
 
 
 def load_exchange_unit(path: Path) -> ExchangeUnit:
-    """Read exactly one v1 Exchange participant from `exchange_units.csv`."""
+    """从 `exchange_units.csv` 读取唯一一个 V1 外部电网（Exchange）参与者。"""
 
     rows = _read_rows(path)
     if len(rows) != 1:
@@ -1090,7 +1089,7 @@ def load_exchange_unit(path: Path) -> ExchangeUnit:
 
 
 def load_fuel_prices(path: Path) -> dict[str, float]:
-    """Read the v1 static `fuel_prices_df.csv` layout into a price mapping."""
+    """将 V1 静态格式的 `fuel_prices_df.csv` 读取为“燃料 → 价格”映射。"""
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
@@ -1145,7 +1144,7 @@ def _hour_start(timestamp: datetime) -> datetime:
 def load_hourly_demand_profiles(
     path: Path, demand_units: tuple[DemandUnit, ...]
 ) -> dict[str, dict[datetime, float]]:
-    """Load MW data using equal-weight hourly means of the available samples."""
+    """读取需求功率（MW）数据，按小时对可用样本求等权平均。"""
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
@@ -1171,10 +1170,10 @@ def load_hourly_demand_profiles(
 def load_hourly_availability_profiles(
     path: Path, plants: tuple[PowerPlant, ...]
 ) -> dict[str, dict[datetime, float]]:
-    """Load optional 0--1 factors using equal-weight means of available samples.
+    """读取可选的 0～1 可用率系数，按小时对可用样本求等权平均。
 
-    A plant with no column uses availability 1.0.  A plant with a column must
-    provide every delivery hour that the simulation or its price forecast uses.
+    没有对应列的机组可用率为 1.0。有对应列的机组必须提供仿真及其价格预测
+    用到的每一个交付小时。
     """
 
     if not path.is_file():
@@ -1208,7 +1207,7 @@ def load_hourly_availability_profiles(
 def load_hourly_exchange_profiles(
     path: Path, exchange_unit: ExchangeUnit
 ) -> dict[datetime, ExchangeSchedule]:
-    """Load exchange MW using equal-weight hourly means of available samples."""
+    """读取外部电网交换功率（MW），按小时对可用样本求等权平均。"""
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")

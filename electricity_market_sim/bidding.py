@@ -1,5 +1,6 @@
 """发电机组与储能的运行状态管理、机组可用容量计算及报价生成。"""
 
+from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta

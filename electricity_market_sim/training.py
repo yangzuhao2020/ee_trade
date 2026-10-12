@@ -468,7 +468,7 @@ def _write_metrics(path: Path, metrics: list[_EpisodeMetrics]) -> None:
 
 
 def _write_run_summary(path: Path, metrics: list[_EpisodeMetrics]) -> None:
-    """Write final evaluation means and population standard deviations."""
+    """写出最终评估指标的均值和总体标准差。"""
 
     evaluations = [item for item in metrics if item.phase in {"evaluation", "baseline"}]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -508,7 +508,7 @@ def _restore_best_checkpoint(
     expected_seed: int | None,
     expected_load_base_mw: float,
 ) -> None:
-    """Copy the genuine companion best checkpoint without changing the Agent."""
+    """复制与之配套且真实匹配的最佳检查点，不改变 Agent。"""
 
     candidates = [destination]
     companion = (
@@ -568,7 +568,7 @@ def _learning_config(settings: MarketSettings) -> LearningConfig:
 
 
 def _independent_run_seed(base_seed: int | None, run: int) -> int:
-    """Offset the scenario seed per run, or draw a recorded seed when it is null."""
+    """按运行序号偏移场景随机种子；场景种子为 null 时随机生成一个会被记录的种子。"""
 
     if base_seed is None:
         return int(np.random.SeedSequence().generate_state(1)[0])
@@ -576,7 +576,7 @@ def _independent_run_seed(base_seed: int | None, run: int) -> int:
 
 
 def _marginal_cost_action(state: tuple[float, ...]) -> tuple[float, float]:
-    """Quote both Version 5 segments at the observed marginal cost."""
+    """第五版的两个报价段都按观测到的边际成本报价。"""
 
     normalized_marginal_cost = state[-1]
     return normalized_marginal_cost, normalized_marginal_cost
@@ -593,7 +593,7 @@ def _evaluate_actor_and_baseline(
     gamma: float,
     run: int,
 ) -> tuple[SimulationResult, list[_EpisodeMetrics]]:
-    """Run deterministic Actor and marginal-cost baseline on fresh markets."""
+    """在全新的市场上分别运行确定性 Actor 和边际成本基准策略。"""
 
     actor_runner = LearningEpisodeRunner(
         input_path, scenario=scenario, load_base_mw=load_base_mw
@@ -639,7 +639,7 @@ def _train_single_run(
     checkpoint_path: str | Path | None = None,
     training_episodes: int | None = None,
 ) -> tuple[SimulationResult, list[_EpisodeMetrics], Path, Path, float]:
-    """Train and evaluate one statistically independent MATD3 run."""
+    """训练并评估一次统计上独立的 MATD3 运行。"""
 
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
     config = _learning_config(settings)
@@ -808,7 +808,7 @@ def train_learning_scenario(
     training_episodes: int | None = None,
     independent_runs: int | None = None,
 ) -> SimulationResult:
-    """Train independent MATD3 runs and evaluate the best validated Actor."""
+    """训练多次独立的 MATD3 运行，并评估验证结果最好的 Actor。"""
 
     input_path = Path(input_dir)
     output_path = Path(output_dir)
@@ -892,7 +892,7 @@ def evaluate_learning_scenario(
     *,
     checkpoint_path: str | Path | None = None,
 ) -> SimulationResult:
-    """Compare the best Actor with an update-free marginal-cost baseline."""
+    """将最佳 Actor 与不更新参数的边际成本基准策略进行对比。"""
 
     input_path = Path(input_dir)
     output_path = Path(output_dir)

@@ -31,7 +31,7 @@ def simulate_household_market(
     settings: MarketSettings,
     openings: tuple[MarketOpening, ...],
 ) -> SimulationResult:
-    """Run the V3 15-minute household and pay-as-bid trading path."""
+    """运行 V3 的 15 分钟家庭用户及按报价结算（pay-as-bid）交易流程。"""
 
     plants = load_powerplants(input_path / "powerplant_units.csv")
     unsupported_plants = [

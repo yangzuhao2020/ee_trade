@@ -1,5 +1,6 @@
 """发电机组可用出力与报价生成、策略配置校验、启动成本结算及交付后的运行状态更新。"""
 
+from __future__ import annotations
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime
@@ -69,7 +70,7 @@ def _apply_startup_costs(
     plants: tuple[PowerPlant, ...],
     runtime_states: dict[str, PlantRuntimeState],
 ) -> MarketClearingResult:
-    """Attach a startup cost when an accepted product begins delivery."""
+    """已成交的产品开始交付时，为需要启动的机组计入启动成本。"""
 
     plants_by_name = {plant.name: plant for plant in plants}
     accepted_by_plant: dict[str, float] = defaultdict(float)
@@ -113,7 +114,7 @@ def _record_runtime_states(
     market_result: MarketClearingResult,
     runtime_states: dict[str, PlantRuntimeState],
 ) -> None:
-    """Commit actual dispatch only after the product's delivery period ends."""
+    """仅在产品的交付时段结束后，才将实际调度结果写入机组运行状态。"""
 
     accepted_by_plant: dict[str, float] = defaultdict(float)
     for cleared in market_result.offers:

@@ -32,7 +32,7 @@ def _validate_price_limits(
 def validate_offer_prices(
     offers: list[SupplyOffer], settings: MarketSettings
 ) -> None:
-    """Reject supply prices outside the configured market limits."""
+    """供给报价价格超出市场配置的价格上下限时报错。"""
 
     _validate_price_limits(offers, "bid_price_eur_per_mwh", "Bid price", settings)
 
@@ -76,7 +76,7 @@ def _single_product(
 
 
 def _demand_totals(cleared_demands: tuple[ClearedDemandBid, ...]) -> dict[str, float]:
-    """Shared result fields; retain each algorithm's own traded-energy sum."""
+    """计算各出清算法共用的结果字段：申报需求总量、未满足的刚性负荷和未完成的出口量；成交电量仍由各算法自行汇总。"""
 
     return {
         "requested_demand_mwh": sum_cleared_demand(cleared_demands, "bid.volume_mwh"),

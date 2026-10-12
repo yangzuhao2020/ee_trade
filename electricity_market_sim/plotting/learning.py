@@ -47,7 +47,7 @@ def _plot_learning_unit(
     path: Path,
     episode_label: str,
 ) -> Path:
-    """Plot the learning unit's two bids, dispatch, and reward per delivery."""
+    """按交付时段绘制学习机组的两段报价、出力和奖励。"""
 
     markets = {market.delivery_start: market for market in results}
     segments_by_start = {
@@ -226,7 +226,7 @@ def _plot_learning_unit(
 
 
 def _read_learning_metrics(path: Path) -> list[dict[str, Any]]:
-    """Read a metrics CSV written by the Version 5 trainer or evaluator."""
+    """读取第五版训练器或评估器写出的指标 CSV。"""
 
     if not path.is_file():
         raise PlottingError(f"Learning metrics file does not exist: {path}")
@@ -257,7 +257,7 @@ def _read_learning_metrics(path: Path) -> list[dict[str, Any]]:
 
 
 def _plot_learning_curves(pyplot, rows: list[dict[str, Any]], path: Path) -> Path:
-    """Plot training and validation episode metrics for every independent run."""
+    """绘制每次独立运行中训练回合和验证回合的指标。"""
 
     runs = sorted({row["run"] for row in rows})
     figure, axes = pyplot.subplots(len(_CURVE_FIELDS), 1, figsize=(12, 10), sharex=True)
@@ -348,7 +348,7 @@ def _format_metric(value: float) -> str:
 
 
 def _plot_evaluation_comparison(pyplot, rows: list[dict[str, Any]], path: Path) -> Path:
-    """Compare deterministic Actor and marginal-cost baseline evaluations."""
+    """对比确定性 Actor 与边际成本基准策略的评估结果。"""
 
     run_count = max(
         len([row for row in rows if row["phase"] == phase])
