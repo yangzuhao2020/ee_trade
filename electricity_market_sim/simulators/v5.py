@@ -5,7 +5,6 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
-
 from ..bidding import available_power_mw
 from ..errors import InputValidationError
 from ..learning import (

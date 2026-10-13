@@ -9,6 +9,7 @@ from .plotting import generate_learning_plots, generate_plots
 from .simulation import run_simulation
 from .training import evaluate_learning_scenario, train_learning_scenario
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the lightweight single-node electricity-market simulator."
@@ -108,8 +109,8 @@ def main(argv: list[str] | None = None) -> int:
                     or arguments.training_runs is not None
                 ):
                     raise SimulationError(
-                        "--training-episodes and --training-runs can only be used with "
-                        "--learning-mode train."
+                        "--training-episodes 和 --training-runs 只能与 "
+                        "--learning-mode train 一起使用。"
                     )
                 result = evaluate_learning_scenario(
                     input_dir=arguments.input_dir,
@@ -127,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
                 scenario=arguments.scenario,
             )
     except SimulationError as exc:
-        print(f"Simulation failed: {exc}", file=sys.stderr)
+        print(f"仿真失败：{exc}", file=sys.stderr)
         return 2
 
     if not arguments.no_plots:
@@ -140,11 +141,11 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             # 此时 CSV 结果已经保存到磁盘。
             # 即使绘图失败，也应保留已成功完成的仿真结果。
-            print(f"Simulation completed, but PNG generation failed: {exc}",file=sys.stderr,)
+            print(f"仿真已完成，但 PNG 图片生成失败：{exc}",file=sys.stderr,)
 
     print(
-        f"Simulation complete: {len(result.market_results)} delivery products written to "
-        f"{arguments.output_dir}.")
+        f"仿真完成：已将 {len(result.market_results)} 个交付时段的结果写入 "
+        f"{arguments.output_dir}。")
     return 0
 
 

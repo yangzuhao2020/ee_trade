@@ -3,9 +3,8 @@
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-
 from ..bidding import available_power_mw, naive_offer
-from ..clearing import clear_pay_as_bid, validate_demand_prices, validate_offer_prices
+from ..clearing_algorithm import clear_pay_as_bid, validate_demand_prices, validate_offer_prices
 from ..errors import InputValidationError
 from ..household import dispatch_household, plan_household_opening
 from ..inputs import (

@@ -51,6 +51,7 @@ def _validate_storage_configuration(
             "product_count = 1 的 pay_as_clear 市场。"
         )
 
+
 def _storage_market_quantities(
     market_result: MarketClearingResult,
     storage_name: str,
@@ -89,6 +90,7 @@ def _storage_market_quantities(
         accepted_discharge,
         discharge_price,
     )
+
 
 def _project_storage_energies(
     *,
@@ -147,6 +149,7 @@ def _project_storage_energies(
         )
     return projected
 
+
 def _storage_orders_for_opening(
     *,
     opening: MarketOpening,
@@ -191,6 +194,7 @@ def _storage_orders_for_opening(
             )
         )
     return charge_bids, discharge_offers, tuple(contexts)
+
 
 def _record_storage_states(
     market_result: MarketClearingResult,

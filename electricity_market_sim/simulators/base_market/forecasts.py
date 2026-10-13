@@ -3,7 +3,7 @@
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 from ...bidding import available_power_mw, naive_offer
-from ...clearing import clear_pay_as_clear
+from ...clearing_algorithm import clear_pay_as_clear
 from ...models import ExchangeSchedule, ExchangeUnit, MarketOpening, MarketSettings, PowerPlant
 from ...utils import format_timestamp
 from .demand import _demand_bids_for_product, _exchange_import_offer
@@ -25,7 +25,6 @@ def _naive_price_forecasts(
     forecast_starts: set[datetime] | None = None,
 ) -> dict[datetime, float]:
     """按边际成本报价模拟出清，为机组和储能策略提供朴素 EOM 电价预测。
-
     使用刚性负荷、机组可用容量及进出口计划，逐时段按 pay_as_clear 出清，
     忽略弹性需求、储能及机组启停约束。返回“时段起点 -> 电价（EUR/MWh）”；
     电价为成交卖单的最高报价，无成交时为 0.0。

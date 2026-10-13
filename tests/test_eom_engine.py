@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import unittest
 
 from electricity_market_sim.bidding import PlantRuntimeState
-from electricity_market_sim.clearing import clear_pay_as_clear
+from electricity_market_sim.clearing_algorithm import clear_pay_as_clear
 from electricity_market_sim.errors import InputValidationError
 from electricity_market_sim.learning import LearningEpisodeSession
 from electricity_market_sim.market_models import DemandBid, SupplyOffer

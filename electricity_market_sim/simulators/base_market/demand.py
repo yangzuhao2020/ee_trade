@@ -46,6 +46,7 @@ def _elastic_demand_bids(
         )
     return bids
 
+
 def _demand_bids_for_product(
     *,
     demand_units,
@@ -99,6 +100,7 @@ def _demand_bids_for_product(
         )
     )
     return demand_bids, exchange_schedule
+
 
 def _exchange_import_offer(
     exchange_unit: ExchangeUnit,

@@ -6,7 +6,6 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-
 from ..errors import InputValidationError
 from ..industry import IndustryRollingCoordinator, missing_industrial_price_names
 from ..inputs import (
@@ -36,7 +35,6 @@ def simulate_v1_v2_market(
     openings: tuple[MarketOpening, ...],
 ) -> SimulationResult:
     """根据已校验的配置和开市安排，计算一个 V1/V2 场景。"""
-
     market = BaseMarket(input_path, settings, openings) # 创建对象，保存输入数据目录，
     market.prepare()
     # 加载仿真数据、检查配置、准备电价预测、初始化运行状态。
@@ -45,7 +43,6 @@ def simulate_v1_v2_market(
 
 class _IndustryMarketExtension:
     """Connect industrial rolling optimization to the shared EOM event loop."""
-
     settle_before_opening = False
 
     def __init__(

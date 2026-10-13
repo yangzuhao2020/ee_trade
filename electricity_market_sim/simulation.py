@@ -136,12 +136,12 @@ def simulate(
             learning_enforce_action_bounds=learning_enforce_action_bounds,
         ) # 第五版
 
-    if settings.industrial_dsm_units_file is not None:
+    elif settings.industrial_dsm_units_file is not None:
         return simulate_v4_market(input_path, settings, openings) # 第四版本
-    if settings.market_mechanism == "pay_as_bid":
+    elif settings.market_mechanism == "pay_as_bid":
         return simulate_household_market(input_path, settings, openings) # 第三版本
-    
-    return simulate_v1_v2_market(input_path, settings, openings) # 第一、二版本
+    else:
+        return simulate_v1_v2_market(input_path, settings, openings) # 第一、二版本
 
 
 def simulate_learning_episode(

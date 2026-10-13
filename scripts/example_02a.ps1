@@ -84,7 +84,7 @@ foreach ($scenario in $scenarios) {
     $outputDir = Join-Path $projectDir "outputs/$datasetName/$scenario"
     Write-Host "Running dataset=$datasetName scenario=$scenario"
     Write-Host "Output: $outputDir"
-    python -m electricity_market_sim `
+    python -m electricity_market_sim.main `
         --input-dir $inputDir `
         --output-dir $outputDir `
         --scenario $scenario `

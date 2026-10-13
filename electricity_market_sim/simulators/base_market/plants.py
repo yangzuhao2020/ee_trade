@@ -27,7 +27,6 @@ def _validate_strategy_configuration(
     plants: tuple[PowerPlant, ...],
 ) -> None:
     """有关联报价机组时，检查出清机制和报价字段配置。
-
     若任一机组使用 powerplant_energy_heuristic_linked 策略，则要求：
     1. market_mechanism 为 complex_clearing；
     2. additional_fields 包含 bid_type、min_acceptance_ratio、parent_bid_id。
@@ -54,6 +53,7 @@ def _validate_strategy_configuration(
             + ", ".join(missing_fields)
             + "."
         )
+
 
 def _apply_startup_costs(
     market_result: MarketClearingResult,
@@ -100,6 +100,7 @@ def _apply_startup_costs(
         cleared_offers.append(replace(cleared, startup_cost_eur=startup_cost))
     return replace(market_result, offers=tuple(cleared_offers))
 
+
 def _record_runtime_states(
     market_result: MarketClearingResult,
     runtime_states: dict[str, PlantRuntimeState],
@@ -114,6 +115,7 @@ def _record_runtime_states(
         state.record_dispatch(
             accepted_by_plant[plant_name] / market_result.duration_hours
         )
+
 
 def _offers_for_opening(
     *,

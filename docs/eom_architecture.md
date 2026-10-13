@@ -21,7 +21,7 @@ base_market/
 eom.py：开市、交割开始/结束事件，结果队列和扩展协议
 ```
 
-具体报价公式保留在 `bidding.py`，出清算法保留在 `clearing/`。
+具体报价公式保留在 `bidding.py`，出清算法保留在 `clearing_algorithm/`。
 
 `MarketSettings.opening_duration` 是必填配置，读取时检查为正值；目前未用于事件调度，
 出清发生在开市事件中，没有单独的关市事件。`PowerPlant.min_down_time_hours` 会被读取
