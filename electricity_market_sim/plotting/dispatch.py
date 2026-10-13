@@ -3,7 +3,6 @@
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-
 from ..models import StorageDispatchResult
 from ..utils import hours_between
 from .common import (

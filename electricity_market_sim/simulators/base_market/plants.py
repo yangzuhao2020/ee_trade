@@ -22,16 +22,6 @@ _POWER_TOLERANCE_MW = 1e-9
 _LINKED_REQUIRED_FIELDS = frozenset({"bid_type", "min_acceptance_ratio", "parent_bid_id"})
 
 
-def _available_power(
-    plant: PowerPlant,
-    delivery_start: datetime,
-    availability_profiles: dict[str, dict[datetime, float]],
-) -> float:
-    try:
-        return available_power_mw(plant, delivery_start, availability_profiles)
-    except KeyError as exc:
-        raise InputValidationError(str(exc)) from exc
-
 def _validate_strategy_configuration(
     settings: MarketSettings,
     plants: tuple[PowerPlant, ...],
@@ -144,7 +134,7 @@ def _offers_for_opening(
     offers: list[SupplyOffer] = []
     for plant in plants:
         available_powers = {
-            delivery_start: _available_power(
+            delivery_start: available_power_mw(
                 plant, delivery_start, availability_profiles
             )
             for delivery_start, _ in opening.products

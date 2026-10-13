@@ -736,9 +736,9 @@ def _train_single_run(
             )
         )
         assert runner.load_base_mw is not None
-        should_validate = (
-            episode % config.validation_interval == 0 or episode == episode_count
-        )
+        is_validation_due = episode % config.validation_interval == 0
+        is_last_episode = episode == episode_count
+        should_validate = is_validation_due or is_last_episode
         if should_validate:
             validation_result = runner.run_episode(agent.deterministic_action)
             validation_metrics = _metrics(

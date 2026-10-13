@@ -253,12 +253,11 @@ def _build_industry_problem(
     if np.any(remaining_durations <= 0):
         raise InputValidationError("Industrial products must have positive durations.")
     durations = remaining_durations[:count]
-    remaining_power_coefficients = np.array(
-        [
-            _power_coefficients(coefficients, duration)
-            for duration in remaining_durations
-        ]
-    )
+    remaining_power_coefficient_rows = [
+        _power_coefficients(coefficients, duration)
+        for duration in remaining_durations
+    ]
+    remaining_power_coefficients = np.array(remaining_power_coefficient_rows)
 
     prices = np.empty(count)
     references = np.empty(count)

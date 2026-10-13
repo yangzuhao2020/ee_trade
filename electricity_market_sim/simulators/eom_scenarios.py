@@ -39,6 +39,7 @@ def simulate_v1_v2_market(
 
     market = BaseMarket(input_path, settings, openings) # 创建对象，保存输入数据目录，
     market.prepare()
+    # 加载仿真数据、检查配置、准备电价预测、初始化运行状态。
     return simulate_eom_market(market)
 
 

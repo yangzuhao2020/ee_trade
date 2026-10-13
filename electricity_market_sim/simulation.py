@@ -17,7 +17,6 @@ from .simulators.eom_scenarios import (
 
 class LearningEpisodeRunner:
     """使用同一个固定的观测归一化基准运行多轮仿真。"""
-
     def __init__(
         self,
         input_dir: str | Path,
@@ -32,7 +31,6 @@ class LearningEpisodeRunner:
     @property
     def load_base_mw(self) -> float | None:
         """返回用于保存到检查点或从检查点恢复的归一化基准。"""
-
         return self._load_base_mw
 
     def run_episode(

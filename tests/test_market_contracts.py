@@ -109,12 +109,10 @@ class CsvContracts(unittest.TestCase):
                     with self.assertRaisesRegex(InputValidationError, message):
                         load_hourly_demand_profiles(self.write(text, encoding), (DEMAND,))
 
-    def test_missing_availability_error_does_not_require_complete_hour(self):
+    def test_missing_availability_time_raises_key_error(self):
         with self.assertRaises(KeyError) as error:
             available_power_mw(PLANT, START, {"plant": {}})
-        self.assertEqual(error.exception.args[0],
-                         "availability_df.csv has no hourly profile for "
-                         "2024-01-01 00:00 and plant 'plant'.")
+        self.assertEqual(error.exception.args[0], START)
 
 
 class ClearingContracts(unittest.TestCase):

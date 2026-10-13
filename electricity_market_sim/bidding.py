@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from .market_models import DemandBid, SupplyOffer
 from .models import PowerPlant, StorageUnit
-from .utils import format_timestamp, hours_between
+from .utils import hours_between
 
 _POWER_TOLERANCE_MW = 1e-9
 _FORECAST_HOURS = 12
@@ -213,18 +213,10 @@ def available_power_mw(
     availability_profiles: dict[str, dict[datetime, float]],
 ) -> float:
     """返回按可选可用率系数折算后的机组可用容量。"""
-
     profile = availability_profiles.get(plant.name)
     if profile is None:
         return plant.max_power_mw
-    try:
-        return plant.max_power_mw * profile[delivery_start]
-    except KeyError as exc:
-        raise KeyError(
-            f"availability_df.csv has no hourly profile for "
-            f"{format_timestamp(delivery_start)} and "
-            f"plant {plant.name!r}."
-        ) from exc
+    return plant.max_power_mw * profile[delivery_start]
 
 
 def naive_offer(
@@ -235,7 +227,6 @@ def naive_offer(
     marginal_cost: float,
 ) -> SupplyOffer:
     """按 V2 的可用容量构建 V1 的单段边际成本报价。"""
-
     duration_hours = hours_between(delivery_start, delivery_end)
     offer_id = f"{plant.name}::single::{delivery_start.isoformat()}"
     return SupplyOffer(
@@ -261,7 +252,6 @@ def segment_supply_offers(
     marginal_cost: float,
 ) -> list[SupplyOffer]:
     """为每个非零出力段构建一条标识为 ``{plant}::{segment}::{timestamp}`` 的报价。"""
-
     duration_hours = hours_between(delivery_start, delivery_end)
     timestamp = delivery_start.isoformat()
     offers: list[SupplyOffer] = []
@@ -298,7 +288,6 @@ def heuristic_flexible_offers(
     price_forecast: dict[datetime, float],
 ) -> list[SupplyOffer]:
     """将符合条件的机组拆分为 V2 的非灵活出力段和灵活出力段报价。
-
     灵活出力段始终按边际成本报价。停机机组将启动成本分摊到最低稳定出力段。
     对于运行中的机组，若指定的 13 个时间点的预测表明维持运行的未来价值
     非负，则该出力段可以按零价格报价。

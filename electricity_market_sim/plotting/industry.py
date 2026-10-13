@@ -2,7 +2,6 @@
 
 from collections import defaultdict
 from pathlib import Path
-
 from ..models import IndustrialDispatchResult, IndustrialFlexibilityResult
 from .common import _format_time_axis, _save_figure
 

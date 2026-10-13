@@ -17,8 +17,7 @@ from .market_models import MarketClearingResult
 
 @dataclass(frozen=True)
 class LearningConfig:
-    """Validated Version 5 single-agent MATD3 settings."""
-
+    """经校验的 Version 5 单智能体 MATD3 学习配置。"""
     learning_mode: bool
     algorithm: str
     learning_rate: float
@@ -49,13 +48,12 @@ class LearningConfig:
 
 @dataclass(frozen=True)
 class MarketSettings:
-    """The EOM settings shared by simple and complex V2 market openings."""
-
+    """简单与复杂 V2 市场开市共用的 EOM（能量市场）配置。"""
     start: datetime
     end: datetime
     time_step: timedelta
     opening_frequency: timedelta
-    # Required and validated on load; currently unused by event scheduling.
+    # 加载时必填并校验；当前事件调度尚未使用该字段。
     opening_duration: timedelta
     product_duration: timedelta
     product_count: int
@@ -80,8 +78,7 @@ class MarketOpening:
 
 @dataclass(frozen=True)
 class DemandUnit:
-    """An EOM demand participant, optionally generated from elasticity inputs."""
-
+    """EOM 需求侧参与者，可选择根据需求弹性输入参数生成。"""
     name: str
     operator: str
     bidding_strategy: str = "demand_energy_naive"
@@ -100,8 +97,7 @@ class DemandUnit:
 
 @dataclass(frozen=True)
 class ExchangeUnit:
-    """The single virtual participant representing planned imports and exports."""
-
+    """代表计划进口与出口的唯一虚拟参与者。"""
     name: str
     operator: str
     price_import_eur_per_mwh: float
@@ -110,16 +106,14 @@ class ExchangeUnit:
 
 @dataclass(frozen=True)
 class ExchangeSchedule:
-    """One delivery hour's positive planned import and export powers."""
-
+    """单个交付小时的计划进口与出口功率（均为正值）。"""
     import_power_mw: float
     export_power_mw: float
 
 
 @dataclass(frozen=True)
 class PowerPlant:
-    """A dispatchable plant and the parameters used by its bidding strategy."""
-
+    """可调度发电机组及其报价策略所用的参数。"""
     name: str
     operator: str
     technology: str
@@ -130,33 +124,29 @@ class PowerPlant:
     min_power_mw: float
     efficiency: float
     additional_cost_eur_per_mwh: float
-    # These optional V2 parameters retain the V2 example defaults when their
-    # columns are absent from ``powerplant_units.csv``.
+    # 当 ``powerplant_units.csv`` 中缺少对应列时，
+    # 以下可选 V2 参数沿用 V2 示例的默认值。
     start_cost_eur: float = 0.0
     min_operating_time_hours: float = 1.0
-    # Loaded and validated for compatibility; minimum downtime is not enforced.
+    # 为保持兼容性而加载并校验；最小停机时间约束并未实际执行。
     min_down_time_hours: float = 1.0
 
     def marginal_cost(self, fuel_prices: dict[str, float]) -> float:
         """返回与 ASSUME 一致的可变边际成本。
-
         输入的排放因子按单位燃料投入计，因此燃料成本和 CO2 成本都要除以发电效率。
         """
-
-        # Variable renewables in the supplied V2 examples have no fuel-price
-        # column; their fuel component is conventionally zero.
+        # 所提供的 V2 示例中，波动性可再生能源没有燃料价格列；
+        # 按惯例其燃料成本分量为零。
         fuel_price = fuel_prices.get(self.fuel_type, 0.0)
         co2_price = fuel_prices["co2"]
-        return (
-            (fuel_price + co2_price * self.emission_factor) / self.efficiency
-            + self.additional_cost_eur_per_mwh
-        )
+        co2_cost = co2_price * self.emission_factor
+        fuel_and_co2_cost = (fuel_price + co2_cost) / self.efficiency
+        return fuel_and_co2_cost + self.additional_cost_eur_per_mwh
 
 
 @dataclass(frozen=True)
 class StorageUnit:
-    """A storage participant and the physical limits used by its EOM strategy."""
-
+    """储能参与者及其 EOM 策略所用的物理约束参数。"""
     name: str
     operator: str
     technology: str
@@ -188,8 +178,7 @@ class StorageUnit:
 
 @dataclass(frozen=True)
 class HouseholdUnit:
-    """One building participant with a heat pump and an internal battery."""
-
+    """配备热泵和内部电池的单个建筑参与者。"""
     name: str
     operator: str
     bidding_strategy: str
@@ -231,8 +220,7 @@ class HouseholdUnit:
 
 @dataclass(frozen=True)
 class HouseholdPlan:
-    """A household's forecast-based schedule for one delivery product."""
-
+    """居民用户基于预测、针对单个交付产品制定的运行计划。"""
     delivery_start: datetime
     delivery_end: datetime
     unit_name: str
@@ -246,8 +234,7 @@ class HouseholdPlan:
 
 @dataclass(frozen=True)
 class HouseholdDispatchResult:
-    """Actual building operation after the corresponding buy order clears."""
-
+    """对应买单出清后建筑的实际运行结果。"""
     delivery_start: datetime
     delivery_end: datetime
     unit_name: str
@@ -266,8 +253,7 @@ class HouseholdDispatchResult:
 
 @dataclass(frozen=True)
 class HouseholdFlexibilityResult:
-    """Cost-tolerant grid-power bounds for one planned household product."""
-
+    """单个已计划居民产品在成本容忍度内的电网功率上下界。"""
     delivery_start: datetime
     delivery_end: datetime
     unit_name: str
@@ -277,8 +263,7 @@ class HouseholdFlexibilityResult:
 
 @dataclass(frozen=True)
 class IndustrialDevice:
-    """One physical device inside an industrial steel plant."""
-
+    """工业钢铁厂内部的单个物理设备。"""
     technology: str
     fuel_type: str
     max_power_mw: float
@@ -298,8 +283,7 @@ class IndustrialDevice:
 
 @dataclass(frozen=True)
 class IndustrialUnit:
-    """One steel-plant participant assembled from three device rows."""
-
+    """由三行设备数据组装而成的单个钢铁厂参与者。"""
     name: str
     operator: str
     bidding_strategy: str
@@ -320,8 +304,7 @@ class IndustrialUnit:
 
 @dataclass(frozen=True)
 class IndustrialPlan:
-    """Forecast-based industrial schedule for one delivery product."""
-
+    """工业用户基于预测、针对单个交付产品制定的生产计划。"""
     window_id: str
     delivery_start: datetime
     delivery_end: datetime
@@ -339,8 +322,7 @@ class IndustrialPlan:
 
 @dataclass(frozen=True)
 class IndustrialDispatchResult:
-    """Planned and actual steel production after an industrial bid clears."""
-
+    """工业报价出清后的计划与实际钢铁生产结果。"""
     window_id: str
     delivery_start: datetime
     delivery_end: datetime
@@ -360,8 +342,7 @@ class IndustrialDispatchResult:
 
 @dataclass(frozen=True)
 class IndustrialFlexibilityResult:
-    """Pointwise cost-tolerant power bounds for one committed product."""
-
+    """单个已承诺产品在成本容忍度内的逐点功率上下界。"""
     window_id: str
     delivery_start: datetime
     delivery_end: datetime
@@ -381,8 +362,7 @@ class IndustrialFlexibilityResult:
 
 @dataclass(frozen=True)
 class IndustrialOptimizationWindowResult:
-    """One rolling window's non-repeated cost totals."""
-
+    """单个滚动优化窗口的成本合计（不重复计算）。"""
     window_id: str
     unit_name: str
     optimization_start: datetime
@@ -395,8 +375,7 @@ class IndustrialOptimizationWindowResult:
 
 @dataclass(frozen=True)
 class SimulationResult:
-    """The complete, in-memory outcome of one simulation run."""
-
+    """一次仿真运行的完整内存结果。"""
     settings: MarketSettings
     market_results: tuple[MarketClearingResult, ...]
     storage_results: tuple[StorageDispatchResult, ...] = ()
@@ -412,8 +391,7 @@ class SimulationResult:
 
 @dataclass(frozen=True)
 class LearningStepResult:
-    """Auditable action, dispatch, and reward for one learning delivery."""
-
+    """单个学习交付时段可供审计的动作、调度结果与奖励。"""
     delivery_start: datetime
     action: tuple[float, float]
     available_power_mw: float
@@ -426,8 +404,7 @@ class LearningStepResult:
 
 @dataclass(frozen=True)
 class LearningTransition:
-    """One replay-buffer item using the unsorted executed action."""
-
+    """一条经验回放缓冲区记录，使用未排序的实际执行动作。"""
     delivery_start: datetime
     state: tuple[float, ...]
     action: tuple[float, float]
@@ -438,8 +415,7 @@ class LearningTransition:
 
 @dataclass(frozen=True)
 class StorageClearingContext:
-    """Physical storage data required by one joint complex-clearing opening."""
-
+    """单次联合复杂出清开市所需的储能物理数据。"""
     unit_name: str
     initial_energy_mwh: float
     min_energy_mwh: float
@@ -450,8 +426,7 @@ class StorageClearingContext:
 
 @dataclass(frozen=True)
 class StorageDispatchResult:
-    """One storage unit's accepted dispatch and SOC transition for one product."""
-
+    """单个储能单元在单个产品上的成交调度结果及 SOC 变化。"""
     opening_time: datetime
     delivery_start: datetime
     delivery_end: datetime

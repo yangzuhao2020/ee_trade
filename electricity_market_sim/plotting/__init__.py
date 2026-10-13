@@ -40,7 +40,6 @@ def generate_plots(
     learning_episode_label: str = "Actor evaluation",
 ) -> tuple[Path, ...]:
     """根据完整的仿真结果生成持久保存的 PNG 汇总图。
-
     此函数刻意不承担任何仿真计算或 CSV 写出工作。只能在 ``write_results`` 完成后
     调用，这样即使绘图失败，也不会丢失有效的市场结果。
     """

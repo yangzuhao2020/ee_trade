@@ -2,7 +2,6 @@
 
 from math import isfinite
 from pathlib import Path
-
 from ..errors import PlottingError
 from ..market_models import MarketClearingResult
 from .common import (

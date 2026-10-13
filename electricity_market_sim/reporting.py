@@ -7,7 +7,6 @@ from math import isclose
 from operator import attrgetter
 from pathlib import Path
 from typing import Any
-
 from .errors import InputValidationError
 from .learning import PRICE_SCALE_EUR_PER_MWH
 from .models import SimulationResult
@@ -66,7 +65,6 @@ def _write_rows(path: Path, fields: list[str], rows: Iterable[dict[str, str]]) -
 
 def write_results(output_dir: Path, simulation_result: SimulationResult) -> None:
     """写出市场、需求、机组和运营商结果 CSV，并按需写出外部电网、储能、报价明细、家庭、工业和学习结果。
-
     机组汇总保留全部机组；报价明细只按开市保留分段或带约束的报价。本次未写出的可选结果文件会被删除。
     """
 
@@ -230,16 +228,15 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 cleared.accepted_energy_mwh for cleared in cleared_offers
             )
             accepted_power_mw = accepted_energy_mwh / duration_hours
-            weighted_bid_price = (
-                sum(
+            if offered_energy_mwh > 0:
+                total_bid_value_eur = sum(
                     cleared.offer.bid_price_eur_per_mwh
                     * cleared.offer.offered_energy_mwh
                     for cleared in cleared_offers
                 )
-                / offered_energy_mwh
-                if offered_energy_mwh > 0
-                else first_offer.bid_price_eur_per_mwh
-            )
+                weighted_bid_price = total_bid_value_eur / offered_energy_mwh
+            else:
+                weighted_bid_price = first_offer.bid_price_eur_per_mwh
             revenue_eur = sum(cleared.revenue_eur for cleared in cleared_offers)
             variable_cost_eur = sum(
                 cleared.variable_cost_eur for cleared in cleared_offers

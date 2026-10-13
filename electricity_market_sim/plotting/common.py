@@ -2,7 +2,6 @@
 
 from math import isclose
 from pathlib import Path
-
 from ..errors import PlottingError
 from ..market_models import MarketClearingResult
 from ..models import StorageDispatchResult

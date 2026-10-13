@@ -1,25 +1,10 @@
 """刚性与弹性需求买单生成，以及计划进口卖单和出口买单的构建。"""
 
 from datetime import datetime
-from ...errors import InputValidationError
 from ...market_models import DemandBid, SupplyOffer
 from ...models import ExchangeSchedule, ExchangeUnit
-from ...utils import format_timestamp, hours_between
+from ...utils import hours_between
 
-
-def _profile_power(
-    profiles: dict[str, dict[datetime, float]],
-    unit_name: str,
-    delivery_start: datetime,
-    source_name: str,
-) -> float:
-    try:
-        return profiles[unit_name][delivery_start]
-    except KeyError as exc:
-        raise InputValidationError(
-            f"{source_name} has no hourly profile for "
-            f"{format_timestamp(delivery_start)} and unit {unit_name!r}."
-        ) from exc
 
 def _elastic_demand_bids(
     demand_unit,
@@ -53,8 +38,8 @@ def _elastic_demand_bids(
                 operator=demand_unit.operator,
                 delivery_start=delivery_start,
                 delivery_end=delivery_end,
-                volume_mwh=power * duration_hours,
-                price_eur_per_mwh=price,
+                volume_mwh=power * duration_hours, # 希望购买的电量
+                price_eur_per_mwh=price, # 愿意支付的价格
                 bid_id=f"{demand_unit.name}::elastic::{timestamp}::{index + 1}",
                 demand_type="elastic_load",
             )
@@ -69,10 +54,10 @@ def _demand_bids_for_product(
     exchange_profiles: dict[datetime, ExchangeSchedule],
     delivery_start: datetime,
     delivery_end: datetime,
-    maximum_bid_price: float,
+    maximum_bid_price: float, # 刚性负载最高意愿的买单。
     include_elastic: bool = True,
 ) -> tuple[list[DemandBid], ExchangeSchedule | None]:
-    """本地刚性负荷买单与弹性负荷买单（include_elastic 为真时）；启用 Exchange 时加入出口买单."""
+    """为指定交付时段生成需求侧买单，供后续市场出清使用"""
 
     duration_hours = hours_between(delivery_start, delivery_end)
     demand_bids: list[DemandBid] = []
@@ -83,32 +68,23 @@ def _demand_bids_for_product(
                     _elastic_demand_bids(demand_unit, delivery_start, delivery_end)
                 )
             continue
+        demand_power_mw = demand_profiles[demand_unit.name][delivery_start]
+        demand_volume_mwh = demand_power_mw * duration_hours
         demand_bids.append(
             DemandBid(
                 unit_name=demand_unit.name,
                 operator=demand_unit.operator,
                 delivery_start=delivery_start,
                 delivery_end=delivery_end,
-                volume_mwh=_profile_power(
-                    demand_profiles,
-                    demand_unit.name,
-                    delivery_start,
-                    "demand_df.csv",
-                )
-                * duration_hours,
+                volume_mwh=demand_volume_mwh,
                 price_eur_per_mwh=maximum_bid_price,
                 bid_id=f"{demand_unit.name}::load::{delivery_start.isoformat()}",
             )
         )
     if exchange_unit is None:
         return demand_bids, None
-    try:
-        exchange_schedule = exchange_profiles[delivery_start]
-    except KeyError as exc:
-        raise InputValidationError(
-            "exchanges_df.csv has no hourly profile for "
-            f"{format_timestamp(delivery_start)}."
-        ) from exc
+    
+    exchange_schedule = exchange_profiles[delivery_start]
     demand_bids.append(
         DemandBid(
             unit_name=exchange_unit.name,

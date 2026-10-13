@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
 
+from ..bidding import available_power_mw
 from ..errors import InputValidationError
 from ..learning import (
     ActionProvider, LearningEpisodeSession, TransitionConsumer, calculate_load_base,
@@ -13,9 +14,7 @@ from ..learning import (
 from ..market_models import DemandBid, MarketClearingResult, SupplyOffer
 from ..models import MarketOpening, MarketSettings, PowerPlant, SimulationResult
 from .base_market import BaseMarket
-from .base_market.demand import _profile_power
 from .base_market.forecasts import _forecast_starts
-from .base_market.plants import _available_power
 from .eom import EomExtensionInputs, ScheduledProductKey, simulate_eom_market
 
 _FORECAST_HOURS = 12
@@ -85,12 +84,12 @@ def _residual_load_forecasts(
     residual: dict[datetime, float] = {}
     for forecast_time in sorted(forecast_times):
         demand_mw = sum(
-            _profile_power(demand_profiles, unit.name, forecast_time, "demand_df.csv")
+            demand_profiles[unit.name][forecast_time]
             for unit in demand_units
             if not unit.is_elastic
         )
         renewable_mw = sum(
-            _available_power(plant, forecast_time, availability_profiles)
+            available_power_mw(plant, forecast_time, availability_profiles)
             for plant in variable_renewables
         )
         residual[forecast_time] = demand_mw - renewable_mw

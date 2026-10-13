@@ -15,7 +15,7 @@ _ENERGY_TOLERANCE_MWH = 1e-7
 
 @dataclass(frozen=True)
 class DemandBid:
-    """A buy order. Its volume is always a non-negative energy quantity."""
+    """买单，其申报电量始终为非负值。"""
 
     unit_name: str
     operator: str
@@ -25,9 +25,9 @@ class DemandBid:
     price_eur_per_mwh: float
     bid_type: str = "local_load"
     bid_id: str | None = None
-    # ``bid_type`` retains the market-side role used by the V1 exchange logic.
-    # ``demand_type`` distinguishes reliability load from price-responsive load
-    # so rejected elastic bids are not reported as involuntary curtailment.
+    # ``bid_type`` 保留 V1 电力交换逻辑使用的市场侧订单角色。
+    # ``demand_type`` 区分刚性负荷与价格响应负荷，
+    # 避免将未成交的弹性买单报告为非自愿限电。
     demand_type: str | None = None
 
     def __post_init__(self) -> None:
@@ -74,7 +74,6 @@ class DemandBid:
     @property
     def identifier(self) -> str:
         """返回稳定的订单标识，供需求明细结果报告使用。"""
-
         return self.bid_id or self.unit_name
 
     @property
@@ -84,7 +83,7 @@ class DemandBid:
 
 @dataclass(frozen=True)
 class SupplyOffer:
-    """A sell order. Energy is used for clearing; power is retained for reporting."""
+    """卖单，以电量参与出清，同时保留功率用于结果报告。"""
     unit_name: str
     operator: str
     technology: str
@@ -95,12 +94,12 @@ class SupplyOffer:
     bid_price_eur_per_mwh: float
     marginal_cost_eur_per_mwh: float
     offer_type: str = "power_plant"
-    # A plant can submit more than one offer in V2.  ``unit_name`` remains the
-    # physical-unit identifier; ``offer_id`` identifies one market order.
+    # V2 中同一机组可以提交多条卖单。``unit_name`` 仍表示物理机组，
+    # ``offer_id`` 用于标识一条市场订单。
     offer_id: str | None = None
     offer_segment: str = "single"
-    # Complex-clearing metadata. ``offer_id`` identifies one product leg;
-    # ``bid_id`` identifies a potentially multi-product market order.
+    # 复杂出清的附加字段：``offer_id`` 标识订单在单个交付产品上的分段，
+    # ``bid_id`` 标识一条可能跨多个交付产品的市场订单。
     bid_id: str | None = None
     bid_type: str = "SB"
     min_acceptance_ratio: float = 0.0
@@ -145,7 +144,7 @@ class SupplyOffer:
 
 @dataclass(frozen=True)
 class ClearedSupplyOffer:
-    """The clearing outcome for one offer, including zero-acceptance outcomes."""
+    """单条卖单的出清结果，包括成交电量为零的情况。"""
     offer: SupplyOffer
     accepted_energy_mwh: float
     clearing_price_eur_per_mwh: float
@@ -179,7 +178,7 @@ class ClearedSupplyOffer:
 
 @dataclass(frozen=True)
 class ClearedDemandBid:
-    """The cleared quantity and settlement payment for one demand bid."""
+    """单条买单的成交电量与结算付款。"""
     bid: DemandBid
     accepted_energy_mwh: float
     clearing_price_eur_per_mwh: float
@@ -210,17 +209,27 @@ def sum_cleared_demand(
 ) -> float:
     """按顺序累加需求出清结果的某个字段，组装市场结果之前或之后都可使用。"""
     value_of = attrgetter(attribute)
-    return sum(
-        value_of(demand)
-        for demand in demand_bids
-        if (demand_type is None or demand.bid.demand_type == demand_type)
-        and (bid_type is None or demand.bid.bid_type == bid_type)
-    )
+    matched_values = []
+    for demand in demand_bids:
+        matches_demand_type = (
+            demand_type is None or demand.bid.demand_type == demand_type
+        )
+        if not matches_demand_type:
+            continue
+
+        matches_bid_type = bid_type is None or demand.bid.bid_type == bid_type
+        if not matches_bid_type:
+            continue
+
+        demand_value = value_of(demand)
+        matched_values.append(demand_value)
+
+    return sum(matched_values)
 
 
 @dataclass(frozen=True)
 class Trade:
-    """One immutable buyer-seller match in a pay-as-bid product."""
+    """按报价结算产品中买卖双方的一条不可变成交记录。"""
     delivery_start: datetime
     delivery_end: datetime
     buyer_bid_id: str
@@ -243,7 +252,7 @@ class Trade:
 
 @dataclass(frozen=True)
 class MarketClearingResult:
-    """One delivery product's cleared market state."""
+    """单个交付产品的市场出清结果。"""
     delivery_start: datetime
     delivery_end: datetime
     requested_demand_mwh: float
@@ -393,18 +402,30 @@ class MarketClearingResult:
                 raise ValueError("A cleared market must identify its marginal unit.")
             if self.marginal_unit_name not in offer_names_set:
                 raise ValueError("The marginal unit must belong to the cleared offers.")
-            marginal_offers = [
-                offer
-                for offer in self.offers
-                if offer.offer.unit_name == self.marginal_unit_name
-                and offer.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH
-                and isclose(
-                    offer.offer.bid_price_eur_per_mwh,
+            marginal_offers = []
+            for cleared_offer in self.offers:
+                is_marginal_unit = (
+                    cleared_offer.offer.unit_name == self.marginal_unit_name
+                )
+                if not is_marginal_unit:
+                    continue
+
+                has_accepted_energy = (
+                    cleared_offer.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH
+                )
+                if not has_accepted_energy:
+                    continue
+
+                matches_clearing_price = isclose(
+                    cleared_offer.offer.bid_price_eur_per_mwh,
                     self.clearing_price_eur_per_mwh,
                     rel_tol=0.0,
                     abs_tol=_ENERGY_TOLERANCE_MWH,
                 )
-            ]
+                if not matches_clearing_price:
+                    continue
+
+                marginal_offers.append(cleared_offer)
             if not marginal_offers:
                 raise ValueError("The marginal unit must have an accepted offer at the clearing price.")
         elif self.pricing_method == "merit_order" and self.marginal_unit_name is not None:
@@ -486,11 +507,12 @@ class MarketClearingResult:
 
     @property
     def import_revenue_eur(self) -> float:
-        return sum(
-            offer.revenue_eur
-            for offer in self.offers
-            if offer.offer.offer_type == "import"
+        import_revenues = (
+            cleared_offer.revenue_eur
+            for cleared_offer in self.offers
+            if cleared_offer.offer.offer_type == "import"
         )
+        return sum(import_revenues)
 
     @property
     def export_payment_eur(self) -> float:
@@ -507,9 +529,11 @@ class MarketClearingResult:
     def average_trade_price_eur_per_mwh(self) -> float | None:
         if not self.trades:
             return None
-        return sum(trade.payment_eur for trade in self.trades) / sum(
+        total_payment_eur = sum(trade.payment_eur for trade in self.trades)
+        total_trade_energy_mwh = sum(
             trade.trade_energy_mwh for trade in self.trades
         )
+        return total_payment_eur / total_trade_energy_mwh
 
     def _validate_trades(self) -> None:
         """核对不可变的成交记录与订单的成交电量和价格是否一致。"""

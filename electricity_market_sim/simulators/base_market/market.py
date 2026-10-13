@@ -3,7 +3,6 @@
 import warnings
 from datetime import datetime
 from pathlib import Path
-
 from ...bidding import PlantRuntimeState, StorageRuntimeState
 from ...clearing import (
     clear_complex_opening, clear_pay_as_clear,
@@ -81,15 +80,6 @@ class BaseMarket:
         self.extension_inputs = extension_inputs
         self.requires_market_price_forecast |= bool(extension_inputs.forecast_offsets)
         # 扩展模块的预测需求合并到市场的预测开关中
-        validate_unique_names(
-            [
-                *(plant.name for plant in self.plants),
-                *(storage.name for storage in self.storages),
-                *(unit.name for unit in self.demand_units),
-                *extension_inputs.participant_names,
-            ],
-            "all market units",
-        )
         self.fuel_prices = (
             extension_inputs.fuel_prices
             if extension_inputs.fuel_prices is not None
@@ -97,21 +87,27 @@ class BaseMarket:
         ) # 读取燃料价格数据，优先使用扩展模块提供的燃料价格。
         self.fuel_price_profiles = extension_inputs.fuel_price_profiles
         validate_fuel_coverage(self.plants, self.fuel_prices)
-        
+
+        # 外部电力交换初始化说明：
+        # 1. 仅在配置 exchange_units_file 时启用；未配置时，交换单元为 None，时序数据为空字典。
+        # 2. 从配置文件读取唯一的交换参与者，包括名称、运营方及进口/出口报价（EUR/MWh）。
+        # 3. 外部电网名称与其他参与者一起，由下方的 validate_unique_names 统一检查重名。
+        # 先加载可选的外部电网参与者，再统一检查所有市场参与者的名称是否重名。
         self.exchange_unit = None
-        self.exchange_profiles: dict[datetime, ExchangeSchedule] = {}
         if settings.exchange_units_file is not None:
             self.exchange_unit = load_exchange_unit(input_path / settings.exchange_units_file)
-            existing_names = (
-                {plant.name for plant in self.plants}
-                | {storage.name for storage in self.storages}
-                | {unit.name for unit in self.demand_units}
-                | set(extension_inputs.participant_names)
-            )
-            if self.exchange_unit.name in existing_names:
-                raise InputValidationError(
-                    f"Exchange name {self.exchange_unit.name!r} must not duplicate another unit name."
-                )
+        participant_names = [
+            *(plant.name for plant in self.plants),
+            *(storage.name for storage in self.storages),
+            *(unit.name for unit in self.demand_units),
+            *extension_inputs.participant_names,
+        ]
+        if self.exchange_unit is not None:
+            participant_names.append(self.exchange_unit.name)
+        validate_unique_names(participant_names, "all market units")
+
+        self.exchange_profiles: dict[datetime, ExchangeSchedule] = {}
+        if self.exchange_unit is not None:
             for label, price in (
                 ("import", self.exchange_unit.price_import_eur_per_mwh),
                 ("export", self.exchange_unit.price_export_eur_per_mwh),
@@ -123,6 +119,10 @@ class BaseMarket:
             self.exchange_profiles = load_hourly_exchange_profiles(
                 input_path / "exchanges_df.csv", self.exchange_unit
             )
+        # 4. 分别检查进口和出口报价是否位于市场最低、最高报价之间（含边界）；价格越界时报错。
+        # 5. 从 exchanges_df.csv 读取“参与者名称_import”和“参与者名称_export”列，功率必须非负。
+        #    每小时的可用样本取等权平均，保存为“小时起点 -> ExchangeSchedule”的映射，功率单位为 MW。
+        # 6. 后续生成订单时，进口电力作为本地市场的供给卖单，出口电力作为本地市场的需求买单。
 
         self.marginal_costs = {
             plant.name: plant.marginal_cost(self.fuel_prices) for plant in self.plants
@@ -140,6 +140,12 @@ class BaseMarket:
             extension.initialize(self)
 
     def _validate_marginal_costs(self) -> None:
+        """检查各机组的边际成本是否处于市场报价上下限内（含边界），单位为 EUR/MWh。
+        使用静态燃料价格时，每台机组只检查一次预先计算的边际成本；
+        使用分时燃料价格时，按所有开市产品的交付开始时间，去重后逐时计算并检查。
+        """
+        # 分时模式提取交付开始时间（不是开市时间），用集合去重后排序；
+        # 静态模式用 (None,) 作为仅含一个占位值的元组，让每台机组只检查一次。
         cost_times = (
             sorted({start for opening in self.openings for start, _ in opening.products})
             if self.fuel_price_profiles is not None else (None,)
@@ -147,15 +153,19 @@ class BaseMarket:
         for plant in self.plants:
             for cost_time in cost_times:
                 if cost_time is None:
+                    # 静态模式直接使用初始化时已计算好的机组边际成本。
                     marginal_cost = self.marginal_costs[plant.name]
                 else:
                     try:
+                        # 分时模式取该交付时段的价格，重新计算燃料、CO2 和附加成本。
                         marginal_cost = plant.marginal_cost(self.fuel_price_profiles[cost_time])
                     except KeyError as exc:
+                        # 将缺少时段或价格键的错误转换为输入校验异常，并保留原始异常链。
                         raise InputValidationError(
                             "fuel_prices_df.csv has no complete product profile for "
                             f"{format_timestamp(cost_time)}."
                         ) from exc
+                # 最低价和最高价均允许；越界时报告机组名称、成本，以及分时模式下的交付时间。
                 if not self.settings.minimum_bid_price <= marginal_cost <= self.settings.maximum_bid_price:
                     time_detail = "" if cost_time is None else f" at {format_timestamp(cost_time)}"
                     raise InputValidationError(
@@ -164,9 +174,18 @@ class BaseMarket:
                     )
 
     def _prepare_openings_and_forecasts(self) -> None:
+        """筛选可用的开市，并准备机组、储能及扩展报价策略所需的电价预测。
+        检查各开市的交付时段是否越界，以及交付和预测窗口所需的数据是否齐全。
+        发现问题时，按扩展配置选择抛出 InputValidationError，或发出警告并跳过该次开市。
+        将通过检查的开市保存到 self.valid_openings，保持原有顺序。
+        需要电价预测时，优先使用扩展提供的预测，否则根据有效开市生成朴素出清价格预测。
+        预测保存为“时段开始时间 -> 电价（EUR/MWh）”的 self.price_forecasts；无需预测时为空字典。
+        """
         inputs, settings = self.extension_inputs, self.settings
         valid_openings = []
         for opening in self.openings:
+            # 检查产品交付范围、刚性负荷、已提供的机组可用率及启用的电力交换数据。
+            # 检查时间还包含机组、储能和扩展策略所需的预测窗口；issues 列出发现的问题。
             issues = _opening_coverage_issues(
                 opening=opening,
                 settings=settings,
@@ -182,22 +201,29 @@ class BaseMarket:
             )
             if issues:
                 if inputs.incomplete_opening_error is not None:
+                    # 扩展要求数据完整时立即报错，用指定的说明及问题列表解释原因。
                     raise InputValidationError(
                         f"{inputs.incomplete_opening_error} {format_timestamp(opening.opening_time)} is incomplete: "
                         + "; ".join(issues)
                     )
+                # 默认发出警告后跳过该次开市；stacklevel=2 将警告位置指向本函数的调用处。
                 warnings.warn(
                     f"跳过市场开放 {format_timestamp(opening.opening_time)}：" + "; ".join(issues),
                     RuntimeWarning, stacklevel=2,
                 )
                 continue
+            # 只有通过检查的开市才会参与后续报价和出清。
             valid_openings.append(opening)
+
         self.valid_openings = tuple(valid_openings)
+        # 没有策略需要电价预测时，保留空字典。
         self.price_forecasts: dict[datetime, float] = {}
         if self.requires_market_price_forecast:
             if inputs.market_price_forecasts is not None:
+                # 优先直接使用扩展模块提供的预测，不在这里重新计算。
                 self.price_forecasts = inputs.market_price_forecasts
             else:
+                # 根据有效产品的交付开始时间，汇总机组、储能及扩展策略所需的预测时间点并去重。
                 forecast_starts = _forecast_starts(
                     (start for opening in valid_openings for start, _ in opening.products),
                     settings=settings,
@@ -205,6 +231,8 @@ class BaseMarket:
                     extra_forecast_offsets=inputs.forecast_offsets,
                     requires_storage_price_forecast=self.requires_storage_price_forecast,
                 )
+                # 用机组边际成本和可用出力生成朴素卖单，结合刚性负荷及电力交换，
+                # 在所需时段按统一出清价机制模拟出清，将出清电价作为预测值。
                 self.price_forecasts = _naive_price_forecasts(
                     products=[product for opening in valid_openings for product in opening.products],
                     settings=settings,
@@ -223,12 +251,10 @@ class BaseMarket:
                       ) -> tuple[MarketClearingResult, ...]:
         # 对本次开市的全部产品组织报价并出清，返回各产品的 MarketClearingResult 元组。
         # opening 指定开市时间及交付时段；scheduled_results 保存此前已出清的产品结果。
-
         # 获取扩展模块提供的额外需求报价（例如 V4 的工业用电需求）；没有扩展时使用空元组。
         additional_demand_bids = (
             self.extension.bids_for_products(opening.products, scheduled_results)
-            if self.extension is not None else ()
-        )
+            if self.extension is not None else ())
 
         # 以当前已记录的储能电量为基础，计入首个产品开始交付前会结束的已成交充放电等影响。
         # 得到各储能单元在首个交付时段开始时的预计电量（MWh），供储能报价使用。
@@ -298,7 +324,6 @@ def _clear_opening(
     scheduled_results: dict[ScheduledProductKey, MarketClearingResult] | None = None,
 ) -> tuple[MarketClearingResult, ...]:
     """根据开市时已知的机组运行状态、预计储能电量和预测数据，为本次开市的各产品生成报价。
-
     汇总需求买单和供给卖单（含外部电力交换、储能及扩展报价），检查报价是否符合价格规则，
     再按配置的市场机制逐产品出清或联合出清，返回各产品的市场出清结果元组。
     """

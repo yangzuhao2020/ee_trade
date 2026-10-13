@@ -5,9 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from math import isfinite
-
 import numpy as np
-
 from .bidding import segment_supply_offers
 from .errors import InputValidationError
 from .market_models import MarketClearingResult, SupplyOffer

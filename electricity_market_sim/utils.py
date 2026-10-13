@@ -29,14 +29,12 @@ def validate_fuel_coverage(plants: tuple[PowerPlant, ...], fuel_prices: dict[str
         InputValidationError：存在未提供价格的燃料类型时抛出，并列出缺失项。
     """
     # 对所需燃料类型去重，减去已有价格的燃料类型，再排序得到缺失项。
-    missing = sorted(
-        {
-            plant.fuel_type
-            for plant in plants
-            if plant.fuel_type != "renewable"
-        }
-        - fuel_prices.keys()
-    )
+    required_fuel_types = {
+        plant.fuel_type
+        for plant in plants
+        if plant.fuel_type != "renewable"
+    }
+    missing = sorted(required_fuel_types - fuel_prices.keys())
     if missing:
         raise InputValidationError(
             "fuel_prices_df.csv is missing prices for: " + ", ".join(missing)

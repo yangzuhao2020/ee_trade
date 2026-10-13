@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
 import warnings
-
 from ..errors import InputValidationError
 from ..config import parse_duration
 from ..models import (
@@ -1171,7 +1170,6 @@ def load_hourly_availability_profiles(
     path: Path, plants: tuple[PowerPlant, ...]
 ) -> dict[str, dict[datetime, float]]:
     """读取可选的 0～1 可用率系数，按小时对可用样本求等权平均。
-
     没有对应列的机组可用率为 1.0。有对应列的机组必须提供仿真及其价格预测
     用到的每一个交付小时。
     """

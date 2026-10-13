@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import datetime
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
-
 from .errors import InputValidationError
 from .models import (
     HouseholdDispatchResult,

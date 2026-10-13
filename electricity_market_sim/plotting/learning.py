@@ -4,7 +4,6 @@ import csv
 from pathlib import Path
 from statistics import fmean, pstdev
 from typing import Any
-
 from ..errors import PlottingError
 from ..learning_metrics import LEARNING_METRIC_FIELDS
 from ..market_models import MarketClearingResult
