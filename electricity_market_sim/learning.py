@@ -8,8 +8,13 @@ from math import isfinite
 import numpy as np
 from .bidding import segment_supply_offers
 from .errors import InputValidationError
-from .market_models import MarketClearingResult, SupplyOffer
-from .models import LearningStepResult, LearningTransition, PowerPlant
+from .models import (
+    LearningStepResult,
+    LearningTransition,
+    MarketClearingResult,
+    PowerPlant,
+    SupplyOffer,
+)
 from .utils import hours_between
 
 OBSERVATION_SIZE = 38

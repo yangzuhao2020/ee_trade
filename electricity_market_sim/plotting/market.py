@@ -3,7 +3,7 @@
 from math import isfinite
 from pathlib import Path
 from ..errors import PlottingError
-from ..market_models import MarketClearingResult
+from ..models import MarketClearingResult
 from .common import (
     _ENERGY_TOLERANCE_MWH,
     _annotate_no_supply,

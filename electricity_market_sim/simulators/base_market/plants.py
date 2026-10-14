@@ -10,8 +10,15 @@ from ...bidding import (
     heuristic_flexible_offers, naive_offer,
 )
 from ...errors import InputValidationError
-from ...market_models import MarketClearingResult, SupplyOffer
-from ...models import ExchangeSchedule, ExchangeUnit, MarketOpening, MarketSettings, PowerPlant
+from ...models import (
+    ExchangeSchedule,
+    ExchangeUnit,
+    MarketClearingResult,
+    MarketOpening,
+    MarketSettings,
+    PowerPlant,
+    SupplyOffer,
+)
 from ...utils import format_timestamp
 from .demand import _exchange_import_offer
 

@@ -11,9 +11,15 @@ from electricity_market_sim.bidding import PlantRuntimeState
 from electricity_market_sim.clearing_algorithm import clear_pay_as_clear
 from electricity_market_sim.errors import InputValidationError
 from electricity_market_sim.learning import LearningEpisodeSession
-from electricity_market_sim.market_models import DemandBid, SupplyOffer
 from electricity_market_sim.models import (
-    DemandUnit, MarketOpening, MarketSettings, PowerPlant, SimulationResult,
+    DemandBid,
+    DemandUnit,
+    MarketClearingResult,
+    MarketOpening,
+    MarketSettings,
+    PowerPlant,
+    SimulationResult,
+    SupplyOffer,
 )
 from electricity_market_sim.reporting import write_results
 from electricity_market_sim.simulators.base_market.forecasts import _opening_coverage_issues
@@ -232,6 +238,18 @@ class LearningActionContracts(unittest.TestCase):
         for bounded in (True, False):
             with self.subTest(bounded=bounded):
                 self.assertEqual(self.quote(self.session((1.7, -2.5), bounded), 0.0), ())
+
+
+class DeliveryIntervalContracts(unittest.TestCase):
+    def test_demand_bid_rejects_non_positive_delivery_duration(self):
+        for end in (START, START - HOUR):
+            with self.subTest(end=end), self.assertRaisesRegex(ValueError, "交付时长"):
+                DemandBid("load", "operator", START, end, 1.0, 100.0)
+
+    def test_clearing_result_rejects_non_positive_delivery_duration(self):
+        for end in (START, START - HOUR):
+            with self.subTest(end=end), self.assertRaisesRegex(ValueError, "交付时长"):
+                MarketClearingResult(START, end, 0.0, 0.0, 0.0, 0.0, 0.0, (), (), None)
 
 
 class ReportingContracts(unittest.TestCase):

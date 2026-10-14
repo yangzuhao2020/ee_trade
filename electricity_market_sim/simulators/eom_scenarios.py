@@ -13,13 +13,15 @@ from ..inputs import (
     load_aligned_time_series_profiles,
     load_industrial_units,
 )
-from ..market_models import DemandBid, MarketClearingResult, SupplyOffer
 from ..models import (
+    DemandBid,
     IndustrialUnit,
+    MarketClearingResult,
     MarketOpening,
     MarketSettings,
     PowerPlant,
     SimulationResult,
+    SupplyOffer,
 )
 from .base_market import BaseMarket
 from .eom import (

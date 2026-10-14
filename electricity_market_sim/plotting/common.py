@@ -3,8 +3,7 @@
 from math import isclose
 from pathlib import Path
 from ..errors import PlottingError
-from ..market_models import MarketClearingResult
-from ..models import StorageDispatchResult
+from ..models import MarketClearingResult, StorageDispatchResult
 
 
 _ENERGY_TOLERANCE_MWH = 1e-7

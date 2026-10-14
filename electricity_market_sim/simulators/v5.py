@@ -10,8 +10,15 @@ from ..errors import InputValidationError
 from ..learning import (
     ActionProvider, LearningEpisodeSession, TransitionConsumer, calculate_load_base,
 )
-from ..market_models import DemandBid, MarketClearingResult, SupplyOffer
-from ..models import MarketOpening, MarketSettings, PowerPlant, SimulationResult
+from ..models import (
+    DemandBid,
+    MarketClearingResult,
+    MarketOpening,
+    MarketSettings,
+    PowerPlant,
+    SimulationResult,
+    SupplyOffer,
+)
 from .base_market import BaseMarket
 from .base_market.forecasts import _forecast_starts
 from .eom import EomExtensionInputs, ScheduledProductKey, simulate_eom_market

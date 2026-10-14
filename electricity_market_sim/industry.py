@@ -8,14 +8,15 @@ from math import isfinite
 import numpy as np
 from scipy.optimize import linprog
 from .errors import InputValidationError
-from .market_models import DemandBid, MarketClearingResult
 from .models import (
+    DemandBid,
     IndustrialDevice,
     IndustrialDispatchResult,
     IndustrialFlexibilityResult,
     IndustrialOptimizationWindowResult,
     IndustrialPlan,
     IndustrialUnit,
+    MarketClearingResult,
 )
 from .utils import hours_between
 

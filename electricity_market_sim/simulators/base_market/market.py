@@ -14,10 +14,14 @@ from ...inputs import (
     load_hourly_availability_profiles, load_hourly_demand_profiles,
     load_hourly_exchange_profiles, load_powerplants, load_storage_units,
 )
-from ...market_models import DemandBid, MarketClearingResult
 from ...models import (
-    ExchangeSchedule, MarketOpening, MarketSettings,
-    StorageClearingContext, StorageDispatchResult,
+    DemandBid,
+    ExchangeSchedule,
+    MarketClearingResult,
+    MarketOpening,
+    MarketSettings,
+    StorageClearingContext,
+    StorageDispatchResult,
 )
 from ...utils import format_timestamp, validate_fuel_coverage, validate_unique_names
 from ..eom import EomExtensionInputs, EomMarketExtension, ScheduledProductKey

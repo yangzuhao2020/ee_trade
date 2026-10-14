@@ -3,10 +3,15 @@
 from datetime import datetime
 from ...bidding import StorageRuntimeState, storage_heuristic_orders
 from ...errors import InputValidationError
-from ...market_models import DemandBid, MarketClearingResult, SupplyOffer
 from ...models import (
-    MarketOpening, MarketSettings, StorageClearingContext,
-    StorageDispatchResult, StorageUnit,
+    DemandBid,
+    MarketClearingResult,
+    MarketOpening,
+    MarketSettings,
+    StorageClearingContext,
+    StorageDispatchResult,
+    StorageUnit,
+    SupplyOffer,
 )
 from ...utils import format_timestamp
 

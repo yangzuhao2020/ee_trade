@@ -8,8 +8,15 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
-from ..market_models import DemandBid, MarketClearingResult, SupplyOffer
-from ..models import MarketOpening, PowerPlant, SimulationResult, StorageDispatchResult
+from ..models import (
+    DemandBid,
+    MarketClearingResult,
+    MarketOpening,
+    PowerPlant,
+    SimulationResult,
+    StorageDispatchResult,
+    SupplyOffer,
+)
 
 if TYPE_CHECKING:
     from .base_market import BaseMarket
@@ -81,6 +88,19 @@ def simulate_eom_market(market: BaseMarket) -> SimulationResult:
     results: list[MarketClearingResult] = [] # 最终市场结果
     storage_results: list[StorageDispatchResult] = [] # 最终储能调度结果
 
+    def finalize_product_starts(keys: list[ScheduledProductKey]) -> None:
+        # keys 是当前时刻待开始交付的产品标识，每个标识包含开市时间、交付开始时间和结束时间。
+        for key in keys:
+            # 根据机组此前的运行状态，为本次交付中需要启动的机组补计启动成本。
+            result = market.start_delivery(scheduled_results[key])
+            # 将补计成本后的结果写回，供后续交付结束事件及扩展模块使用。
+            scheduled_results[key] = result
+            # 纳入最终市场结果，此时结果已包含本次交付应计的启动成本。
+            results.append(result)
+            if extension is not None:
+                # 通知扩展模块：V5 据此记录学习结果并计算奖励，V4 为无需处理的空实现。
+                extension.record_delivery_start(result)
+
     while openings_by_time or pending_starts or pending_ends:
         event_time = min([*openings_by_time, *pending_starts, *pending_ends])
         # 处理当前时间点所有“应该结束交付”的产品，并记录由此产生的储能结果和扩展状态更新。
@@ -127,19 +147,6 @@ def simulate_eom_market(market: BaseMarket) -> SimulationResult:
                        将储能调度结果追加到 storage_results。
     所有事件完成后，将 results 和 storage_results 汇总为 SimulationResult。
     """
-
-    def finalize_product_starts(keys: list[ScheduledProductKey]) -> None:
-        # keys 是当前时刻待开始交付的产品标识，每个标识包含开市时间、交付开始时间和结束时间。
-        for key in keys:
-            # 根据机组此前的运行状态，为本次交付中需要启动的机组补计启动成本。
-            result = market.start_delivery(scheduled_results[key])
-            # 将补计成本后的结果写回，供后续交付结束事件及扩展模块使用。
-            scheduled_results[key] = result
-            # 纳入最终市场结果，此时结果已包含本次交付应计的启动成本。
-            results.append(result)
-            if extension is not None:
-                # 通知扩展模块：V5 据此记录学习结果并计算奖励，V4 为无需处理的空实现。
-                extension.record_delivery_start(result)
 
     result = SimulationResult(settings=market.settings,
         market_results=tuple(sorted(

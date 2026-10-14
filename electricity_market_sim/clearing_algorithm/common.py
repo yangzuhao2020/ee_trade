@@ -2,13 +2,7 @@
 
 from datetime import datetime
 from ..errors import InputValidationError
-from ..market_models import (
-    ClearedDemandBid,
-    DemandBid,
-    SupplyOffer,
-    sum_cleared_demand,
-)
-from ..models import MarketSettings
+from ..models import ClearedDemandBid, DemandBid, MarketSettings, SupplyOffer, sum_cleared_demand
 
 
 _EPSILON = 1e-9

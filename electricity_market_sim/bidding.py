@@ -4,8 +4,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from .market_models import DemandBid, SupplyOffer
-from .models import PowerPlant, StorageUnit
+from .models import DemandBid, PowerPlant, StorageUnit, SupplyOffer
 from .utils import hours_between
 
 _POWER_TOLERANCE_MW = 1e-9

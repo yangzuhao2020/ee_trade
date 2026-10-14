@@ -6,8 +6,7 @@ from statistics import fmean, pstdev
 from typing import Any
 from ..errors import PlottingError
 from ..learning_metrics import LEARNING_METRIC_FIELDS
-from ..market_models import MarketClearingResult
-from ..models import LearningStepResult
+from ..models import LearningStepResult, MarketClearingResult
 from .common import (
     _ENERGY_TOLERANCE_MWH,
     _UNIT_COLORS,

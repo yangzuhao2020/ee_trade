@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from electricity_market_sim.bidding import available_power_mw
-from electricity_market_sim.clearing import (
+from electricity_market_sim.clearing_algorithm import (
     clear_complex_opening,
     clear_pay_as_bid,
     clear_pay_as_clear,
@@ -21,9 +21,13 @@ from electricity_market_sim.inputs.csv_loader import (
     load_hourly_demand_profiles,
     load_hourly_exchange_profiles,
 )
-from electricity_market_sim.market_models import DemandBid, SupplyOffer
 from electricity_market_sim.models import (
-    DemandUnit, ExchangeUnit, PowerPlant, StorageClearingContext,
+    DemandBid,
+    DemandUnit,
+    ExchangeUnit,
+    PowerPlant,
+    StorageClearingContext,
+    SupplyOffer,
 )
 
 

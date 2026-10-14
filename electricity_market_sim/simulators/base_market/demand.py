@@ -1,8 +1,7 @@
 """刚性与弹性需求买单生成，以及计划进口卖单和出口买单的构建。"""
 
 from datetime import datetime
-from ...market_models import DemandBid, SupplyOffer
-from ...models import ExchangeSchedule, ExchangeUnit
+from ...models import DemandBid, ExchangeSchedule, ExchangeUnit, SupplyOffer
 from ...utils import hours_between
 
 
@@ -65,9 +64,7 @@ def _demand_bids_for_product(
     for demand_unit in demand_units:
         if demand_unit.is_elastic:
             if include_elastic:
-                demand_bids.extend(
-                    _elastic_demand_bids(demand_unit, delivery_start, delivery_end)
-                )
+                demand_bids.extend(_elastic_demand_bids(demand_unit, delivery_start, delivery_end))
             continue
         demand_power_mw = demand_profiles[demand_unit.name][delivery_start]
         demand_volume_mwh = demand_power_mw * duration_hours

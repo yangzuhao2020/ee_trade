@@ -1,5 +1,4 @@
-"""市场买卖订单、成交记录及单时段出清结果的数据结构。
-提供成交电量与功率换算、交易收支和利润计算，并校验成交电量平衡与结算一致性。"""
+""""""
 
 from collections import defaultdict
 from collections.abc import Iterable
@@ -7,144 +6,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from math import isclose, isfinite
 from operator import attrgetter
-from .utils import hours_between
+from ..utils import hours_between
+from .orders import DemandBid, SupplyOffer
 
 
 _ENERGY_TOLERANCE_MWH = 1e-7
 
 
 @dataclass(frozen=True)
-class DemandBid:
-    """买单，其申报电量始终为非负值。"""
-
-    unit_name: str
-    operator: str
-    delivery_start: datetime
-    delivery_end: datetime
-    volume_mwh: float
-    price_eur_per_mwh: float
-    bid_type: str = "local_load"
-    bid_id: str | None = None
-    # ``bid_type`` 保留 V1 电力交换逻辑使用的市场侧订单角色。
-    # ``demand_type`` 区分刚性负荷与价格响应负荷，
-    # 避免将未成交的弹性买单报告为非自愿限电。
-    demand_type: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.delivery_end <= self.delivery_start:
-            raise ValueError("A demand bid must have a positive delivery duration.")
-        if not isfinite(self.volume_mwh) or self.volume_mwh < 0:
-            raise ValueError("Demand bid volume must be a non-negative finite value.")
-        if not isfinite(self.price_eur_per_mwh):
-            raise ValueError("Demand bid price must be finite.")
-        if self.bid_type not in {"local_load", "export", "storage_charge"}:
-            raise ValueError(
-                "Demand bids must be local_load, export, or storage_charge bids."
-            )
-        demand_type = self.demand_type
-        if demand_type is None:
-            if self.bid_type == "export":
-                demand_type = "export"
-            elif self.bid_type == "storage_charge":
-                demand_type = "storage_charge"
-            else:
-                demand_type = "inelastic_load"
-            object.__setattr__(self, "demand_type", demand_type)
-        if demand_type not in {
-            "inelastic_load",
-            "elastic_load",
-            "household_load",
-            "industrial_load",
-            "export",
-            "storage_charge",
-        }:
-            raise ValueError(
-                "demand_type must be inelastic_load, elastic_load, household_load, "
-                "industrial_load, export, or storage_charge."
-            )
-        if (self.bid_type == "export") != (demand_type == "export"):
-            raise ValueError("Export demand bids must use demand_type='export'.")
-        if (self.bid_type == "storage_charge") != (
-            demand_type == "storage_charge"
-        ):
-            raise ValueError(
-                "Storage charge bids must use demand_type='storage_charge'."
-            )
-
-    @property
-    def identifier(self) -> str:
-        """返回稳定的订单标识，供需求明细结果报告使用。"""
-        return self.bid_id or self.unit_name
-
-    @property
-    def side(self) -> str:
-        return "buy"
-
-
-@dataclass(frozen=True)
-class SupplyOffer:
-    """卖单，以电量参与出清，同时保留功率用于结果报告。"""
-    unit_name: str
-    operator: str
-    technology: str
-    delivery_start: datetime
-    delivery_end: datetime
-    offered_power_mw: float
-    offered_energy_mwh: float
-    bid_price_eur_per_mwh: float
-    marginal_cost_eur_per_mwh: float
-    offer_type: str = "power_plant"
-    # V2 中同一机组可以提交多条卖单。``unit_name`` 仍表示物理机组，
-    # ``offer_id`` 用于标识一条市场订单。
-    offer_id: str | None = None
-    offer_segment: str = "single"
-    # 复杂出清的附加字段：``offer_id`` 标识订单在单个交付产品上的分段，
-    # ``bid_id`` 标识一条可能跨多个交付产品的市场订单。
-    bid_id: str | None = None
-    bid_type: str = "SB"
-    min_acceptance_ratio: float = 0.0
-    parent_bid_id: str | None = None
-
-    def __post_init__(self) -> None:
-        """校验交付时长、报价功率、电量、价格、边际成本和报价类型，并强制执行 V2 有意收窄的最小接受比例约定。"""
-
-        if self.delivery_end <= self.delivery_start:
-            raise ValueError("A supply offer must have a positive delivery duration.")
-        if not isfinite(self.offered_power_mw) or self.offered_power_mw < 0:
-            raise ValueError("Offered power must be a non-negative finite value.")
-        if not isfinite(self.offered_energy_mwh) or self.offered_energy_mwh < 0:
-            raise ValueError("Offered energy must be a non-negative finite value.")
-        if not isfinite(self.bid_price_eur_per_mwh):
-            raise ValueError("Supply offer price must be finite.")
-        if not isfinite(self.marginal_cost_eur_per_mwh):
-            raise ValueError("Supply marginal cost must be finite.")
-        if self.bid_type not in {"SB", "BB", "LB"}:
-            raise ValueError(f"Unsupported bid_type {self.bid_type!r}.")
-        if not isfinite(self.min_acceptance_ratio):
-            raise ValueError("min_acceptance_ratio must be finite.")
-        if self.bid_type == "BB" and self.min_acceptance_ratio != 1.0:
-            raise ValueError("Version two supports BB orders only with MAR=1.")
-        if self.bid_type in {"SB", "LB"} and self.min_acceptance_ratio != 0.0:
-            raise ValueError("Version two supports SB and LB orders only with MAR=0.")
-
-    @property
-    def identifier(self) -> str:
-        """返回唯一的订单键；沿用 V1 的默认做法，未指定时使用机组名称。"""
-        return self.offer_id or self.unit_name
-
-    @property
-    def complex_identifier(self) -> str:
-        """返回块报价各分段共用的订单标识。"""
-        return self.bid_id or self.identifier
-
-    @property
-    def side(self) -> str:
-        return "sell"
-
-
-@dataclass(frozen=True)
 class ClearedSupplyOffer:
-    """单条卖单的出清结果，包括成交电量为零的情况。"""
+    """出清后，保存单条卖单的原始报价和出清结果，包括成交电量为零的情况。"""
     offer: SupplyOffer
     accepted_energy_mwh: float
     clearing_price_eur_per_mwh: float
@@ -160,10 +31,12 @@ class ClearedSupplyOffer:
 
     @property
     def revenue_eur(self) -> float:
+        # 售电收入 = 实际成交电量（MWh）× 结算价格（EUR/MWh）
         return self.accepted_energy_mwh * self.clearing_price_eur_per_mwh
 
     @property
     def variable_cost_eur(self) -> float:
+        # 可变成本 = 成交电量（MWh）× 单位电量边际成本（EUR/MWh）
         return self.accepted_energy_mwh * self.offer.marginal_cost_eur_per_mwh
 
     @property
@@ -173,12 +46,13 @@ class ClearedSupplyOffer:
 
     @property
     def profit_eur(self) -> float:
+        # 利润
         return self.revenue_eur - self.total_cost_eur
 
 
 @dataclass(frozen=True)
 class ClearedDemandBid:
-    """单条买单的成交电量与结算付款。"""
+    """出清后，保存单条买单的原始报价、成交电量及结算信息，包括成交电量为零的情况。"""
     bid: DemandBid
     accepted_energy_mwh: float
     clearing_price_eur_per_mwh: float
@@ -193,17 +67,18 @@ class ClearedDemandBid:
 
     @property
     def unserved_energy_mwh(self) -> float:
+        # 未成交电量 = 申报购买电量 − 实际成交电量
         return self.bid.volume_mwh - self.accepted_energy_mwh
 
     @property
     def payment_eur(self) -> float:
+        # 付款金额 = 实际成交电量（MWh）× 结算价格（EUR/MWh）
         return self.accepted_energy_mwh * self.clearing_price_eur_per_mwh
 
 
 def sum_cleared_demand(
     demand_bids: Iterable[ClearedDemandBid],
     attribute: str,
-    *,
     demand_type: str | None = None,
     bid_type: str | None = None,
 ) -> float:
@@ -229,24 +104,37 @@ def sum_cleared_demand(
 
 @dataclass(frozen=True)
 class Trade:
-    """按报价结算产品中买卖双方的一条不可变成交记录。"""
-    delivery_start: datetime
-    delivery_end: datetime
-    buyer_bid_id: str
-    seller_offer_id: str
-    trade_energy_mwh: float
-    trade_price_eur_per_mwh: float
+    """出清后，保存一条买单与一条卖单之间的单笔成交记录。
+    包含交付时段、订单标识、成交电量和结算价格。
+    同一订单可对应多笔成交，供 MarketClearingResult 汇总核对。
+    | 买单 | 卖单 | 成交电量 | 成交价格 | 付款金额 |
+    | B1   | S1  | 6 MWh | 50 EUR/MWh | 300 EUR |
+    | B1   | S2  | 4 MWh | 60 EUR/MWh | 240 EUR |
+    """
+    delivery_start: datetime  # 本笔成交所属产品的交付开始时间。
+    delivery_end: datetime  # 本笔成交所属产品的交付结束时间。
+    buyer_bid_id: str  # 买单标识，对应 DemandBid.identifier。
+    seller_offer_id: str  # 卖单标识，对应 SupplyOffer.identifier。
+    trade_energy_mwh: float  # 本笔实际成交电量（MWh），一条订单的总成交量可由多笔记录累加得到。
+    trade_price_eur_per_mwh: float  # 本笔成交的实际结算价格（EUR/MWh）。
 
     def __post_init__(self) -> None:
+        """创建成交记录后，检查交付时段、成交电量和价格是否符合基本要求。"""
+        # 交付结束时间必须晚于开始时间，以保证产品具有正的交付时长。
         if self.delivery_end <= self.delivery_start:
-            raise ValueError("A trade must have a positive delivery duration.")
+            raise ValueError("成交记录的交付时长必须大于 0。")
+        # 只记录实际发生的成交；电量为零的订单由对应的订单出清结果保存。
         if self.trade_energy_mwh <= 0:
-            raise ValueError("Trade energy must be positive.")
+            raise ValueError("成交电量必须为正数。")
+        # 价格允许为负，但必须是有限值，排除 NaN 和正负无穷。
         if not isfinite(self.trade_price_eur_per_mwh):
-            raise ValueError("Trade price must be finite.")
+            raise ValueError("成交价格必须是有限值。")
 
     @property
     def payment_eur(self) -> float:
+        """付款金额 = 成交电量（MWh）× 成交价格（EUR/MWh）。
+        若成交价格为负，付款金额也为负，表示本笔成交由卖方向买方支付。
+        """
         return self.trade_energy_mwh * self.trade_price_eur_per_mwh
 
 
@@ -270,16 +158,16 @@ class MarketClearingResult:
     def __post_init__(self) -> None:
         """校验结果报告和绘图所用的物理量与财务量。"""
         if self.delivery_end <= self.delivery_start:
-            raise ValueError("A market product must have a positive delivery duration.")
+            raise ValueError("市场出清结果的交付时长必须大于 0。")
         if self.opening_time is not None and self.opening_time > self.delivery_start:
-            raise ValueError("A market opening cannot occur after delivery starts.")
+            raise ValueError("开市时间不能晚于交付开始时间。")
         if self.pricing_method == "pay_as_bid":
             if self.clearing_price_eur_per_mwh is not None:
-                raise ValueError("Pay-as-bid markets do not have one clearing price.")
+                raise ValueError("pay_as_bid 市场没有统一出清价。")
         elif self.clearing_price_eur_per_mwh is None or not isfinite(
             self.clearing_price_eur_per_mwh
         ):
-            raise ValueError("The clearing price must be finite.")
+            raise ValueError("出清价必须是有限值。")
         if any(
             value < -_ENERGY_TOLERANCE_MWH
             for value in (
@@ -289,7 +177,7 @@ class MarketClearingResult:
                 self.unfulfilled_export_mwh,
             )
         ):
-            raise ValueError("Market energy quantities cannot be negative.")
+            raise ValueError("市场电量不能为负数。")
         if any(
             cleared.offer.delivery_start != self.delivery_start
             or cleared.offer.delivery_end != self.delivery_end
@@ -299,7 +187,7 @@ class MarketClearingResult:
             or cleared.bid.delivery_end != self.delivery_end
             for cleared in self.demand_bids
         ):
-            raise ValueError("All cleared bids and offers must share the market product.")
+            raise ValueError("所有已出清的买单和卖单必须属于同一市场产品。")
         if any(
             cleared.accepted_energy_mwh < -_ENERGY_TOLERANCE_MWH
             or cleared.accepted_energy_mwh
@@ -311,7 +199,7 @@ class MarketClearingResult:
             > cleared.bid.volume_mwh + _ENERGY_TOLERANCE_MWH
             for cleared in self.demand_bids
         ):
-            raise ValueError("Accepted energy must be between zero and the submitted volume.")
+            raise ValueError("成交电量必须介于 0 和申报电量之间。")
         if self.pricing_method != "pay_as_bid" and any(
             not isclose(
                 cleared.clearing_price_eur_per_mwh,
@@ -321,20 +209,18 @@ class MarketClearingResult:
             )
             for cleared in (*self.offers, *self.demand_bids)
         ):
-            raise ValueError("All cleared orders must use the market clearing price.")
+            raise ValueError("所有已出清订单必须使用市场出清价。")
         offer_ids = [cleared.offer.identifier for cleared in self.offers]
         if len(offer_ids) != len(set(offer_ids)):
             raise ValueError(
-                "Supply offer identifiers must be unique within a product; "
-                "unit names must be unique when no offer_id is supplied."
-            )
+                "同一产品内的卖单标识必须唯一；" "未提供 offer_id 时，机组名称必须唯一。")
         if any(
             cleared.offer.offer_type
             not in {"power_plant", "import", "storage_discharge"}
             for cleared in self.offers
         ):
             raise ValueError(
-                "Supply offers must be power_plant, import, or storage_discharge offers.")
+                "卖单的 offer_type 必须是 power_plant、import 或 storage_discharge。")
 
         requested_demand = self.demand_total("bid.volume_mwh")
         if not isclose(
@@ -343,9 +229,8 @@ class MarketClearingResult:
             rel_tol=0.0,
             abs_tol=_ENERGY_TOLERANCE_MWH,
         ):
-            raise ValueError(
-                "Requested demand energy must equal the sum of demand bids."
-            )
+            raise ValueError("需求申报电量必须等于各买单电量之和。")
+        
         accepted_energy = sum(offer.accepted_energy_mwh for offer in self.offers)
         if not isclose(
             accepted_energy,
@@ -353,9 +238,8 @@ class MarketClearingResult:
             rel_tol=0.0,
             abs_tol=_ENERGY_TOLERANCE_MWH,
         ):
-            raise ValueError(
-                "The sum of accepted supply energy must equal cleared energy."
-            )
+            raise ValueError("卖单成交电量之和必须等于出清电量。")
+        
         accepted_demand_energy = self.demand_total("accepted_energy_mwh")
         if not isclose(
             accepted_demand_energy,
@@ -363,56 +247,43 @@ class MarketClearingResult:
             rel_tol=0.0,
             abs_tol=_ENERGY_TOLERANCE_MWH,
         ):
-            raise ValueError(
-                "The sum of accepted demand energy must equal cleared energy."
-            )
+            raise ValueError("买单成交电量之和必须等于出清电量。")
+        
         expected_unserved_load = self.demand_total(
-            "unserved_energy_mwh", demand_type="inelastic_load"
-        )
+            "unserved_energy_mwh", demand_type="inelastic_load")
         if not isclose(
             self.unserved_load_mwh,
             expected_unserved_load,
             rel_tol=0.0,
             abs_tol=_ENERGY_TOLERANCE_MWH,
         ):
-            raise ValueError(
-                "Unserved load must equal the unmet local-load demand energy."
-            )
+            raise ValueError("未满足负荷必须等于本地负荷买单中未满足的电量。")
         expected_unfulfilled_export = self.demand_total(
-            "unserved_energy_mwh", bid_type="export"
-        )
+            "unserved_energy_mwh", bid_type="export")
         if not isclose(
             self.unfulfilled_export_mwh,
             expected_unfulfilled_export,
             rel_tol=0.0,
             abs_tol=_ENERGY_TOLERANCE_MWH,
         ):
-            raise ValueError(
-                "Unfulfilled export must equal the unmet export demand energy."
-            )
+            raise ValueError("未完成出口电量必须等于出口买单中未满足的电量。")
 
         if self.pricing_method not in {"merit_order", "dual", "pay_as_bid"}:
-            raise ValueError("pricing_method must be merit_order, dual, or pay_as_bid.")
+            raise ValueError("pricing_method 必须是 merit_order、dual 或 pay_as_bid。")
 
         if self.pricing_method == "pay_as_bid" or self.trades:
+            # 只要采用 pay_as_bid，或者 trades 非空，就核对成交明细与订单、市场汇总结果是否一致。
             self._validate_trades()
-        offer_names_set = {cleared.offer.unit_name for cleared in self.offers}
+            
         if self.pricing_method == "merit_order" and self.cleared_energy_mwh > _ENERGY_TOLERANCE_MWH:
-            if self.marginal_unit_name is None:
-                raise ValueError("A cleared market must identify its marginal unit.")
-            if self.marginal_unit_name not in offer_names_set:
-                raise ValueError("The marginal unit must belong to the cleared offers.")
             marginal_offers = []
             for cleared_offer in self.offers:
-                is_marginal_unit = (
-                    cleared_offer.offer.unit_name == self.marginal_unit_name
-                )
+                is_marginal_unit = (cleared_offer.offer.unit_name == self.marginal_unit_name)
                 if not is_marginal_unit:
                     continue
 
-                has_accepted_energy = (
-                    cleared_offer.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH
-                )
+                has_accepted_energy = (cleared_offer.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH) 
+                # 检查是否有接受的电量
                 if not has_accepted_energy:
                     continue
 
@@ -426,10 +297,12 @@ class MarketClearingResult:
                     continue
 
                 marginal_offers.append(cleared_offer)
+                
             if not marginal_offers:
-                raise ValueError("The marginal unit must have an accepted offer at the clearing price.")
+                raise ValueError("边际机组必须有一条以出清价成交的卖单。")
+            
         elif self.pricing_method == "merit_order" and self.marginal_unit_name is not None:
-            raise ValueError("An uncleared market cannot have a marginal unit.")
+            raise ValueError("未出清的市场不能有边际机组。")
 
     @property
     def duration_hours(self) -> float:
@@ -443,7 +316,6 @@ class MarketClearingResult:
     def demand_total(
         self,
         attribute: str,
-        *,
         demand_type: str | None = None,
         bid_type: str | None = None,
     ) -> float:
@@ -502,7 +374,6 @@ class MarketClearingResult:
     @property
     def net_exchange_mwh(self) -> float:
         """正值表示向本地市场的净进口。"""
-
         return self.cleared_import_mwh - self.cleared_export_mwh
 
     @property
@@ -536,14 +407,20 @@ class MarketClearingResult:
         return total_payment_eur / total_trade_energy_mwh
 
     def _validate_trades(self) -> None:
-        """核对不可变的成交记录与订单的成交电量和价格是否一致。"""
+        """交付时段一致：所有成交记录都属于当前市场产品。
+        总成交电量一致：各笔成交电量之和等于 cleared_energy_mwh。
+        订单存在：每笔成交中的买单、卖单编号都能找到对应订单。
+        成交价格正确：pay_as_bid 按卖单报价结算，其他机制按统一出清价结算；成交价还不能超过买方最高愿付价。
+        每条订单的成交量一致：按订单编号累加逐笔成交电量，必须等于对应 ClearedSupplyOffer、ClearedDemandBid 中的成交量。
+        买方付款一致：按买单累加逐笔付款，必须等于该买单汇总的付款金额。
+        """
 
         if any(
             trade.delivery_start != self.delivery_start
             or trade.delivery_end != self.delivery_end
             for trade in self.trades
         ):
-            raise ValueError("All trades must share the market product.")
+            raise ValueError("所有成交记录必须属于同一市场产品。")
         trade_energy = sum(trade.trade_energy_mwh for trade in self.trades)
         if not isclose(
             trade_energy,
@@ -551,18 +428,20 @@ class MarketClearingResult:
             rel_tol=0.0,
             abs_tol=_ENERGY_TOLERANCE_MWH,
         ):
-            raise ValueError("Trade energy must equal cleared market energy.")
+            raise ValueError("成交记录的总电量必须等于市场出清电量。")
 
         offers = {cleared.offer.identifier: cleared for cleared in self.offers}
         bids = {cleared.bid.identifier: cleared for cleared in self.demand_bids}
         traded_by_offer: dict[str, float] = defaultdict(float)
         traded_by_bid: dict[str, float] = defaultdict(float)
         payment_by_bid: dict[str, float] = defaultdict(float)
+        
         for trade in self.trades:
             if trade.seller_offer_id not in offers:
-                raise ValueError(f"Unknown seller offer {trade.seller_offer_id!r}.")
+                raise ValueError(f"未知的卖单：{trade.seller_offer_id!r}。")
             if trade.buyer_bid_id not in bids:
-                raise ValueError(f"Unknown buyer bid {trade.buyer_bid_id!r}.")
+                raise ValueError(f"未知的买单：{trade.buyer_bid_id!r}。")
+            
             offer = offers[trade.seller_offer_id].offer
             bid = bids[trade.buyer_bid_id].bid
             expected_trade_price = (
@@ -577,11 +456,9 @@ class MarketClearingResult:
                 rel_tol=0.0,
                 abs_tol=_ENERGY_TOLERANCE_MWH,
             ):
-                raise ValueError(
-                    "Trade price must match the market settlement rule."
-                )
+                raise ValueError("成交价格必须符合市场结算规则。")
             if trade.trade_price_eur_per_mwh > bid.price_eur_per_mwh + _ENERGY_TOLERANCE_MWH:
-                raise ValueError("A trade price cannot exceed the buyer bid price.")
+                raise ValueError("成交价格不能高于买单报价。")
             traded_by_offer[trade.seller_offer_id] += trade.trade_energy_mwh
             traded_by_bid[trade.buyer_bid_id] += trade.trade_energy_mwh
             payment_by_bid[trade.buyer_bid_id] += trade.payment_eur
@@ -594,7 +471,7 @@ class MarketClearingResult:
                 rel_tol=0.0,
                 abs_tol=_ENERGY_TOLERANCE_MWH,
             ):
-                raise ValueError("Trade quantities must reconcile to seller acceptance.")
+                raise ValueError("成交记录的电量必须与卖单成交电量一致。")
             if self.pricing_method == "pay_as_bid":
                 expected_price = (
                     cleared.offer.bid_price_eur_per_mwh
@@ -607,7 +484,7 @@ class MarketClearingResult:
                     rel_tol=0.0,
                     abs_tol=_ENERGY_TOLERANCE_MWH,
                 ):
-                    raise ValueError("A pay-as-bid seller must settle at its own offer price.")
+                    raise ValueError("pay_as_bid 卖方必须按自身报价结算。")
         for identifier, cleared in bids.items():
             accepted = traded_by_bid[identifier]
             if not isclose(
@@ -616,11 +493,11 @@ class MarketClearingResult:
                 rel_tol=0.0,
                 abs_tol=_ENERGY_TOLERANCE_MWH,
             ):
-                raise ValueError("Trade quantities must reconcile to buyer acceptance.")
+                raise ValueError("成交记录的电量必须与买单成交电量一致。")
             if not isclose(
                 payment_by_bid[identifier],
                 cleared.payment_eur,
                 rel_tol=0.0,
                 abs_tol=1e-6,
             ):
-                raise ValueError("Trade payments must reconcile to buyer payment.")
+                raise ValueError("成交记录的支付金额必须与买单结算支付一致。")

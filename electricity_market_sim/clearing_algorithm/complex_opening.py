@@ -15,14 +15,14 @@ else:
     _SCIPY_IMPORT_ERROR = None
 
 from ..errors import InputValidationError
-from ..market_models import (
+from ..models import (
     ClearedDemandBid,
     ClearedSupplyOffer,
     DemandBid,
     MarketClearingResult,
+    StorageClearingContext,
     SupplyOffer,
 )
-from ..models import StorageClearingContext
 from .common import _EPSILON, _demand_totals
 
 

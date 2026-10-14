@@ -15,8 +15,14 @@ from ..inputs import (
     load_powerplants,
     load_time_series_profiles,
 )
-from ..market_models import DemandBid, MarketClearingResult, SupplyOffer
-from ..models import MarketOpening, MarketSettings, SimulationResult
+from ..models import (
+    DemandBid,
+    MarketClearingResult,
+    MarketOpening,
+    MarketSettings,
+    SimulationResult,
+    SupplyOffer,
+)
 from ..utils import (
     format_timestamp, hours_between, validate_fuel_coverage, validate_unique_names,
 )
