@@ -6,4 +6,5 @@ outputs
 tests/*
 !tests/eom_regression.py
 !tests/test_eom_engine.py
+!tests/test_industry_market.py
 *.pyc

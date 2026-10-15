@@ -1,17 +1,20 @@
-"""第一、二、四、五版共用的能量市场事件引擎和参与者扩展接口。
-按时间处理开市、交付开始与结束事件，并调用扩展完成额外报价、状态记录及结果汇总。"""
+"""第一、二、五版共用的能量市场事件引擎和参与者扩展接口。
+按时间处理开市、交付开始与结束事件，并调用扩展完成额外报价、状态记录及结果汇总。
+同时提供无扩展的第一、二版市场仿真入口。"""
 
 from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from ..models import (
     DemandBid,
     MarketClearingResult,
     MarketOpening,
+    MarketSettings,
     PowerPlant,
     SimulationResult,
     StorageDispatchResult,
@@ -75,7 +78,7 @@ class EomMarketExtension(Protocol):
 
 def simulate_eom_market(market: BaseMarket) -> SimulationResult:
     """按时间顺序模拟一个市场从开市、出清、开始交付到结束交付的完整过程."""
-    extension = market.extension # 服务于 4~5 版本
+    extension = market.extension # 第五版使用学习扩展。
     settle_before_opening = extension is not None and extension.settle_before_opening
     openings_by_time: dict[datetime, list[MarketOpening]] = defaultdict(list)
     for opening in market.valid_openings:
@@ -98,7 +101,7 @@ def simulate_eom_market(market: BaseMarket) -> SimulationResult:
             # 纳入最终市场结果，此时结果已包含本次交付应计的启动成本。
             results.append(result)
             if extension is not None:
-                # 通知扩展模块：V5 据此记录学习结果并计算奖励，V4 为无需处理的空实现。
+                # 通知扩展模块：V5 据此记录学习结果并计算奖励。
                 extension.record_delivery_start(result)
 
     while openings_by_time or pending_starts or pending_ends:
@@ -159,3 +162,17 @@ def simulate_eom_market(market: BaseMarket) -> SimulationResult:
         )),
     )
     return extension.finalize(result) if extension is not None else result
+
+
+def simulate_v1_v2_market(
+    input_path: Path,
+    settings: MarketSettings,
+    openings: tuple[MarketOpening, ...],
+) -> SimulationResult:
+    """根据已校验的配置和开市安排，计算一个 V1/V2 场景。"""
+    # 延迟导入：base_market 在运行时依赖本模块的扩展协议与类型别名。
+    from .base_market import BaseMarket
+    market = BaseMarket(input_path, settings, openings) # 创建对象，保存输入数据目录，
+    market.prepare()
+    # 加载仿真数据、检查配置、准备电价预测、初始化运行状态。
+    return simulate_eom_market(market)

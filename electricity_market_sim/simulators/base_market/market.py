@@ -1,6 +1,7 @@
 """第一、二、四、五版共用的基础市场：加载参与者、准备预测、组织出清并更新交付状态。"""
 
 import warnings
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from ...bidding import PlantRuntimeState, StorageRuntimeState
@@ -54,7 +55,15 @@ class BaseMarket:
         self.openings = openings
         self.extension: EomMarketExtension | None = None
 
-    def prepare(self, extension: EomMarketExtension | None = None) -> None:
+    def prepare(
+        self,
+        extension: EomMarketExtension | None = None,
+        *,
+        input_loader: Callable[["BaseMarket"], EomExtensionInputs] | None = None,
+    ) -> None:
+        """准备基础市场；独立场景可用 input_loader 提供额外输入。"""
+        if extension is not None and input_loader is not None:
+            raise ValueError("Specify either extension or input_loader, not both.")
         input_path, settings = self.input_path, self.settings
         self.extension = extension
         self.plants = load_powerplants(input_path / "powerplant_units.csv")
@@ -79,8 +88,11 @@ class BaseMarket:
             input_path / "demand_df.csv", self.demand_units) # 读取需求侧的负荷预测数据。
         self.availability_profiles = load_hourly_availability_profiles(
             input_path / "availability_df.csv", self.plants) # 读取发电机组的可用性预测数据。
-        extension_inputs = (
-            extension.prepare(self) if extension is not None else EomExtensionInputs())
+        if input_loader is not None:
+            extension_inputs = input_loader(self)
+        else:
+            extension_inputs = (
+                extension.prepare(self) if extension is not None else EomExtensionInputs())
         self.extension_inputs = extension_inputs
         self.requires_market_price_forecast |= bool(extension_inputs.forecast_offsets)
         # 扩展模块的预测需求合并到市场的预测开关中
@@ -251,20 +263,22 @@ class BaseMarket:
                 )
 
     def clear_opening(self, opening: MarketOpening,
-                      scheduled_results: dict[ScheduledProductKey, MarketClearingResult]
+                      scheduled_results: dict[ScheduledProductKey, MarketClearingResult],
+                      *,
+                      additional_demand_bids: tuple[DemandBid, ...] = (),
                       ) -> tuple[MarketClearingResult, ...]:
         """根据开市时已知的机组运行状态、预计储能电量和预测数据，为本次开市的各产品生成报价。
         汇总需求买单和供给卖单（含外部电力交换、储能及扩展报价），检查报价是否符合价格规则，
+        additional_demand_bids 接收场景已生成的额外买单。
         再按配置的市场机制逐产品出清或联合出清，返回各产品的市场出清结果元组。
         """
         # 对本次开市的全部产品组织报价并出清，返回各产品的 MarketClearingResult 元组。
         # opening 指定开市时间及交付时段；scheduled_results 保存此前已出清的产品结果。
         settings = self.settings
-        # 获取扩展模块提供的额外需求报价（例如 V4 的工业用电需求）；没有扩展时使用空元组。
-        additional_demand_bids = (
+        # 合并扩展模块的需求报价；独立场景的额外订单通过参数传入。
+        extension_demand_bids = (
             self.extension.bids_for_products(opening.products, scheduled_results)
             if self.extension is not None else ())
-
         # 以当前已记录的储能电量为基础，计入首个产品开始交付前会结束的已成交充放电等影响。
         # 得到各储能单元在首个交付时段开始时的预计电量（MWh），供储能报价使用。
         # 此处仅预测电量，实际储能状态由交付结束事件更新。
@@ -291,7 +305,9 @@ class BaseMarket:
             ) # 本地刚性负荷买单与弹性负荷买单
             all_demand_bids.extend(demand_bids)
             exchange_schedules[delivery_start] = schedule
+
         all_demand_bids.extend(additional_demand_bids)
+        all_demand_bids.extend(extension_demand_bids)
 
         offers = _offers_for_opening(
             opening=opening,

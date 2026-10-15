@@ -153,7 +153,6 @@ def maximum_industry_production(
     initial_powers_mw: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> float:
     """在设备容量和爬坡约束下最大化钢产量。"""
-
     if not products:
         return 0.0
     coefficients = process_coefficients(unit)

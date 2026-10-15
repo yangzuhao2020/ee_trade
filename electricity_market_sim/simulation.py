@@ -9,10 +9,8 @@ from .models import MarketOpening, MarketSettings, SimulationResult
 from .reporting import write_results
 from .simulators.v5 import simulate_v5_market
 from .simulators.household_market import simulate_household_market
-from .simulators.eom_scenarios import (
-    simulate_v1_v2_market,
-    simulate_v4_market,
-)
+from .simulators.eom import simulate_v1_v2_market
+from .simulators.industry_market import simulate_v4_market
 
 
 class LearningEpisodeRunner:
