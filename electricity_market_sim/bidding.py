@@ -225,7 +225,7 @@ def naive_offer(
     available_power: float,
     marginal_cost: float,
 ) -> SupplyOffer:
-    """按 V2 的可用容量构建 V1 的单段边际成本报价。"""
+    """为一台发电机、一个交付时段，生成一张按边际成本报价的卖单 SupplyOffer"""
     duration_hours = hours_between(delivery_start, delivery_end)
     offer_id = f"{plant.name}::single::{delivery_start.isoformat()}"
     return SupplyOffer(

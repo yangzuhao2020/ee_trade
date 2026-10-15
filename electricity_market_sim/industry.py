@@ -39,7 +39,6 @@ class _ProcessCoefficients:
 
 def process_coefficients(unit: IndustrialUnit) -> _ProcessCoefficients:
     """返回每吨钢的线性原料需求和电力需求系数。"""
-
     dri = unit.eaf.specific_dri_demand
     hydrogen = dri * unit.dri_plant.specific_hydrogen_consumption
     electrolyser_energy = hydrogen / unit.electrolyser.efficiency
@@ -85,14 +84,23 @@ def missing_industrial_price_names(
 def _steel_upper_bound(
     unit: IndustrialUnit, coefficients: _ProcessCoefficients, duration: float
 ) -> float:
+    """按设备容量计算时段钢产量上限（吨），duration 的单位为小时。"""
+    # 各设备的最大用电量（MWh）= 最大功率（MW）× 时段时长（小时）。
+    electrolyser_max_energy_mwh = unit.electrolyser.max_power_mw * duration
+    dri_max_energy_mwh = unit.dri_plant.max_power_mw * duration
+    eaf_max_energy_mwh = unit.eaf.max_power_mw * duration
+
+    # 按每吨钢的设备耗电量折算产量上限，生产链上限取其中最小值。
+    electrolyser_steel_limit_t = (
+        electrolyser_max_energy_mwh / coefficients.electrolyser_mwh_per_steel_t
+    )
+    dri_steel_limit_t = dri_max_energy_mwh / coefficients.dri_mwh_per_steel_t
+    eaf_steel_limit_t = eaf_max_energy_mwh / coefficients.eaf_mwh_per_steel_t
+
     limits = (
-        unit.electrolyser.max_power_mw
-        * duration
-        / coefficients.electrolyser_mwh_per_steel_t,
-        unit.dri_plant.max_power_mw
-        * duration
-        / coefficients.dri_mwh_per_steel_t,
-        unit.eaf.max_power_mw * duration / coefficients.eaf_mwh_per_steel_t,
+        electrolyser_steel_limit_t,
+        dri_steel_limit_t,
+        eaf_steel_limit_t,
     )
     return min(limits)
 
@@ -177,7 +185,7 @@ def maximum_industry_production(
     )
     if not result.success or result.x is None:
         raise InputValidationError(
-            f"Maximum-production calculation failed for {unit.name!r}: "
+            f"工业单元 {unit.name!r} 的最大产量计算失败："
             f"{result.message}"
         )
     return float(np.sum(result.x))
@@ -187,7 +195,6 @@ def maximum_industry_production(
 class _IndustryProblem:
     products: tuple[tuple[datetime, datetime], ...]
     durations: np.ndarray
-
     variable_cost_per_tonne: np.ndarray
     grid_power_per_tonne: np.ndarray
     electrolyser_power_per_tonne: np.ndarray
@@ -217,13 +224,13 @@ def _build_industry_problem(
 ) -> _IndustryProblem:
     if not products or products != remaining_products[: len(products)]:
         raise InputValidationError(
-            "Industrial optimization products must be a non-empty prefix of the "
-            "remaining products."
+            "工业优化窗口的交付产品必须非空，"
+            "并且是剩余交付产品序列的起始部分。"
         )
     if not 0 < commit_count <= len(products):
-        raise InputValidationError("Industrial commit interval is outside its window.")
+        raise InputValidationError("工业生产计划的承诺区间超出优化窗口范围。")
     if not isfinite(demand_to_schedule_t) or demand_to_schedule_t < 0:
-        raise InputValidationError("Industrial remaining demand must be non-negative.")
+        raise InputValidationError("工业剩余需求必须为非负有限值。")
 
     remaining_load_profile: list[float] = []
     for start, _ in remaining_products:
@@ -231,13 +238,13 @@ def _build_industry_problem(
             normalized = normalized_load_profile[start]
         except KeyError as exc:
             raise InputValidationError(
-                "Industrial normalized load profile is missing "
-                f"{start.isoformat(sep=' ')} for {unit.name!r}."
+                f"工业单元 {unit.name!r} 的归一化负荷曲线中缺少 "
+                f"{start.isoformat(sep=' ')} 时刻的数据。"
             ) from exc
         if not isfinite(normalized) or normalized < 0:
             raise InputValidationError(
-                "Industrial normalized load profile must be a non-negative "
-                f"finite value at {start.isoformat(sep=' ')} for {unit.name!r}."
+                f"工业单元 {unit.name!r} 在 {start.isoformat(sep=' ')} 时刻的"
+                "归一化负荷曲线值必须为非负有限值。"
             )
         remaining_load_profile.append(normalized)
 
@@ -252,7 +259,7 @@ def _build_industry_problem(
         [hours_between(*product) for product in remaining_products]
     )
     if np.any(remaining_durations <= 0):
-        raise InputValidationError("Industrial products must have positive durations.")
+        raise InputValidationError("工业交付产品的持续时间必须为正数。")
     durations = remaining_durations[:count]
     remaining_power_coefficient_rows = [
         _power_coefficients(coefficients, duration)
@@ -273,8 +280,8 @@ def _build_industry_problem(
             raw_prices = fuel_price_profiles[start]
         except KeyError as exc:
             raise InputValidationError(
-                f"Industrial input is missing {start.isoformat(sep=' ')} for "
-                f"{unit.name!r}."
+                f"工业单元 {unit.name!r} 的输入数据中缺少 "
+                f"{start.isoformat(sep=' ')} 时刻的数据。"
             ) from exc
         references[index] = (
             remaining_load_profile[index] * unit.electrolyser.max_power_mw
@@ -377,12 +384,24 @@ def _solve(
     *,
     variable_cost_limit: float | None = None,
 ) -> np.ndarray:
+    """求解工业线性规划，返回与 problem 变量顺序一致的最优解。
+    objective 为最小化目标系数，用于成本与负荷偏差的联合优化，
+    或指定时段的购电功率优化；最大化功率时由调用方传入负系数。
+    variable_cost_limit 为窗口可变成本上限（欧元），None 表示不追加成本限制。
+    unit 用于在失败时标识工业用户；求解失败或缺少解向量时抛出 InputValidationError。
+    """
+    # 读取原始不等式约束：A_ub @ x <= b_ub，x 为完整决策变量向量。
     A_ub = problem.A_ub
     b_ub = problem.b_ub
     if variable_cost_limit is not None:
+        # 扩展矩阵的最后一行已包含窗口可变成本系数，补充对应的成本上限。
         A_ub = problem.A_ub_limited
+        # 上限加上数值容差，允许微小的浮点误差。
         limit = variable_cost_limit + _TOLERANCE
+        # 原约束为空时创建右端向量，否则在末尾追加成本上限。
         b_ub = np.array([limit]) if b_ub is None else np.append(b_ub, limit)
+
+    # 求解 min(objective @ x)，同时满足不等式、等式约束和变量上下界。
     result = linprog(
         objective,
         A_ub=A_ub,
@@ -394,8 +413,9 @@ def _solve(
     )
     if not result.success or result.x is None:
         raise InputValidationError(
-            f"Industrial optimization failed for {unit.name!r}: {result.message}"
-        )
+            f"工业单元 {unit.name!r} 优化失败：{result.message}")
+
+    # 将接近零的正负值统一置零，避免数值噪声进入后续计划与调度。
     return np.where(np.abs(result.x) < _TOLERANCE, 0.0, result.x)
 
 
@@ -421,9 +441,9 @@ def optimize_industry_window(
     )
     if demand_to_schedule_t > maximum + _TOLERANCE:
         raise InputValidationError(
-            f"Industrial demand is infeasible for {unit.name!r}: remaining "
-            f"demand={demand_to_schedule_t:.6f} t, maximum production="
-            f"{maximum:.6f} t, shortfall={demand_to_schedule_t - maximum:.6f} t."
+            f"工业单元 {unit.name!r} 的需求无法满足："
+            f"剩余需求={demand_to_schedule_t:.6f} 吨，最大产量={maximum:.6f} 吨，"
+            f"缺口={demand_to_schedule_t - maximum:.6f} 吨。"
         )
     problem = _build_industry_problem(
         unit,
@@ -507,8 +527,8 @@ def optimize_industry_window(
             maximum_power < plan.planned_grid_power_mw - _TOLERANCE
         ):
             raise InputValidationError(
-                f"Industrial flexibility bounds exclude the baseline for "
-                f"{unit.name!r} at {plan.delivery_start.isoformat(sep=' ')}."
+                f"工业单元 {unit.name!r} 在 {plan.delivery_start.isoformat(sep=' ')} "
+                "时刻的灵活性上下界未包含基准计划功率。"
             )
         flexibility.append(
             IndustrialFlexibilityResult(
@@ -540,13 +560,11 @@ def dispatch_industry(
     accepted_energy_mwh: float,
 ) -> IndustrialDispatchResult:
     """按购电量的成交比例缩放计划生产链的产量。"""
-
     if accepted_energy_mwh < -_TOLERANCE or (
         accepted_energy_mwh > plan.planned_energy_mwh + _TOLERANCE
     ):
         raise InputValidationError(
-            f"Accepted industrial energy for {plan.unit_name!r} must be between "
-            "zero and its submitted volume."
+            f"工业单元 {plan.unit_name!r} 的成交电量必须介于零与申报电量之间。"
         )
     if plan.planned_energy_mwh <= _TOLERANCE:
         ratio = 0.0
@@ -573,8 +591,11 @@ def dispatch_industry(
 
 
 class IndustryRollingCoordinator:
-    """Maintain committed plans and delivered production across market events."""
-
+    """协调工业用户跨市场事件的滚动生产计划、购电报价与实际交付。
+    开市时调用 optimize_industry_window 优化生产，仅锁定承诺区间内的计划；
+    交付结束后按成交电量更新实际钢产量和设备功率，供后续窗口衔接。
+    前序已出清但尚未交付的计划计入预计产量，避免重复安排生产。
+    """
     def __init__(
         self,
         units: tuple[IndustrialUnit, ...],
@@ -584,19 +605,26 @@ class IndustryRollingCoordinator:
         fuel_price_profiles: dict[datetime, dict[str, float]],
         maximum_bid_price: float,
     ) -> None:
+        """保存工业用户、交付时段和预测输入，初始化计划与交付状态。
+        预测电价用于优化生产成本，maximum_bid_price 用于购电申报。
+        """
         self.units = units
+        # 按交付时间去重排序；集合用于筛选本次开市的有效产品。
         self.all_products = tuple(sorted(set(all_products)))
         self.product_set = frozenset(self.all_products)
         self.price_forecasts = price_forecasts
         self.normalized_load_profiles = normalized_load_profiles
         self.fuel_price_profiles = fuel_price_profiles
         self.maximum_bid_price = maximum_bid_price
+        # 以（用户名称，交付开始时间）关联承诺计划与已完成的交付。
         self.plans: dict[tuple[str, datetime], IndustrialPlan] = {}
         self.delivered: set[tuple[str, datetime]] = set()
+        # 实际钢产量（吨）和设备功率（MW）作为后续窗口的初始状态。
         self.actual_steel_t = {unit.name: 0.0 for unit in units}
         self.last_actual_powers_mw = {
             unit.name: (0.0, 0.0, 0.0) for unit in units
         }
+        # 累积交付、灵活性和窗口成本记录，仿真结束时汇入结果。
         self.dispatch_results: list[IndustrialDispatchResult] = []
         self.flexibility_results: list[IndustrialFlexibilityResult] = []
         self.window_results: list[IndustrialOptimizationWindowResult] = []
@@ -605,32 +633,35 @@ class IndustryRollingCoordinator:
     def _cleared_industry_energy(
         result: MarketClearingResult, unit_name: str
     ) -> float:
-        cleared = next(
-            (
-                item
-                for item in result.demand_bids
-                if item.bid.unit_name == unit_name
-                and item.bid.demand_type == "industrial_load"
-            ),
-            None,
-        )
-        return 0.0 if cleared is None else cleared.accepted_energy_mwh
+        """读取指定工业用户的成交电量（MWh）；未找到对应订单时返回零。"""
+        for cleared_bid in result.demand_bids:
+            bid = cleared_bid.bid
+            is_target_unit = bid.unit_name == unit_name
+            is_industrial_load = bid.demand_type == "industrial_load"
+
+            if is_target_unit and is_industrial_load:
+                return cleared_bid.accepted_energy_mwh
+
+        return 0.0
 
     def _result_for_plan(
         self,
         plan: IndustrialPlan,
         scheduled_results: dict[tuple[datetime, datetime, datetime], MarketClearingResult],
     ) -> MarketClearingResult:
-        matches = [
-            result
-            for result in scheduled_results.values()
-            if result.delivery_start == plan.delivery_start
-            and result.delivery_end == plan.delivery_end
-        ]
+        """按交付起止时间查找计划对应的出清结果，要求恰好匹配一个。"""
+        matches: list[MarketClearingResult] = []
+        for result in scheduled_results.values():
+            is_start_match = result.delivery_start == plan.delivery_start
+            is_end_match = result.delivery_end == plan.delivery_end
+
+            if is_start_match and is_end_match:
+                matches.append(result)
+
         if len(matches) != 1:
             raise InputValidationError(
-                f"Expected one cleared market result for pending industrial product "
-                f"{plan.delivery_start.isoformat(sep=' ')}, found {len(matches)}."
+                f"待交付的工业产品 {plan.delivery_start.isoformat(sep=' ')} "
+                f"应恰好对应一个市场出清结果，实际找到 {len(matches)} 个。"
             )
         return matches[0]
 
@@ -638,6 +669,9 @@ class IndustryRollingCoordinator:
     def _actual_device_powers(
         plan: IndustrialPlan, accepted_energy_mwh: float
     ) -> tuple[float, float, float]:
+        """按成交比例缩放设备功率（MW），计划电量近零时返回全零。
+        返回顺序为电解槽、直接还原装置、电弧炉。
+        """
         ratio = (
             0.0
             if plan.planned_energy_mwh <= _TOLERANCE
@@ -655,6 +689,8 @@ class IndustryRollingCoordinator:
         first_product: tuple[datetime, datetime],
         scheduled_results: dict[tuple[datetime, datetime, datetime], MarketClearingResult],
     ) -> None:
+        """从首个未承诺产品开始优化，并保存本轮承诺计划及评估结果。"""
+        # 已承诺产品不参与重排，保留其余时段供本轮检查剩余产能。
         remaining_products = tuple(
             product
             for product in self.all_products
@@ -663,9 +699,10 @@ class IndustryRollingCoordinator:
         )
         if not remaining_products or remaining_products[0] != first_product:
             raise InputValidationError(
-                f"Cannot construct the next industrial window for {unit.name!r} at "
-                f"{first_product[0].isoformat(sep=' ')}."
+                f"无法为工业单元 {unit.name!r} 构建从 "
+                f"{first_product[0].isoformat(sep=' ')} 开始的下一个优化窗口。"
             )
+        # 前瞻时长决定优化窗口，承诺时长决定其中需锁定的产品数量。
         optimization_end = first_product[0] + unit.look_ahead
         products = tuple(
             product for product in remaining_products if product[0] < optimization_end
@@ -675,6 +712,7 @@ class IndustryRollingCoordinator:
             1 for product in products if product[0] < commit_end
         )
 
+        # 用前序未交付计划的成交电量预估产量，不提前计入实际完成量。
         pending: list[tuple[IndustrialPlan, MarketClearingResult, float]] = []
         for (unit_name, start), plan in self.plans.items():
             if unit_name != unit.name or (unit_name, start) in self.delivered:
@@ -684,16 +722,17 @@ class IndustryRollingCoordinator:
             result = self._result_for_plan(plan, scheduled_results)
             accepted = self._cleared_industry_energy(result, unit.name)
             pending.append((plan, result, accepted))
+            
         pending.sort(key=lambda item: item[0].delivery_start)
         pending_steel = sum(
             dispatch_industry(plan, accepted).actual_steel_output_t
             for plan, result, accepted in pending
         )
-        remaining_demand = max(
-            0.0, unit.demand_t - self.actual_steel_t[unit.name]
-        )
+        # 待安排量 = 总需求 − 实际完成量 − 前序待交付预计量，下限为零。
+        remaining_demand = max(0.0, unit.demand_t - self.actual_steel_t[unit.name])
         demand_to_schedule = max(0.0, remaining_demand - pending_steel)
         initial_powers = self.last_actual_powers_mw[unit.name]
+        # 前序待交付产品若与新窗口相邻，以其成交后功率衔接爬坡约束。
         if pending:
             last_plan, _, accepted = pending[-1]
             if last_plan.delivery_end == first_product[0]:
@@ -710,6 +749,7 @@ class IndustryRollingCoordinator:
             demand_to_schedule_t=demand_to_schedule,
             initial_powers_mw=initial_powers,
         )
+        # 锁定承诺区间供后续开市复用；其余前瞻计划留待下一轮重算。
         for plan in plans[:commit_count]:
             self.plans[(unit.name, plan.delivery_start)] = plan
         self.flexibility_results.extend(flexibility)
@@ -720,8 +760,9 @@ class IndustryRollingCoordinator:
         products: tuple[tuple[datetime, datetime], ...],
         scheduled_results: dict[tuple[datetime, datetime, datetime], MarketClearingResult],
     ) -> list[DemandBid]:
-        """确保已有承诺计划，并生成非负的工业购电报价。"""
-
+        """为本次开市生成工业购电订单，缺少承诺计划时先滚动优化。
+        申报电量取计划购电量，价格取市场最高限价；零电量不申报。
+        """
         bids: list[DemandBid] = []
         eligible_products = tuple(
             product for product in products if product in self.product_set
@@ -729,16 +770,19 @@ class IndustryRollingCoordinator:
         if not eligible_products:
             return bids
         for unit in self.units:
-            missing = next(
-                (
-                    product
-                    for product in eligible_products
-                    if (unit.name, product[0]) not in self.plans
-                ),
-                None,
-            )
-            if missing is not None:
-                self._plan_window(unit, missing, scheduled_results)
+            # 首个未承诺产品作为新滚动窗口的起点。
+            missing_product: tuple[datetime, datetime] | None = None
+            for product in eligible_products:
+                delivery_start = product[0]
+                plan_key = (unit.name, delivery_start)
+                has_committed_plan = plan_key in self.plans
+
+                if not has_committed_plan:
+                    missing_product = product
+                    break
+
+            if missing_product is not None:
+                self._plan_window(unit, missing_product, scheduled_results)
             for start, end in eligible_products:
                 plan = self.plans[(unit.name, start)]
                 if plan.planned_energy_mwh <= _TOLERANCE:
@@ -758,11 +802,11 @@ class IndustryRollingCoordinator:
         return bids
 
     def record_delivery(self, result: MarketClearingResult) -> None:
-        """将一个已完成交付的产品计入实际钢产量。"""
-
+        """交付结束时按成交比例累计钢产量，并更新后续优化所需的设备功率。"""
         for unit in self.units:
             key = (unit.name, result.delivery_start)
             plan = self.plans.get(key)
+            # 无计划或已记账的产品直接跳过，避免重复累计产量。
             if plan is None or key in self.delivered:
                 continue
             accepted = self._cleared_industry_energy(result, unit.name)
@@ -775,13 +819,12 @@ class IndustryRollingCoordinator:
             self.delivered.add(key)
 
     def validate_completion(self) -> None:
-        """最终的市场交付无法满足钢需求时，拒绝本次运行（抛出异常）。"""
-
+        """全部交付结束后检查钢需求，产量缺口超过数值容差时抛出异常。"""
         for unit in self.units:
             shortfall = unit.demand_t - self.actual_steel_t[unit.name]
             if shortfall > _TOLERANCE:
                 raise InputValidationError(
-                    f"Industrial demand is incomplete for {unit.name!r} at the "
-                    f"simulation end: remaining demand={shortfall:.6f} t, maximum "
-                    f"production=0.000000 t, shortfall={shortfall:.6f} t."
+                    f"仿真结束时，工业单元 {unit.name!r} 的需求尚未完成："
+                    f"剩余需求={shortfall:.6f} 吨，最大产量=0.000000 吨，"
+                    f"缺口={shortfall:.6f} 吨。"
                 )

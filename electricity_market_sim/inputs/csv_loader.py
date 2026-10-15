@@ -911,8 +911,17 @@ def load_time_series_profiles(
     *,
     warn_unused_columns: bool = False,
 ) -> dict[str, dict[datetime, float]]:
-    """按原始分辨率读取 V3 时间序列曲线，不做小时聚合。"""
-
+    """按原始分辨率读取指定的时间序列列，不做小时聚合。
+    返回结构为“列名 → 时间戳 → 数值”。时间戳为 datetime 对象，数值为 float，
+    例如读取 demand_EOM 列后得到：
+        {
+            "demand_EOM": {
+                datetime(2024, 1, 1, 0, 15): 100.0,
+                datetime(2024, 1, 1, 0, 30): 120.0,
+            }
+        }
+    若源数据每 15 分钟一条，则保留各条记录，不计算小时平均值。
+    """
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
 
