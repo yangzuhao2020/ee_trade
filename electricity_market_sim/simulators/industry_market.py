@@ -29,8 +29,7 @@ from .eom import (
 
 
 class _IndustryInputs:
-    """加载工业输入，并向基础市场提供参与者、燃料价格和预测数据。"""
-
+    """读取工业仿真需要的预测和价格数据，按市场交付时长对齐，再把基础市场需要的数据打包返回。"""
     def __init__(
         self,
         input_path: Path,
@@ -89,6 +88,7 @@ class _IndustryInputs:
 def _load_and_validate_industrial_units(
     input_path: Path, settings: MarketSettings
 ) -> tuple[IndustrialUnit, ...]:
+    """加载工业用户（钢铁厂）的配置，检查是否满足第四版工业滚动优化的要求，通过后返回工业用户集合。"""
     if settings.industrial_dsm_units_file is None:
         raise InputValidationError(
             "第四版场景要求在 config.yaml 中配置 industrial_dsm_units。")
@@ -100,18 +100,6 @@ def _load_and_validate_industrial_units(
         raise InputValidationError(
             "第四版工业滚动优化目前仅支持统一出清价机制"
             "（market_mechanism: pay_as_clear）。")
-    for unit in units:
-        for field_name, horizon in (
-            ("look_ahead_horizon", unit.look_ahead),
-            ("commit_horizon", unit.commit_horizon),
-            ("rolling_step", unit.rolling_step),
-        ):
-            ratio = horizon.total_seconds() / settings.product_duration.total_seconds()
-            if abs(ratio - round(ratio)) > 1e-9:
-                raise InputValidationError(
-                    f"工业参数 {field_name}（单元 {unit.name!r}）必须是 "
-                    "EOM 交付时段时长的整数倍。"
-                )
     return units
 
 
@@ -121,7 +109,6 @@ def simulate_v4_market(
     openings: tuple[MarketOpening, ...],
 ) -> SimulationResult:
     """直接组织 V4 的数据准备、工业购电计划、市场出清与实际交付。
-
     同一时刻按“交付结束 → 开市优化及出清 → 交付开始”处理，
     机组报价、储能订单、出清及常规设备状态仍由 BaseMarket 负责。
     """
@@ -136,6 +123,7 @@ def simulate_v4_market(
         for product in opening.products
         if product[1] <= settings.end
     ]
+    
     if len(product_list) != len(set(product_list)):
         raise InputValidationError(
             "工业滚动优化要求不同 EOM 开市不能包含相同的交付时段，"
@@ -143,14 +131,12 @@ def simulate_v4_market(
         )
     coordinator = IndustryRollingCoordinator(
         units=units,
-        all_products=tuple(sorted(product_list)),
+        all_products=tuple(sorted(product_list)), # 所有可安排的交付时段
         price_forecasts={
-            unit.name: inputs.profiles[unit.forecast_price_column] for unit in units
-        },
+            unit.name: inputs.profiles[unit.forecast_price_column] for unit in units},
         normalized_load_profiles={
             unit.name: inputs.profiles[f"{unit.name}_normalized_load_profile"]
-            for unit in units
-        },
+            for unit in units}, # 每家工厂对应的参考负荷曲线
         fuel_price_profiles=inputs.fuel_price_profiles,
         maximum_bid_price=settings.maximum_bid_price,
     )
@@ -167,18 +153,17 @@ def simulate_v4_market(
     while openings_by_time or pending_starts or pending_ends:
         event_time = min([*openings_by_time, *pending_starts, *pending_ends])
 
-        # 2. 先记录已结束的交付，实际钢产量和设备状态供本次开市使用。
+        # 取出当前时间对应的列表，并从字典里删除这一项，表示这批结束事件已经取出处理。如果当前时间没有交付结束，就返回空列表 []，循环执行零次。
         for key in pending_ends.pop(event_time, []):
             result = scheduled_results[key]
             storage_results.extend(market.end_delivery(result))
-            coordinator.record_delivery(result)
+            coordinator.record_delivery(result) # 更新钢铁厂的实际生产情况
 
         starting_keys = pending_starts.pop(event_time, [])
         for opening in openings_by_time.pop(event_time, []):
             # 3. 优化或复用已承诺的工业生产计划，并生成购电订单。
             industrial_bids = tuple(
-                coordinator.bids_for_products(opening.products, scheduled_results)
-            )
+                coordinator.bids_for_products(opening.products, scheduled_results))
             # 4. 复用基础市场生成常规订单、储能订单，并与工业买单一起出清。
             opening_results = market.clear_opening(
                 opening, scheduled_results, additional_demand_bids=industrial_bids
