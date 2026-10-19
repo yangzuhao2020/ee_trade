@@ -12,7 +12,13 @@ import charts
 OUTPUTS_DIR = Path(__file__).resolve().parent.parent / "outputs"
 MAX_CHARTS = 6
 # Learning charts have no interactive version yet; their PNGs are shown when present.
-LEARNING_PLOTS = ("learning_unit.png", "learning_curves.png", "learning_evaluation_comparison.png")
+LEARNING_PLOTS = (
+    "learning_unit.png",
+    "learning_curves.png",
+    "learning_validation_comparison.png",
+    "learning_test_comparison.png",
+    "learning_train_comparison.png",
+)
 
 
 def subdirectories(path: Path) -> list[str]:

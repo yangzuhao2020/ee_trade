@@ -4,6 +4,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+LEARNING_PERIOD_NAMES = ("train", "validation", "test")
+
+
+@dataclass(frozen=True)
+class LearningPeriod:
+    """按交付开始时间定义的半开区间 [start, end)。"""
+    start: datetime
+    end: datetime
+
 
 @dataclass(frozen=True)
 class LearningConfig:
@@ -34,6 +43,15 @@ class LearningConfig:
     trained_policies_save_path: str | None = None
     trained_policies_load_path: str | None = None
     max_bid_price: float = 100.0
+    # 学习模式必填，按 train、validation、test 的顺序保存 (名称, 交付时段)。
+    periods: tuple[tuple[str, LearningPeriod], ...] | None = None
+
+    def period(self, name: str) -> LearningPeriod:
+        """返回指定数据集的交付时段；未配置时报错。"""
+        for period_name, period in self.periods or ():
+            if period_name == name:
+                return period
+        raise ValueError(f"learning_config.periods 未配置 {name!r} 时段。")
 
 
 @dataclass(frozen=True)

@@ -1,11 +1,12 @@
 """统一协调所有受支持的电力市场仿真。"""
 
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from .config import load_market_settings
 from .errors import InputValidationError
-from .learning import ActionProvider, TransitionConsumer
-from .models import MarketOpening, MarketSettings, SimulationResult
+from .deep_learning.learning import ActionProvider, TransitionConsumer
+from .models import LEARNING_PERIOD_NAMES, MarketOpening, MarketSettings, SimulationResult
 from .reporting import write_results
 from .simulators.v5 import simulate_v5_market
 from .simulators.household_market import simulate_household_market
@@ -13,23 +14,38 @@ from .simulators.eom import simulate_v1_v2_market
 from .simulators.industry_market import simulate_v4_market
 
 
+def learning_period_settings(settings: MarketSettings, period: str) -> MarketSettings:
+    """把按交付时间配置的学习时段换算为市场的开市起止时间。
+    第一次开市提前 first_delivery，使首个交付时段恰好从 period.start 开始；
+    最后一个交付时段在 period.end 结束。顶层 start_date 和 EOM.start_date 不再生效。
+    """
+    if period not in LEARNING_PERIOD_NAMES:
+        raise InputValidationError(
+            "第五版仿真必须指定 learning period：train、validation 或 test。"
+        )
+    if settings.learning_config is None:
+        raise InputValidationError("learning period 需要 learning_config。")
+    try:
+        delivery = settings.learning_config.period(period)
+    except ValueError as exc:
+        raise InputValidationError(str(exc)) from exc
+    return replace(
+        settings, start=delivery.start - settings.first_delivery, end=delivery.end
+    )
+
+
 class LearningEpisodeRunner:
-    """使用同一个固定的观测归一化基准运行多轮仿真。"""
+    """用同一输入目录、场景和数据时段重复运行回合。"""
     def __init__(
         self,
         input_dir: str | Path,
         scenario: str = "base",
         *,
-        load_base_mw: float | None = None,
+        period: str,
     ) -> None:
         self.input_dir = Path(input_dir)
         self.scenario = scenario
-        self._load_base_mw = load_base_mw
-
-    @property
-    def load_base_mw(self) -> float | None:
-        """返回用于保存到检查点或从检查点恢复的归一化基准。"""
-        return self._load_base_mw
+        self.period = period
 
     def run_episode(
         self,
@@ -38,24 +54,16 @@ class LearningEpisodeRunner:
         *,
         enforce_action_bounds: bool = True,
     ) -> SimulationResult:
-        """运行一轮仿真，仅在首次调用时计算各轮共用的归一化基准。"""
+        """重新初始化市场，使用传入的策略运行一轮仿真。"""
 
-        result = simulate_learning_episode(
+        return simulate_learning_episode(
             self.input_dir,
             action_provider,
             scenario=self.scenario,
             transition_consumer=transition_consumer,
-            load_base_mw=self._load_base_mw,
             enforce_action_bounds=enforce_action_bounds,
+            period=self.period,
         )
-        result_base = result.learning_load_base_mw
-        if result_base is None:
-            raise RuntimeError("The learning episode did not produce a load base.")
-        if self._load_base_mw is None:
-            self._load_base_mw = result_base
-        elif result_base != self._load_base_mw:
-            raise RuntimeError("The learning load base changed between episodes.")
-        return result
 
 
 def market_openings(settings: MarketSettings) -> list[MarketOpening]:
@@ -110,31 +118,32 @@ def simulate(
     scenario: str = "base",
     learning_action_provider: ActionProvider | None = None,
     learning_transition_consumer: TransitionConsumer | None = None,
-    learning_load_base_mw: float | None = None,
     learning_enforce_action_bounds: bool = True,
+    learning_period: str | None = None,
 ) -> SimulationResult:
-    """计算一个受支持场景的仿真结果，不写入结果文件。"""
+    """计算一个受支持场景的仿真结果，不写入结果文件。
+    第五版必须通过 learning_period 指定 train、validation 或 test 时段。
+    """
 
     input_path = Path(input_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
-    openings = tuple(market_openings(settings)) # 开市报价的时间。
     is_learning = (settings.learning_config is not None and settings.learning_config.learning_mode)
     
     if is_learning: # 强化学习部分
         if learning_action_provider is None:
             raise InputValidationError("Version 5 simulate() requires a learning_action_provider.")
-        
+        period_settings = learning_period_settings(settings, learning_period)
         return simulate_v5_market(
             input_path,
-            settings,
-            openings,
+            period_settings,
+            tuple(market_openings(period_settings)),
             learning_action_provider=learning_action_provider,
             learning_transition_consumer=learning_transition_consumer,
-            learning_load_base_mw=learning_load_base_mw,
             learning_enforce_action_bounds=learning_enforce_action_bounds,
         ) # 第五版
 
-    elif settings.industrial_dsm_units_file is not None:
+    openings = tuple(market_openings(settings)) # 开市报价的时间。
+    if settings.industrial_dsm_units_file is not None:
         return simulate_v4_market(input_path, settings, openings) # 第四版本
     elif settings.market_mechanism == "pay_as_bid":
         return simulate_household_market(input_path, settings, openings) # 第三版本
@@ -147,17 +156,18 @@ def simulate_learning_episode(
     action_provider: ActionProvider,
     scenario: str = "base",
     transition_consumer: TransitionConsumer | None = None,
-    load_base_mw: float | None = None,
     enforce_action_bounds: bool = True,
+    *,
+    period: str,
 ) -> SimulationResult:
-    """使用传入的策略和经验回放回调，运行第五版的一轮仿真。"""
+    """使用传入的策略和经验回放回调，在指定数据时段运行第五版的一轮仿真。"""
     return simulate(
         input_dir,
         scenario=scenario,
         learning_action_provider=action_provider,
         learning_transition_consumer=transition_consumer,
-        learning_load_base_mw=load_base_mw,
         learning_enforce_action_bounds=enforce_action_bounds,
+        learning_period=period,
     )
 
 
@@ -167,7 +177,7 @@ def run_simulation(
     scenario: str = "base",
     learning_action_provider: ActionProvider | None = None,
     learning_transition_consumer: TransitionConsumer | None = None,
-    learning_load_base_mw: float | None = None,
+    learning_period: str | None = None,
 ) -> SimulationResult:
     """运行仿真并保存 CSV 结果，随后可按需绘图。"""
 
@@ -176,7 +186,7 @@ def run_simulation(
         scenario=scenario,
         learning_action_provider=learning_action_provider,
         learning_transition_consumer=learning_transition_consumer,
-        learning_load_base_mw=learning_load_base_mw,
+        learning_period=learning_period,
     )
     write_results(Path(output_dir), result)
     return result

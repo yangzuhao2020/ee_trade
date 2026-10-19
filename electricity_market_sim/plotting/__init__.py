@@ -21,6 +21,7 @@ from .learning import (
     _plot_learning_curves,
     _plot_learning_unit,
     _read_learning_metrics,
+    comparison_periods,
 )
 from .market import (
     _plot_first_pay_as_bid_order_book,
@@ -31,7 +32,12 @@ from .market import (
 
 _LEARNING_UNIT_PLOT = "learning_unit.png"
 _LEARNING_CURVES_PLOT = "learning_curves.png"
-_LEARNING_COMPARISON_PLOT = "learning_evaluation_comparison.png"
+_LEARNING_COMPARISON_PATTERN = "learning_*_comparison.png"
+_LEGACY_COMPARISON_PLOT = "learning_evaluation_comparison.png"
+
+
+def _comparison_plot_name(period: str) -> str:
+    return f"learning_{period}_comparison.png"
 
 
 def generate_plots(
@@ -117,12 +123,10 @@ def generate_plots(
                 )
             )
         else:
-            for name in (
-                _LEARNING_UNIT_PLOT,
-                _LEARNING_CURVES_PLOT,
-                _LEARNING_COMPARISON_PLOT,
-            ):
+            for name in (_LEARNING_UNIT_PLOT, _LEARNING_CURVES_PLOT):
                 (plot_directory / name).unlink(missing_ok=True)
+            for stale in plot_directory.glob(_LEARNING_COMPARISON_PATTERN):
+                stale.unlink()
         if result.settings.market_mechanism == "pay_as_bid":
             paths.append(
                 _plot_first_pay_as_bid_order_book(
@@ -150,10 +154,11 @@ def generate_learning_plots(
     metrics_path: str | Path,
     output_dir: str | Path,
 ) -> tuple[Path, ...]:
-    """绘制第五版的学习曲线，以及 Actor 与基准策略的对比图。
+    """绘制第五版的学习曲线，以及各数据时段上 Actor 与基准策略的对比图。
 
-    唯一的输入是训练或评估写出的指标 CSV，因此学习接口仍只返回普通的
-    ``SimulationResult``。
+    唯一的输入是训练、评估或测试写出的指标 CSV，因此学习接口仍只返回普通的
+    ``SimulationResult``。训练与测试默认共用输出目录，所以只重绘本指标文件包含的
+    图表，不删除其他命令生成的学习曲线或其他时段的对比图。
     """
 
     rows = _read_learning_metrics(Path(metrics_path))
@@ -162,9 +167,7 @@ def generate_learning_plots(
         for row in rows
         if row["phase"] in {"initial_experience", "train", "validation"}
     ]
-    comparison_rows = [
-        row for row in rows if row["phase"] in {"evaluation", "baseline"}
-    ]
+    periods = comparison_periods(rows)
     pyplot, _ = _load_matplotlib()
     plot_directory = Path(output_dir)
     plot_directory.mkdir(parents=True, exist_ok=True)
@@ -176,18 +179,17 @@ def generate_learning_plots(
                     pyplot, curve_rows, plot_directory / _LEARNING_CURVES_PLOT
                 )
             )
-        else:
-            (plot_directory / _LEARNING_CURVES_PLOT).unlink(missing_ok=True)
-        if comparison_rows:
+        # 旧版本未区分数据时段的对比图已不再生成。
+        (plot_directory / _LEGACY_COMPARISON_PLOT).unlink(missing_ok=True)
+        for period in periods:
             paths.append(
                 _plot_evaluation_comparison(
                     pyplot,
-                    comparison_rows,
-                    plot_directory / _LEARNING_COMPARISON_PLOT,
+                    rows,
+                    plot_directory / _comparison_plot_name(period),
+                    period,
                 )
             )
-        else:
-            (plot_directory / _LEARNING_COMPARISON_PLOT).unlink(missing_ok=True)
     except PlottingError:
         raise
     except Exception as exc:

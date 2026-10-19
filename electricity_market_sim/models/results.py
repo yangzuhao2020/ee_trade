@@ -27,4 +27,3 @@ class SimulationResult:
     industry_optimization_windows: tuple[IndustrialOptimizationWindowResult, ...] = ()
     learning_steps: tuple[LearningStepResult, ...] = ()
     learning_transitions: tuple[LearningTransition, ...] = ()
-    learning_load_base_mw: float | None = None

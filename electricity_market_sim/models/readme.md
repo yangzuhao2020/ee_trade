@@ -15,7 +15,9 @@
 | [clearing_algorithm](../clearing_algorithm/) | 接收买卖订单，计算成交电量与结算价格，返回出清结果 |
 | [household.py](../household.py)、[industry.py](../industry.py) | 计算居民运行计划、工业生产计划及灵活性等结果 |
 | [simulators](../simulators/)、[simulation.py](../simulation.py) | 组织开市、出清、运行状态更新和结果汇总 |
-| [learning.py](../learning.py)、[training.py](../training.py) | 生成学习动作、经验记录并执行训练 |
+| [deep_learning/learning.py](../deep_learning/learning.py) | 构建学习观测、报价、奖励与经验记录 |
+| [deep_learning/agent.py](../deep_learning/agent.py)、[deep_learning/training.py](../deep_learning/training.py)、[deep_learning/test.py](../deep_learning/test.py) | 定义策略模型与持久化接口，组织训练、验证和独立测试 |
+| [deep_learning/learning_metrics.py](../deep_learning/learning_metrics.py) | 计算学习回合指标、写出 CSV 并汇总多运行统计 |
 | [reporting.py](../reporting.py)、[plotting](../plotting/) | 将结果导出为报告或图表 |
 
 本目录中的类均采用 `@dataclass(frozen=True)`，创建后不能直接重新赋值字段。需要生成更新后的对象时，可使用 `dataclasses.replace()`。类型注解表达字段约定，但不会自动完成类型或范围校验；具体校验位置见第 7 节。
@@ -32,7 +34,7 @@
 | [storage.py](storage.py) | `StorageUnit`、`StorageClearingContext`、`StorageDispatchResult` | 储能参数、联合出清上下文与运行结果 |
 | [household.py](household.py) | `HouseholdUnit`、`HouseholdPlan`、`HouseholdDispatchResult`、`HouseholdFlexibilityResult` | 居民建筑参数、计划、实际运行与灵活性范围 |
 | [industry.py](industry.py) | `IndustrialDevice`、`IndustrialUnit`、`IndustrialPlan`、`IndustrialDispatchResult`、`IndustrialFlexibilityResult`、`IndustrialOptimizationWindowResult` | 工业钢铁厂设备、生产计划、运行及滚动优化结果 |
-| [learning.py](learning.py) | `LearningConfig`、`LearningStepResult`、`LearningTransition` | 学习配置、逐时段动作与奖励、经验回放记录 |
+| [learning.py](learning.py) | `LearningConfig`、`LearningPeriod`、`LearningStepResult`、`LearningTransition` | 学习配置与数据时段、逐时段动作与奖励、经验回放记录 |
 | [orders.py](orders.py) | `DemandBid`、`SupplyOffer` | 出清前的买单与卖单 |
 | [clearing.py](clearing.py) | `ClearedDemandBid`、`ClearedSupplyOffer`、`Trade`、`MarketClearingResult`、`sum_cleared_demand()` | 订单成交结果、逐笔成交、单产品汇总与需求筛选求和 |
 | [results.py](results.py) | `SimulationResult` | 一次仿真运行的完整内存结果 |
@@ -75,7 +77,7 @@ flowchart TD
 
 ### 3.3 学习场景分支
 
-第五版学习场景使用学习配置、机组参数、预测和历史市场结果构建观测。图中展示从动作到经验记录的主要处理顺序。
+第五版学习场景使用学习配置、历史出清价、交付小时编码、上一时段本机成交功率及自身边际成本构建 16 维观测，不包含负荷或预测电价。图中展示从动作到经验记录的主要处理顺序。
 
 ```mermaid
 flowchart TD
@@ -208,7 +210,7 @@ flowchart TD
 
 ### 5.6 学习配置与记录：learning.py
 
-`LearningConfig` 保存第五版单智能体 MATD3 的配置，涵盖学习率、训练轮数、经验缓冲区、批大小、折扣系数、训练频率、探索噪声、目标网络更新、策略延迟，以及策略保存或加载路径等。
+`LearningConfig` 保存第五版单智能体 MATD3 的配置，涵盖学习率、训练轮数、经验缓冲区、批大小、折扣系数、训练频率、探索噪声、目标网络更新、策略延迟，以及策略保存或加载路径等。学习模式还必须配置 `periods`：按交付时间定义的训练、验证、测试半开区间 `LearningPeriod(start, end)`，按顺序排列且互不重叠。
 
 - `LearningStepResult`：单个交付时段的动作、可用功率、成交功率、出清价、利润、遗憾值和奖励，用于审计学习过程。
 - `LearningTransition`：一条 `(state, action, reward, next_state, done)` 经验记录。`action` 保留未排序的实际执行动作，类型为包含两个浮点数的元组。
@@ -289,9 +291,8 @@ flowchart TD
 | `industry_optimization_windows` | 工业滚动优化窗口与成本结果 |
 | `learning_steps` | 学习动作、成交结果与奖励 |
 | `learning_transitions` | 经验回放记录 |
-| `learning_load_base_mw` | 学习观测中用于负荷归一化的基准功率 |
 
-`settings` 和 `market_results` 是必填字段。其余结果序列默认是空元组 `()`，`learning_load_base_mw` 默认是 `None`。某个结果序列为空表示本次结果对象没有该类记录，读取时应按实际场景处理。
+`settings` 和 `market_results` 是必填字段。其余结果序列默认是空元组 `()`。某个结果序列为空表示本次结果对象没有该类记录，读取时应按实际场景处理。学习观测已删除负荷输入，结果对象不再保存负荷归一化基数。
 
 ## 6. 常用派生计算
 

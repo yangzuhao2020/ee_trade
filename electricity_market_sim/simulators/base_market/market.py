@@ -94,8 +94,8 @@ class BaseMarket:
             extension_inputs = (
                 extension.prepare(self) if extension is not None else EomExtensionInputs())
         self.extension_inputs = extension_inputs
-        self.requires_market_price_forecast |= bool(extension_inputs.forecast_offsets)
-        # 扩展模块的预测需求合并到市场的预测开关中
+        self.requires_market_price_forecast |= bool(extension_inputs.price_forecast_offsets)
+        # 只有显式电价预测需求才打开开关；未来负荷等数据窗口仅参与完整性检查。
         self.fuel_prices = (
             extension_inputs.fuel_prices
             if extension_inputs.fuel_prices is not None
@@ -212,8 +212,10 @@ class BaseMarket:
                 exchange_unit=self.exchange_unit,
                 exchange_profiles=self.exchange_profiles,
                 requires_price_forecast=self.requires_price_forecast,
-                extra_forecast_offsets=inputs.forecast_offsets,
+                required_data_offsets=inputs.required_data_offsets,
+                price_forecast_offsets=inputs.price_forecast_offsets,
                 requires_storage_price_forecast=self.requires_storage_price_forecast,
+                hard_forecast_horizon=inputs.hard_forecast_horizon,
             )
             if issues:
                 if inputs.incomplete_opening_error is not None:
@@ -244,8 +246,9 @@ class BaseMarket:
                     (start for opening in valid_openings for start, _ in opening.products),
                     settings=settings,
                     requires_price_forecast=self.requires_price_forecast,
-                    extra_forecast_offsets=inputs.forecast_offsets,
+                    extra_forecast_offsets=inputs.price_forecast_offsets,
                     requires_storage_price_forecast=self.requires_storage_price_forecast,
+                    hard_forecast_horizon=inputs.hard_forecast_horizon,
                 )
                 # 用机组边际成本和可用出力生成朴素卖单，结合刚性负荷及电力交换，
                 # 在所需时段按统一出清价机制模拟出清，将出清电价作为预测值。

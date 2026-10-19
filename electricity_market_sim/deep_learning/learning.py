@@ -1,25 +1,25 @@
 """第五版学习机组的状态构造、报价生成、奖励计算及回合记录。
-通过策略回调接入报价决策，不依赖 PyTorch；训练网络和参数更新由 training.py 负责。"""
+通过策略回调接入报价决策，不依赖 PyTorch；网络和参数更新由 agent.py 负责，训练编排由 training.py 负责。"""
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from math import isfinite
+from math import cos, isfinite, pi, sin
 import numpy as np
-from .bidding import segment_supply_offers
-from .errors import InputValidationError
-from .models import (
+from ..bidding import segment_supply_offers
+from ..errors import InputValidationError
+from ..models import (
     LearningStepResult,
     LearningTransition,
     MarketClearingResult,
     PowerPlant,
     SupplyOffer,
 )
-from .utils import hours_between
+from ..utils import hours_between
 
-OBSERVATION_SIZE = 38
+OBSERVATION_SIZE = 16
 ACTION_SIZE = 2
-FORECAST_HOURS = 12
+PRICE_HISTORY_HOURS = 12
 PRICE_SCALE_EUR_PER_MWH = 100.0
 REWARD_SCALE_EUR_PER_MWH = 100.0
 _POWER_TOLERANCE_MW = 1e-9
@@ -28,66 +28,44 @@ ActionProvider = Callable[[tuple[float, ...]], Sequence[float]]
 TransitionConsumer = Callable[[LearningTransition], None]
 
 
-def calculate_load_base(residual_loads_mw: Sequence[float]) -> float:
-    """返回训练数据段使用的固定的带符号负荷归一化基数。"""
-
-    values = tuple(float(value) for value in residual_loads_mw)
-    if not values or any(not isfinite(value) for value in values):
-        raise InputValidationError(
-            "Training residual-load forecasts must be a non-empty finite sequence."
-        )
-    return max(1.0, max(abs(value) for value in values))
-
-
 def build_learning_observation(
     *,
     delivery_start: datetime,
-    residual_load_forecasts_mw: Mapping[datetime, float],
-    price_forecasts_eur_per_mwh: Mapping[datetime, float],
     historical_clearing_prices_eur_per_mwh: Sequence[float],
     previous_power_mw: float,
     rated_power_mw: float,
     marginal_cost_eur_per_mwh: float,
-    load_base_mw: float,
     price_scale_eur_per_mwh: float = PRICE_SCALE_EUR_PER_MWH,
 ) -> tuple[float, ...]:
-    """构建文档规定的 38 维观测向量；未来时间窗口的数据不完整时报错。"""
+    """构建 16 维观测：历史出清价、交付小时编码、上期出力和自身成本。
 
-    if rated_power_mw <= 0 or load_base_mw <= 0:
-        raise ValueError("Rated power and load base must be positive.")
-    future_times = tuple(
-        delivery_start + timedelta(hours=offset) for offset in range(FORECAST_HOURS)
-    )
-    try:
-        residual = [float(residual_load_forecasts_mw[time]) for time in future_times]
-    except KeyError as exc:
-        raise InputValidationError(
-            "Residual-load forecast is missing future hour "
-            f"{exc.args[0].isoformat(sep=' ')}."
-        ) from exc
-    try:
-        prices = [float(price_forecasts_eur_per_mwh[time]) for time in future_times]
-    except KeyError as exc:
-        raise InputValidationError(
-            f"Price forecast is missing future hour {exc.args[0].isoformat(sep=' ')}."
-        ) from exc
+    价格和成本使用与动作映射相同的 max_bid_price 缩放；成本始终放在最后一维。
+    不读取负荷或预测电价；小时编码使用场景中的交付时间。
+    """
+
+    if not isfinite(rated_power_mw) or rated_power_mw <= 0:
+        raise ValueError("Rated power must be positive and finite.")
+    if not isfinite(price_scale_eur_per_mwh) or price_scale_eur_per_mwh <= 0:
+        raise ValueError("Price scale must be positive and finite.")
     history = [float(value) for value in historical_clearing_prices_eur_per_mwh]
-    if len(history) > FORECAST_HOURS:
-        history = history[-FORECAST_HOURS:]
-    history = [0.0] * (FORECAST_HOURS - len(history)) + history
+    history = history[-PRICE_HISTORY_HOURS:]
+    history = [0.0] * (PRICE_HISTORY_HOURS - len(history)) + history
     raw_values = [
-        *residual,
-        *prices,
         *history,
         float(previous_power_mw),
         float(marginal_cost_eur_per_mwh),
     ]
     if any(not isfinite(value) for value in raw_values):
         raise InputValidationError("Learning observation contains a non-finite value.")
+    hour = (
+        delivery_start.hour + delivery_start.minute / 60
+        + delivery_start.second / 3600 + delivery_start.microsecond / 3_600_000_000
+    )
+    hour_angle = 2 * pi * hour / 24
     observation = (
-        *(value / load_base_mw for value in residual),
-        *(value / price_scale_eur_per_mwh for value in prices),
         *(value / price_scale_eur_per_mwh for value in history),
+        sin(hour_angle),
+        cos(hour_angle),
         previous_power_mw / rated_power_mw,
         marginal_cost_eur_per_mwh / price_scale_eur_per_mwh,
     )
@@ -251,18 +229,12 @@ class LearningEpisodeSession:
         *,
         plant: PowerPlant,
         action_provider: ActionProvider,
-        residual_load_forecasts_mw: Mapping[datetime, float],
-        price_forecasts_eur_per_mwh: Mapping[datetime, float],
-        load_base_mw: float,
         transition_consumer: TransitionConsumer | None = None,
         enforce_action_bounds: bool = True,
         price_scale_eur_per_mwh: float = PRICE_SCALE_EUR_PER_MWH,
     ) -> None:
         self.plant = plant
         self.action_provider = action_provider
-        self.residual_load_forecasts_mw = residual_load_forecasts_mw
-        self.price_forecasts_eur_per_mwh = price_forecasts_eur_per_mwh
-        self.load_base_mw = load_base_mw
         self.transition_consumer = transition_consumer
         self.enforce_action_bounds = enforce_action_bounds
         self.price_scale_eur_per_mwh = price_scale_eur_per_mwh
@@ -338,7 +310,7 @@ class LearningEpisodeSession:
         )
         history = [
             float(_valid_clearing_price(result) or 0.0)
-            for result in earlier[-FORECAST_HOURS:]
+            for result in earlier[-PRICE_HISTORY_HOURS:]
         ]
         previous_start = delivery_start - timedelta(hours=1)
         previous = next(
@@ -358,13 +330,10 @@ class LearningEpisodeSession:
             )
         state = build_learning_observation(
             delivery_start=delivery_start,
-            residual_load_forecasts_mw=self.residual_load_forecasts_mw,
-            price_forecasts_eur_per_mwh=self.price_forecasts_eur_per_mwh,
             historical_clearing_prices_eur_per_mwh=history,
             previous_power_mw=previous_power_mw,
             rated_power_mw=self.plant.max_power_mw,
             marginal_cost_eur_per_mwh=marginal_cost_eur_per_mwh,
-            load_base_mw=self.load_base_mw,
             price_scale_eur_per_mwh=self.price_scale_eur_per_mwh,
         )
         self._emit_previous_transition(delivery_start, state)

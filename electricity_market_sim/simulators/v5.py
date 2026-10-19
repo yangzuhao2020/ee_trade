@@ -1,14 +1,12 @@
-"""第五版学习机组的市场扩展：准备预测输入、生成学习报价并记录奖励与状态转移。"""
+"""第五版学习机组的市场扩展：生成学习报价并记录奖励与状态转移。"""
 
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
-from math import isfinite
 from pathlib import Path
-from ..bidding import available_power_mw
 from ..errors import InputValidationError
-from ..learning import (
-    ActionProvider, LearningEpisodeSession, TransitionConsumer, calculate_load_base,
+from ..deep_learning.learning import (
+    ActionProvider, LearningEpisodeSession, TransitionConsumer,
 )
 from ..models import (
     DemandBid,
@@ -20,10 +18,7 @@ from ..models import (
     SupplyOffer,
 )
 from .base_market import BaseMarket
-from .base_market.forecasts import _forecast_starts
 from .eom import EomExtensionInputs, ScheduledProductKey, simulate_eom_market
-
-_FORECAST_HOURS = 12
 
 
 def _learning_plant(
@@ -72,34 +67,6 @@ def _learning_plant(
         )
     return learning_plants[0]
 
-def _residual_load_forecasts(
-    *,
-    forecast_times: set[datetime],
-    demand_units,
-    demand_profiles: dict[str, dict[datetime, float]],
-    plants: tuple[PowerPlant, ...],
-    availability_profiles: dict[str, dict[datetime, float]],
-) -> dict[datetime, float]:
-    """返回每小时的需求减去风电/光伏预测出力后的结果。"""
-
-    variable_renewables = tuple(
-        plant
-        for plant in plants
-        if any(label in plant.technology.lower() for label in ("wind", "solar"))
-    )
-    residual: dict[datetime, float] = {}
-    for forecast_time in sorted(forecast_times):
-        demand_mw = sum(
-            demand_profiles[unit.name][forecast_time]
-            for unit in demand_units
-            if not unit.is_elastic
-        )
-        renewable_mw = sum(
-            available_power_mw(plant, forecast_time, availability_profiles)
-            for plant in variable_renewables
-        )
-        residual[forecast_time] = demand_mw - renewable_mw
-    return residual
 
 class _LearningMarketExtension:
     """Replace one plant's bids and collect rewards before the next opening."""
@@ -108,11 +75,9 @@ class _LearningMarketExtension:
 
     def __init__(self, action_provider: ActionProvider | None,
                  transition_consumer: TransitionConsumer | None = None,
-                 load_base_mw: float | None = None,
                  enforce_action_bounds: bool = True) -> None:
         self.action_provider = action_provider
         self.transition_consumer = transition_consumer
-        self.load_base_mw = load_base_mw
         self.enforce_action_bounds = enforce_action_bounds
         self.session: LearningEpisodeSession | None = None
 
@@ -122,50 +87,18 @@ class _LearningMarketExtension:
             raise InputValidationError(
                 "A learning_action_provider is required for a Version 5 market episode."
             )
-        if self.load_base_mw is not None:
-            try:
-                self.load_base_mw = float(self.load_base_mw)
-            except (TypeError, ValueError) as exc:
-                raise InputValidationError("The saved learning load base must be numeric.") from exc
-            if not isfinite(self.load_base_mw) or self.load_base_mw <= 0:
-                raise InputValidationError(
-                    "The saved learning load base must be a positive finite value."
-                )
-            if self.plant is None:
-                raise InputValidationError("A saved learning load base requires a learning plant.")
         return EomExtensionInputs(
-            forecast_offsets=tuple(range(_FORECAST_HOURS)),
             incomplete_opening_error="Learning opening",
+            hard_forecast_horizon=True,
         )
 
     def initialize(self, market: BaseMarket) -> None:
-        training_times = sorted(
-            {start for opening in market.valid_openings for start, _ in opening.products}
-        )
-        forecast_times = _forecast_starts(
-            training_times, settings=market.settings,
-            extra_forecast_offsets=tuple(range(_FORECAST_HOURS)),
-        )
-        residual_forecasts = _residual_load_forecasts(
-            forecast_times=forecast_times,
-            demand_units=market.demand_units,
-            demand_profiles=market.demand_profiles,
-            plants=market.plants,
-            availability_profiles=market.availability_profiles,
-        )
-        load_base = (
-            calculate_load_base([residual_forecasts[start] for start in training_times])
-            if self.load_base_mw is None else self.load_base_mw
-        )
         assert self.action_provider is not None
         assert self.plant is not None
         assert market.settings.learning_config is not None
         self.session = LearningEpisodeSession(
             plant=self.plant,
             action_provider=self.action_provider,
-            residual_load_forecasts_mw=residual_forecasts,
-            price_forecasts_eur_per_mwh=market.price_forecasts,
-            load_base_mw=load_base,
             transition_consumer=self.transition_consumer,
             enforce_action_bounds=self.enforce_action_bounds,
             price_scale_eur_per_mwh=market.settings.learning_config.max_bid_price,
@@ -211,7 +144,6 @@ class _LearningMarketExtension:
         steps, transitions = self.session.finalize()
         return replace(
             result, learning_steps=steps, learning_transitions=transitions,
-            learning_load_base_mw=self.session.load_base_mw,
         )
 
 
@@ -221,14 +153,14 @@ def simulate_v5_market(
     openings: tuple[MarketOpening, ...],
     learning_action_provider: ActionProvider | None = None,
     learning_transition_consumer: TransitionConsumer | None = None,
-    learning_load_base_mw: float | None = None,
     learning_enforce_action_bounds: bool = True,
 ) -> SimulationResult:
     """准备一个挂接了确定性策略或训练策略钩子的常规市场。"""
 
     market = BaseMarket(input_path, settings, openings)
     market.prepare(_LearningMarketExtension(
-        learning_action_provider, learning_transition_consumer,
-        learning_load_base_mw, learning_enforce_action_bounds,
+        action_provider=learning_action_provider,
+        transition_consumer=learning_transition_consumer,
+        enforce_action_bounds=learning_enforce_action_bounds,
     ))
     return simulate_eom_market(market)

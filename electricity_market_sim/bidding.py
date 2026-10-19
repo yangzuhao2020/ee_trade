@@ -136,7 +136,9 @@ def storage_heuristic_orders(
             <= delivery_start + timedelta(hours=offset)
             <= available_end
         ]
-        window = [price_forecast[time] for time in window_times]
+        window = [
+            price_forecast[time] for time in window_times if time in price_forecast
+        ]
         average_price = sum(window) / len(window)
         current_price = price_forecast[delivery_start]
         timestamp = delivery_start.isoformat()
@@ -289,7 +291,8 @@ def heuristic_flexible_offers(
     """将符合条件的机组拆分为 V2 的非灵活出力段和灵活出力段报价。
     灵活出力段始终按边际成本报价。停机机组将启动成本分摊到最低稳定出力段。
     对于运行中的机组，若指定的 13 个时间点的预测表明维持运行的未来价值
-    非负，则该出力段可以按零价格报价。
+    非负，则该出力段可以按零价格报价。仿真（时段）边界处可用的预测不足
+    13 个小时时，窗口按已有预测截断。
     """
 
     duration_hours = hours_between(delivery_start, delivery_end)
@@ -305,6 +308,7 @@ def heuristic_flexible_offers(
         future_prices = [
             price_forecast[delivery_start + timedelta(hours=hour)]
             for hour in range(_FORECAST_HOURS + 1)
+            if delivery_start + timedelta(hours=hour) in price_forecast
         ]
         future_expected_profit = sum(price - marginal_cost for price in future_prices)
         # 简单预测未来是否盈利。

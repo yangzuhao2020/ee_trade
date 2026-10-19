@@ -34,8 +34,10 @@ class EomExtensionInputs:
     fuel_prices: dict[str, float] | None = None  # 扩展提供的燃料价格，优先于基础市场从 CSV 加载的价格。
     fuel_price_profiles: dict[datetime, dict[str, float]] | None = None  # 各时段的燃料价格，用于计算边际成本。
     market_price_forecasts: dict[datetime, float] | None = None  # 扩展提供的电价预测，优先于基础市场自行生成的预测。
-    forecast_offsets: tuple[int, ...] = ()  # 相对交付开始时间的小时偏移，指定扩展额外需要的预测时间点。
+    required_data_offsets: tuple[int, ...] = ()  # 仅声明扩展所需的未来输入数据窗口，不启用电价预测。
+    price_forecast_offsets: tuple[int, ...] = ()  # 显式声明扩展所需的电价预测窗口，并启用电价预测。
     incomplete_opening_error: str | None = None  # 设置后，开市数据不完整时以此说明报错；默认警告并跳过开市。
+    hard_forecast_horizon: bool = False  # 为 True 时，所有前瞻预测和数据需求窗口一律截取在 settings.end 之前，不向仿真（时段）边界外读取真实数据。
 
 
 class EomMarketExtension(Protocol):

@@ -8,7 +8,7 @@ from operator import attrgetter
 from pathlib import Path
 from typing import Any
 from .errors import InputValidationError
-from .learning import PRICE_SCALE_EUR_PER_MWH
+from .deep_learning.learning import PRICE_SCALE_EUR_PER_MWH
 from .models import SimulationResult
 from .utils import format_timestamp, hours_between
 

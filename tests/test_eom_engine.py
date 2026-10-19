@@ -9,8 +9,8 @@ import unittest
 
 from electricity_market_sim.bidding import PlantRuntimeState
 from electricity_market_sim.clearing_algorithm import clear_pay_as_clear
+from electricity_market_sim.deep_learning.learning import LearningEpisodeSession
 from electricity_market_sim.errors import InputValidationError
-from electricity_market_sim.learning import LearningEpisodeSession
 from electricity_market_sim.models import (
     DemandBid,
     DemandUnit,
@@ -164,27 +164,28 @@ class SupplyHookContracts(unittest.TestCase):
 
     def test_extension_prediction_window_participates_in_opening_preflight(self):
         delivery = START + HOUR
-        issues = _opening_coverage_issues(
-            opening=MarketOpening(START, ((delivery, delivery + HOUR),)),
-            settings=SETTINGS, plants=(PLANT,),
-            demand_units=(DemandUnit("load", "operator"),),
-            demand_profiles={"load": {delivery: 1.0}}, availability_profiles={},
-            exchange_unit=None, exchange_profiles={}, requires_price_forecast=False,
-            extra_forecast_offsets=(0, 1),
-        )
-        self.assertEqual(issues,
-                         ["报价预测数据缺少 demand_df.csv/load: 2024-01-01 02:00"])
+        for window in (
+            {"required_data_offsets": (0, 1)},
+            {"price_forecast_offsets": (0, 1)},
+        ):
+            with self.subTest(window=window):
+                issues = _opening_coverage_issues(
+                    opening=MarketOpening(START, ((delivery, delivery + HOUR),)),
+                    settings=SETTINGS, plants=(PLANT,),
+                    demand_units=(DemandUnit("load", "operator"),),
+                    demand_profiles={"load": {delivery: 1.0}}, availability_profiles={},
+                    exchange_unit=None, exchange_profiles={}, requires_price_forecast=False,
+                    **window,
+                )
+                self.assertEqual(issues,
+                                 ["报价预测数据缺少 demand_df.csv/load: 2024-01-01 02:00"])
 
 
 class LearningActionContracts(unittest.TestCase):
     def session(self, action, bounded, transitions=None):
-        forecasts = {START + i * HOUR: 1.0 for i in range(16)}
         return LearningEpisodeSession(
             plant=replace(PLANT, min_power_mw=0.25),
             action_provider=lambda state: action,
-            residual_load_forecasts_mw=forecasts,
-            price_forecasts_eur_per_mwh=forecasts,
-            load_base_mw=1.0,
             enforce_action_bounds=bounded,
             transition_consumer=None if transitions is None else transitions.append,
         )

@@ -36,7 +36,13 @@ from .industry import (
     IndustrialPlan,
     IndustrialUnit,
 )
-from .learning import LearningConfig, LearningStepResult, LearningTransition
+from .learning import (
+    LEARNING_PERIOD_NAMES,
+    LearningConfig,
+    LearningPeriod,
+    LearningStepResult,
+    LearningTransition,
+)
 from .market import MarketOpening, MarketSettings
 from .orders import DemandBid, SupplyOffer
 from .plants import PowerPlant

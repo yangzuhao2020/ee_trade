@@ -1,11 +1,11 @@
-"""第五版学习机组报价与奖励、训练和验证曲线，以及 Actor 与边际成本基准策略的评估对比图表。"""
+"""第五版学习机组报价与奖励、训练和验证曲线，以及各数据时段上 Actor 与边际成本基准策略的对比图表。"""
 
 import csv
 from pathlib import Path
 from statistics import fmean, pstdev
 from typing import Any
 from ..errors import PlottingError
-from ..learning_metrics import LEARNING_METRIC_FIELDS
+from ..deep_learning.learning_metrics import LEARNING_METRIC_FIELDS
 from ..models import LearningStepResult, MarketClearingResult
 from .common import (
     _ENERGY_TOLERANCE_MWH,
@@ -17,24 +17,30 @@ from .common import (
 
 _LEARNING_SEGMENTS = ("learning_minimum", "learning_flexible")
 _CURVE_FIELDS = (
-    ("total_reward", "Total reward"),
-    ("discounted_reward", "Discounted reward"),
-    ("total_profit_eur", "Total profit (EUR)"),
+    ("mean_reward_per_hour", "Mean reward per hour"),
+    ("total_reward", "Total reward (period-length dependent)"),
+    ("total_profit_eur", "Total profit (EUR, period-length dependent)"),
 )
 _COMPARISON_FIELDS = (
     ("total_profit_eur", "Total profit (EUR)"),
     ("total_reward", "Total reward"),
-    ("discounted_reward", "Discounted reward"),
+    ("mean_reward_per_hour", "Mean reward per hour"),
     ("accepted_energy_mwh", "Accepted energy (MWh)"),
     ("minimum_segment_average_bid_eur_per_mwh", "Minimum-segment avg bid (EUR/MWh)"),
     ("flexible_segment_average_bid_eur_per_mwh", "Flexible-segment avg bid (EUR/MWh)"),
     ("minimum_segment_acceptance_ratio", "Minimum-segment acceptance ratio"),
     ("flexible_segment_acceptance_ratio", "Flexible-segment acceptance ratio"),
 )
-_COMPARISON_PHASES = (
-    ("evaluation", "Actor", "#4C78A8"),
-    ("baseline", "Baseline", "#9CA3AF"),
-)
+
+
+def comparison_periods(rows: list[dict[str, Any]]) -> list[str]:
+    """按出现顺序返回指标中含 Actor/基线对比的数据时段。"""
+
+    return list(dict.fromkeys(
+        row["phase"].rsplit("_", 1)[0]
+        for row in rows
+        if row["phase"].endswith(("_actor", "_baseline"))
+    ))
 
 
 def _plot_learning_unit(
@@ -281,7 +287,7 @@ def _plot_learning_curves(pyplot, rows: list[dict[str, Any]], path: Path) -> Pat
         training = [row for row in run_rows if row["phase"] == "train"]
         validation = [row for row in run_rows if row["phase"] == "validation"]
         best = (
-            max(validation, key=lambda row: row["discounted_reward"])
+            max(validation, key=lambda row: row["total_reward"])
             if validation
             else None
         )
@@ -325,7 +331,7 @@ def _plot_learning_curves(pyplot, rows: list[dict[str, Any]], path: Path) -> Pat
                     edgecolors="#1F1F1F",
                     linewidths=0.6,
                     zorder=4,
-                    label=f"Run {run} best (discounted)",
+                    label=f"Run {run} best (validation total)",
                 )
     for axis, (_, label) in zip(axes, _CURVE_FIELDS):
         axis.set_ylabel(label)
@@ -335,7 +341,7 @@ def _plot_learning_curves(pyplot, rows: list[dict[str, Any]], path: Path) -> Pat
     axes[-1].xaxis.set_major_locator(pyplot.MaxNLocator(integer=True))
     figure.suptitle(
         f"Learning curves — {len(runs)} independent run(s); dashed: initial "
-        "experience; star: validation episode with the highest discounted reward"
+        "experience; star: validation episode with the highest total reward"
     )
     figure.tight_layout()
     return _save_figure(pyplot, figure, path)
@@ -345,16 +351,22 @@ def _format_metric(value: float) -> str:
     return f"{value:,.0f}" if abs(value) >= 1_000 else f"{value:.3g}"
 
 
-def _plot_evaluation_comparison(pyplot, rows: list[dict[str, Any]], path: Path) -> Path:
-    """对比确定性 Actor 与边际成本基准策略的评估结果。"""
+def _plot_evaluation_comparison(
+    pyplot, rows: list[dict[str, Any]], path: Path, period: str
+) -> Path:
+    """对比确定性 Actor 与边际成本基准策略在指定数据时段上的结果。"""
 
+    phases = (
+        (f"{period}_actor", "Actor", "#4C78A8"),
+        (f"{period}_baseline", "Baseline", "#9CA3AF"),
+    )
     run_count = max(
         len([row for row in rows if row["phase"] == phase])
-        for phase, _, _ in _COMPARISON_PHASES
+        for phase, _, _ in phases
     )
     figure, axes = pyplot.subplots(2, 4, figsize=(16, 7.5))
     for axis, (field, title) in zip(axes.flat, _COMPARISON_FIELDS):
-        for position, (phase, _, color) in enumerate(_COMPARISON_PHASES):
+        for position, (phase, _, color) in enumerate(phases):
             values = [row[field] for row in rows if row["phase"] == phase]
             if not values:
                 continue
@@ -393,14 +405,16 @@ def _plot_evaluation_comparison(pyplot, rows: list[dict[str, Any]], path: Path) 
                 )
         axis.axhline(0, color="#1F1F1F", linewidth=0.6)
         axis.set_xticks(
-            range(len(_COMPARISON_PHASES)),
-            [label for _, label, _ in _COMPARISON_PHASES],
+            range(len(phases)),
+            [label for _, label, _ in phases],
         )
-        axis.set_xlim(-0.6, len(_COMPARISON_PHASES) - 0.4)
+        axis.set_xlim(-0.6, len(phases) - 0.4)
         axis.margins(y=0.15)
         axis.set_title(title, fontsize=10)
         axis.grid(axis="y", alpha=0.25)
     spread_note = "mean ± population std, dots are runs" if run_count > 1 else "1 run"
-    figure.suptitle(f"Deterministic Actor vs marginal-cost baseline — {spread_note}")
+    figure.suptitle(
+        f"Deterministic Actor vs marginal-cost baseline — {period} period, {spread_note}"
+    )
     figure.tight_layout()
     return _save_figure(pyplot, figure, path)

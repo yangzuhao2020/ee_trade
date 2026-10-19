@@ -84,11 +84,13 @@ def _forecast_starts(
     requires_price_forecast: bool = False,
     extra_forecast_offsets: tuple[int, ...] = (),
     requires_storage_price_forecast: bool = False,
+    hard_forecast_horizon: bool = False,
 ) -> set[datetime]:
     """返回各个已启用的策略类别为给定交付时段所需的预测时间点。
     机组需要从交付开始时刻起共 _FORECAST_HOURS + 1 个小时的预测。扩展模块显式
     声明各自所需的时间偏移；储能额外需要以交付时刻为中心的对称窗口，并截取在
-    仿真时间范围内。
+    仿真时间范围内。hard_forecast_horizon 为 True 时（如学习时段），所有窗口
+    进一步截取在 settings.end 之前，不向时段边界外读取真实数据。
     """
 
     starts: set[datetime] = set()
@@ -107,6 +109,8 @@ def _forecast_starts(
                 forecast_start = delivery_start + timedelta(hours=offset)
                 if settings.start <= forecast_start <= settings.end:
                     starts.add(forecast_start)
+    if hard_forecast_horizon:
+        starts = {start for start in starts if start < settings.end}
     return starts
 
 def _missing_profile_times(
@@ -127,10 +131,12 @@ def _opening_coverage_issues(
     exchange_unit: ExchangeUnit | None,
     exchange_profiles: dict[datetime, ExchangeSchedule],
     requires_price_forecast: bool,
-    extra_forecast_offsets: tuple[int, ...] = (),
+    required_data_offsets: tuple[int, ...] = (),
+    price_forecast_offsets: tuple[int, ...] = (),
     requires_storage_price_forecast: bool = False,
+    hard_forecast_horizon: bool = False,
 ) -> list[str]:
-    """返回一次开市无法完整报价的全部已知原因。"""
+    """检查交付、未来输入和电价预测所需的数据；输入窗口不隐含电价预测需求。"""
 
     issues: list[str] = []
     delivery_times = {delivery_start for delivery_start, _ in opening.products}
@@ -150,8 +156,9 @@ def _opening_coverage_issues(
         delivery_times,
         settings=settings,
         requires_price_forecast=requires_price_forecast,
-        extra_forecast_offsets=extra_forecast_offsets,
+        extra_forecast_offsets=required_data_offsets + price_forecast_offsets,
         requires_storage_price_forecast=requires_storage_price_forecast,
+        hard_forecast_horizon=hard_forecast_horizon,
     )
     required_times = delivery_times | forecast_times
 

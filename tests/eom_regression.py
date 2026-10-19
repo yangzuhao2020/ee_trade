@@ -5,6 +5,7 @@
 快照与常规输出分开保存；场景配置调整仅在测试内存中生效。"""
 
 import argparse
+from datetime import datetime, timedelta
 from math import tanh
 from pathlib import Path
 import pickle
@@ -39,8 +40,13 @@ def cases():
         if dataset == "example_02a":
             # Upstream YAML lacks mandatory V5 fields. Exercise its market data
             # with explicit test-only settings without altering the input files.
+            # The train period reproduces the scenario's original delivery hours;
+            # validation and test follow it and are not simulated here.
             for scenario in ("base", "tiny"):
                 fixture = dict(config[scenario])
+                start = datetime.fromisoformat(str(fixture["start_date"]))
+                end = datetime.fromisoformat(str(fixture["end_date"]))
+                day = timedelta(days=1)
                 fixture["learning_config"] = {
                     **fixture["learning_config"],
                     "replay_buffer_size": 10000,
@@ -50,6 +56,11 @@ def cases():
                     "policy_delay": 2,
                     "target_policy_noise": 0.2,
                     "target_noise_clip": 0.5,
+                    "periods": {
+                        "train": {"start": start + timedelta(hours=1), "end": end},
+                        "validation": {"start": end, "end": end + day},
+                        "test": {"start": end + day, "end": end + 2 * day},
+                    },
                 }
                 with patch("electricity_market_sim.config.loader.yaml.safe_load",
                            return_value={scenario: fixture}):
@@ -77,7 +88,8 @@ def capture(input_path, scenario, fixture_settings):
         settings = fixture_settings or load_market_settings(input_path / "config.yaml", scenario)
         if settings.learning_config and settings.learning_config.learning_mode:
             kwargs = {"learning_action_provider": action,
-                      "learning_transition_consumer": transition}
+                      "learning_transition_consumer": transition,
+                      "learning_period": "train"}
         with warnings.catch_warnings(record=True) as recorded:
             warnings.simplefilter("always")
             with patch("electricity_market_sim.simulation.load_market_settings",

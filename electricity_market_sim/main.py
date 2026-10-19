@@ -7,7 +7,8 @@ from .config import load_market_settings
 from .errors import SimulationError
 from .plotting import generate_learning_plots, generate_plots
 from .simulation import run_simulation
-from .training import evaluate_learning_scenario, train_learning_scenario
+from .deep_learning.test import evaluate_learning_scenario, run_learning_test
+from .deep_learning.training import train_learning_scenario
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,19 +39,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--learning-mode",
-        choices=("train", "evaluate"),
+        choices=("train", "evaluate", "test"),
         help=(
-            "For a Version 5 learning scenario, train a policy or evaluate the "
-            "best saved policy. Defaults to train."
+            "For a Version 5 learning scenario: train (train period updates, "
+            "validation period selects best.pt), evaluate one checkpoint on the "
+            "train or validation period, or test every run's best.pt on the "
+            "held-out test period. Defaults to train."
         ),
     )
     parser.add_argument(
         "--checkpoint",
         type=Path,
         help=(
-            "Checkpoint to resume for training or load for evaluation. Evaluation "
-            "defaults to OUTPUT_DIR/checkpoints/best.pt."
+            "Checkpoint to resume for training or load for evaluation (defaults to "
+            "OUTPUT_DIR/checkpoints/best.pt). For test, the runs.json manifest or "
+            "its directory (defaults to OUTPUT_DIR/checkpoints/runs.json)."
         ),
+    )
+    parser.add_argument(
+        "--period",
+        choices=("train", "validation"),
+        help="Data period for --learning-mode evaluate. Defaults to validation.",
     )
     parser.add_argument(
         "--training-episodes",
@@ -80,18 +89,35 @@ def main(argv: list[str] | None = None) -> int:
         # 存在学习配置 且学习模式不为None，说明是第五版学习场景
         learning_episode_label = "Actor evaluation"
 
-        if is_learning: # 对应第五版学习场景，用于训练和评估机组报价。
+        if is_learning: # 对应第五版学习场景，用于训练、评估和测试机组报价。
             learning_mode = arguments.learning_mode or "train"
-            if (
-                learning_mode == "evaluate"
-                and arguments.checkpoint is not None
+            if arguments.period is not None and learning_mode != "evaluate":
+                raise SimulationError("--period 只能与 --learning-mode evaluate 一起使用。")
+            if learning_mode != "train" and (
+                arguments.training_episodes is not None
+                or arguments.training_runs is not None
+            ):
+                raise SimulationError(
+                    "--training-episodes 和 --training-runs 只能与 "
+                    "--learning-mode train 一起使用。"
+                )
+            evaluation_period = arguments.period or "validation"
+            if learning_mode == "train":
+                learning_episode_label = "Best Actor (validation period)"
+            elif learning_mode == "test":
+                learning_episode_label = "Selected Actor (test period)"
+            elif (
+                arguments.checkpoint is not None
                 and arguments.checkpoint.name != "best.pt"
             ):
                 learning_episode_label = (
-                    f"Actor evaluation ({arguments.checkpoint.stem})"
+                    f"Actor evaluation ({arguments.checkpoint.stem}, "
+                    f"{evaluation_period} period)"
                 )
             else:
-                learning_episode_label = "Best Actor evaluation"
+                learning_episode_label = (
+                    f"Best Actor evaluation ({evaluation_period} period)"
+                )
 
             if learning_mode == "train":
                 result = train_learning_scenario(
@@ -103,20 +129,21 @@ def main(argv: list[str] | None = None) -> int:
                     independent_runs=arguments.training_runs,
                 )
                 learning_metrics_path = arguments.output_dir / "learning_metrics.csv"
+            elif learning_mode == "test":
+                result = run_learning_test(
+                    input_dir=arguments.input_dir,
+                    output_dir=arguments.output_dir,
+                    scenario=arguments.scenario,
+                    manifest_path=arguments.checkpoint,
+                )
+                learning_metrics_path = arguments.output_dir / "learning_test_metrics.csv"
             else:
-                if (
-                    arguments.training_episodes is not None
-                    or arguments.training_runs is not None
-                ):
-                    raise SimulationError(
-                        "--training-episodes 和 --training-runs 只能与 "
-                        "--learning-mode train 一起使用。"
-                    )
                 result = evaluate_learning_scenario(
                     input_dir=arguments.input_dir,
                     output_dir=arguments.output_dir,
                     scenario=arguments.scenario,
                     checkpoint_path=arguments.checkpoint,
+                    period=evaluation_period,
                 )
                 learning_metrics_path = (
                     arguments.output_dir / "learning_evaluation_metrics.csv"

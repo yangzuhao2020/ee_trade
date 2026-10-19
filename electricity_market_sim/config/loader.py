@@ -9,7 +9,7 @@ from typing import Any
 import yaml
 
 from ..errors import InputValidationError
-from ..models import LearningConfig, MarketSettings
+from ..models import LEARNING_PERIOD_NAMES, LearningConfig, LearningPeriod, MarketSettings
 
 _DURATION_PATTERN = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>min|m|h|d)$")
 
@@ -61,6 +61,62 @@ def _parse_additional_fields(eom: dict[str, Any]) -> frozenset[str]:
             "markets_config.EOM.additional_fields 必须是由非空字符串组成的列表。"
         )
     return frozenset(value.strip() for value in raw_fields)
+
+
+def _load_learning_periods(
+    raw: Any, *, required: bool
+) -> tuple[tuple[str, LearningPeriod], ...] | None:
+    """读取按交付时间定义的训练、验证、测试时段，并检查顺序与重叠。"""
+
+    if raw is None:
+        if required:
+            raise InputValidationError(
+                "学习模式必须在 learning_config.periods 中配置 train、validation、"
+                "test 三个交付时段。"
+            )
+        return None
+    if not isinstance(raw, dict) or set(raw) != set(LEARNING_PERIOD_NAMES):
+        raise InputValidationError(
+            "learning_config.periods 必须恰好包含 train、validation、test 三个时段。"
+        )
+    periods = []
+    for name in LEARNING_PERIOD_NAMES:
+        value = raw[name]
+        if not isinstance(value, dict) or set(value) != {"start", "end"}:
+            raise InputValidationError(
+                f"learning_config.periods.{name} 必须只包含 start 和 end。"
+            )
+        period = LearningPeriod(
+            start=_parse_datetime(value["start"], f"learning_config.periods.{name}.start"),
+            end=_parse_datetime(value["end"], f"learning_config.periods.{name}.end"),
+        )
+        if period.end <= period.start:
+            raise InputValidationError(
+                f"learning_config.periods.{name} 的 end 必须晚于 start。"
+            )
+        periods.append((name, period))
+    for (earlier_name, earlier), (later_name, later) in zip(periods, periods[1:]):
+        if earlier.end > later.start:
+            raise InputValidationError(
+                f"learning_config.periods.{earlier_name} 必须在 {later_name} "
+                "开始之前结束，三个时段不能重叠。"
+            )
+    return tuple(periods)
+
+
+def _validate_learning_period_alignment(settings: MarketSettings) -> None:
+    """检查各时段边界都落在交付产品的整数倍时刻上。"""
+
+    for name, period in settings.learning_config.periods:
+        for label, moment in (("start", period.start), ("end", period.end)):
+            since_midnight = moment - moment.replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            if since_midnight % settings.product_duration:
+                raise InputValidationError(
+                    f"learning_config.periods.{name}.{label} 必须与 "
+                    "交付产品时长对齐。"
+                )
 
 
 def _load_learning_config(
@@ -135,6 +191,9 @@ def _load_learning_config(
             trained_policies_save_path=optional_path("trained_policies_save_path"),
             trained_policies_load_path=optional_path("trained_policies_load_path"),
             max_bid_price=float(raw.get("max_bid_price", 100.0)),
+            periods=_load_learning_periods(
+                raw.get("periods"), required=learning_mode
+            ),
         )
     except InputValidationError:
         raise
@@ -307,7 +366,11 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
     except (TypeError, ValueError) as exc:
         raise InputValidationError(f"EOM 配置无效：{exc}") from exc
 
-    if settings.end <= settings.start:
+    is_learning = (
+        settings.learning_config is not None and settings.learning_config.learning_mode
+    )
+    # 学习模式的实际仿真范围由 learning_config.periods 决定，原有起止日期不生效。
+    if not is_learning and settings.end <= settings.start:
         raise InputValidationError("end_date 必须晚于 start_date。")
     is_pay_as_bid = settings.market_mechanism == "pay_as_bid"
     if not is_pay_as_bid and settings.time_step != timedelta(hours=1):
@@ -352,6 +415,8 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
         )
     if settings.minimum_bid_price > settings.maximum_bid_price:
         raise InputValidationError("minimum_bid_price 不能大于 maximum_bid_price。")
+    if settings.learning_config is not None and settings.learning_config.periods:
+        _validate_learning_period_alignment(settings)
     if scenario == "base" and settings.exchange_units_file is not None:
         raise InputValidationError(
             "'base' 场景不能配置 exchange_units。"
