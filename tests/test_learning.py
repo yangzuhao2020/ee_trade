@@ -3,6 +3,11 @@
 from contextlib import redirect_stderr, redirect_stdout
 import csv
 import json
+import os
+import subprocess
+import sys
+import textwrap
+import warnings
 from dataclasses import replace
 from io import StringIO
 from datetime import datetime, timedelta
@@ -67,6 +72,7 @@ def make_scenario(
     directory.mkdir(parents=True, exist_ok=True)
     learning_config = {
         "learning_mode": True, "algorithm": "matd3", "learning_rate": 0.001,
+        "device": "cpu",
         "training_episodes": 3, "episodes_collecting_initial_experience": 1,
         "replay_buffer_size": 64, "batch_size": 2, "gamma": 0.99,
         "train_freq": "1h", "gradient_steps": 1,
@@ -173,6 +179,181 @@ def collect_states(path, period="train"):
             path, action, transition_consumer=transitions.append, period=period
         )
     return states, transitions, result
+
+
+class LearningConfigurationContracts(unittest.TestCase):
+    def test_shared_defaults_are_loaded_relative_to_loader_and_scene_overrides_them(self):
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary)).resolve()
+            config_path = path / "config.yaml"
+            scene = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            periods = scene["base"]["learning_config"]["periods"]
+            scene["base"]["learning_config"] = {"learning_mode": True, "periods": periods}
+            config_path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+            previous = Path.cwd()
+            try:
+                os.chdir(path)
+                config = load_market_settings(config_path).learning_config
+            finally:
+                os.chdir(previous)
+            self.assertEqual(config.device, "cpu")
+            self.assertEqual(config.training_episodes, 30)
+            self.assertEqual(config.replay_buffer_size, 100000)
+            self.assertEqual(config.train_frequency_steps, 100)
+            scene["base"]["learning_config"].update(device="cuda:0", gamma=0.8)
+            config_path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+            config = load_market_settings(config_path).learning_config
+            self.assertEqual(config.device, "cuda:0")
+            self.assertEqual(config.gamma, 0.8)
+
+    def test_nonlearning_and_disabled_scenes_do_not_read_shared_file(self):
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary)) / "config.yaml"
+            scene = yaml.safe_load(path.read_text(encoding="utf-8"))
+            scene["base"]["learning_config"]["learning_mode"] = False
+            path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+            with patch("electricity_market_sim.config.loader._load_learning_defaults",
+                       side_effect=AssertionError("Unexpected shared config read")):
+                self.assertFalse(load_market_settings(path).learning_config.learning_mode)
+                scene["base"]["learning_config"] = {"learning_mode": False}
+                path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+                with self.assertRaisesRegex(InputValidationError, "缺少必填字段"):
+                    load_market_settings(path)
+                del scene["base"]["learning_config"]
+                path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+                self.assertIsNone(load_market_settings(path).learning_config)
+
+    def test_shared_file_errors_and_scene_only_fields_are_reported(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = make_scenario(root / "input") / "config.yaml"
+            shared = root / "shared.yaml"
+            with patch("electricity_market_sim.config.loader._LEARNING_DEFAULTS_PATH", shared):
+                with self.assertRaisesRegex(InputValidationError, "shared.yaml"):
+                    load_market_settings(path)
+                for content in ("learning_config: [", "[]", "learning_config: []"):
+                    shared.write_text(content, encoding="utf-8")
+                    with self.subTest(content=content), self.assertRaisesRegex(InputValidationError, "shared.yaml"):
+                        load_market_settings(path)
+                for field in ("learning_mode", "periods", "continue_learning",
+                              "trained_policies_load_path", "trained_policies_save_path"):
+                    shared.write_text(yaml.safe_dump({"learning_config": {field: None}}), encoding="utf-8")
+                    with self.subTest(field=field), self.assertRaisesRegex(InputValidationError, "场景专属字段"):
+                        load_market_settings(path)
+
+    def test_unknown_fields_warn_without_changing_known_values(self):
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary)) / "config.yaml"
+            scene = yaml.safe_load(path.read_text(encoding="utf-8"))
+            scene["base"]["learning_config"]["devcie"] = "cuda:0"
+            path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+            with self.assertWarnsRegex(UserWarning, "devcie") as caught:
+                config = load_market_settings(path).learning_config
+            self.assertEqual(config.device, "cpu")
+            self.assertIn(str(path), str(caught.warning))
+            self.assertIn("'base'", str(caught.warning))
+            self.assertEqual(Path(caught.filename).resolve(), Path(__file__).resolve())
+
+    def test_unknown_shared_fields_warn_with_shared_path_at_caller(self):
+        from electricity_market_sim.config import loader
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = make_scenario(root / "input") / "config.yaml"
+            shared = root / "shared.yaml"
+            defaults = yaml.safe_load(loader._LEARNING_DEFAULTS_PATH.read_text(encoding="utf-8"))
+            defaults["learning_config"]["extra_option"] = 1
+            shared.write_text(yaml.safe_dump(defaults), encoding="utf-8")
+            with patch.object(loader, "_LEARNING_DEFAULTS_PATH", shared), \
+                    self.assertWarnsRegex(UserWarning, "shared.yaml.*extra_option") as caught:
+                load_market_settings(path)
+            self.assertEqual(Path(caught.filename).resolve(), Path(__file__).resolve())
+
+    def test_null_parameters_are_rejected_instead_of_overriding_defaults(self):
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary)) / "config.yaml"
+            scene = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for field in ("device", "max_bid_price", "tau"):
+                scene["base"]["learning_config"][field] = None
+            path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+            with self.assertRaisesRegex(InputValidationError, "null.*device, max_bid_price, tau"):
+                load_market_settings(path)
+
+    def test_field_registry_matches_shared_defaults_and_loader_reads(self):
+        from electricity_market_sim.config import loader
+        defaults = yaml.safe_load(loader._LEARNING_DEFAULTS_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(set(defaults["learning_config"]), loader._LEARNING_PARAMETER_FIELDS)
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary)) / "config.yaml"
+            for field in ("tau", "device", "periods"):
+                with self.subTest(field=field), patch.object(
+                    loader, "_LEARNING_FIELDS", loader._LEARNING_FIELDS - {field}
+                ), warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    with self.assertRaisesRegex(AssertionError, f"'{field}'.*未登记"):
+                        load_market_settings(path)
+
+
+class LearningCoverageContracts(unittest.TestCase):
+    def test_test_period_gap_is_rejected_before_training_writes_checkpoints(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = make_scenario(root / "input")
+            rows = read_rows(path / "demand_df.csv")
+            # 中间缺少测试小时 6；最后的小时 7 仍存在，不能只检查首尾范围。
+            write_csv(path / "demand_df.csv", ("datetime", "load"), rows[:6] + rows[7:])
+            with self.assertRaisesRegex(InputValidationError, "test.*demand_df.csv/load"):
+                train_learning_scenario(path, root / "output", independent_runs=1)
+            self.assertFalse((root / "output").exists())
+
+    def test_preflight_checks_metadata_without_parsing_values_or_forecasting(self):
+        from electricity_market_sim.deep_learning.data_coverage import validate_learning_data_coverage
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary))
+            rows = read_rows(path / "demand_df.csv")
+            rows[6]["load"] = "not-a-number"
+            write_csv(path / "demand_df.csv", ("datetime", "load"), rows)
+            settings = load_market_settings(path / "config.yaml")
+            with patch(PRICE_PREDICTOR, side_effect=AssertionError("Unexpected forecast")):
+                validate_learning_data_coverage(path, settings)
+
+    def test_optional_availability_checks_all_periods_when_provided(self):
+        from electricity_market_sim.deep_learning.data_coverage import validate_learning_data_coverage
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary))
+            write_csv(path / "availability_df.csv", ("datetime", "pp_6"), [
+                {"datetime": (START + hour * HOUR).isoformat(sep=" "), "pp_6": 1}
+                for hour in range(6)
+            ])
+            with self.assertRaisesRegex(InputValidationError, "test.*availability_df.csv/pp_6"):
+                validate_learning_data_coverage(path, load_market_settings(path / "config.yaml"))
+
+    def test_hourly_coverage_uses_available_samples_and_rejects_empty_cells(self):
+        from electricity_market_sim.deep_learning.data_coverage import _hourly_coverage
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "profiles.csv"
+            rows = [{"datetime": (START + HOUR + timedelta(minutes=15)).isoformat(sep=" "), "load": "7"}]
+            write_csv(path, ("datetime", "load"), rows)
+            self.assertEqual(_hourly_coverage(path, ("load",)), {"load": {START + HOUR}})
+            rows[0]["load"] = ""
+            write_csv(path, ("datetime", "load"), rows)
+            with self.assertRaisesRegex(InputValidationError, "missing data"):
+                _hourly_coverage(path, ("load",))
+
+    def test_enabled_exchange_requires_test_period_coverage(self):
+        from electricity_market_sim.deep_learning.data_coverage import validate_learning_data_coverage
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary))
+            settings = replace(load_market_settings(path / "config.yaml"), exchange_units_file="exchange_units.csv")
+            write_csv(path / "exchange_units.csv", (
+                "name", "unit_operator", "bidding_EOM", "price_import", "price_export",
+            ), [{"name": "grid", "unit_operator": "exchange", "bidding_EOM": "exchange_energy_naive",
+                 "price_import": 50, "price_export": 20}])
+            write_csv(path / "exchanges_df.csv", ("datetime", "grid_import", "grid_export"), [
+                {"datetime": (START + hour * HOUR).isoformat(sep=" "), "grid_import": 1, "grid_export": 0}
+                for hour in range(6)
+            ])
+            with self.assertRaisesRegex(InputValidationError, "test.*exchanges_df.csv/grid_import"):
+                validate_learning_data_coverage(path, settings)
 
 
 class LearningMarketContracts(unittest.TestCase):
@@ -544,14 +725,13 @@ class LearningTrainingContracts(unittest.TestCase):
                 ),
             )
 
-    def test_training_never_reads_the_test_period(self):
+    def test_training_weights_do_not_depend_on_test_period_values(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             weights = []
             for name, options in (
                 ("baseline", {}),
                 ("changed_test_demand", {"demand_change_from": 6}),
-                ("missing_test_demand", {"profile_hours": 6}),
             ):
                 path = make_scenario(root / name, **options)
                 output = root / f"{name}_output"
@@ -565,10 +745,52 @@ class LearningTrainingContracts(unittest.TestCase):
                 self.assertEqual(actor.keys(), weights[0][1].keys())
                 for key in actor:
                     self.assertTrue(torch.equal(actor[key], weights[0][1][key]), key)
-            with self.assertRaisesRegex(InputValidationError, "demand_df.csv/load"):
-                run_learning_test(
-                    root / "missing_test_demand", root / "missing_test_demand_output"
-                )
+
+    def test_training_preflight_rejects_missing_test_period(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = make_scenario(root / "input", profile_hours=6)
+            with self.assertRaisesRegex(InputValidationError, "test.*demand_df.csv/load"):
+                train_learning_scenario(path, root / "output", independent_runs=1)
+
+    def test_command_line_overrides_episode_count_and_prints_effective_settings(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = make_scenario(root / "input")
+            output = root / "output"
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                code = main([
+                    "--input-dir", str(path), "--output-dir", str(output),
+                    "--training-episodes", "4", "--training-runs", "1", "--no-plots",
+                ])
+            self.assertEqual(code, 0)
+            payload = torch.load(output / "checkpoints/latest.pt", map_location="cpu", weights_only=True)
+            self.assertEqual(payload["episode"], 4)
+            self.assertIn("cpu", stdout.getvalue())
+            for period in DEFAULT_PERIODS:
+                self.assertIn(period + ": [", stdout.getvalue())
+
+    def test_optional_cuda_state_keeps_cpu_checkpoints_compatible_and_warns_on_transfer(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = make_scenario(root / "input")
+            config = load_market_settings(path / "config.yaml").learning_config
+            checkpoint = root / "checkpoint.pt"
+            agent = MATD3Agent(config, total_regular_steps=6, seed=7)
+            agent.save_checkpoint(checkpoint, episode=0, validation_total_reward=None)
+            payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+            self.assertEqual(payload["checkpoint_version"], 2)
+            self.assertNotIn("cuda_rng_state", payload)
+            restored = MATD3Agent(config, total_regular_steps=6)
+            restored.load_checkpoint(checkpoint, load_optimizers=True)
+            payload["cuda_rng_state"] = torch.zeros(16, dtype=torch.uint8)
+            torch.save(payload, checkpoint)
+            with self.assertWarnsRegex(UserWarning, "CPU.*GPU"):
+                restored.load_checkpoint(checkpoint, load_optimizers=True)
+            with warnings.catch_warnings(record=True) as recorded:
+                restored.load_checkpoint(checkpoint, load_optimizers=False)
+            self.assertEqual(recorded, [])
 
     def test_independent_test_command_evaluates_every_run_without_changing_models(self):
         with TemporaryDirectory() as temporary:
@@ -900,6 +1122,79 @@ class LearningTrainingContracts(unittest.TestCase):
                         torch.save({**metadata, **changed}, checkpoint)
                     with self.assertRaisesRegex(InputValidationError, "no matching best.pt"):
                         _restore_best_checkpoint(**arguments)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+class LearningCudaContracts(unittest.TestCase):
+    def test_cuda_resume_restores_noise_and_next_update_in_isolated_process(self):
+        script = textwrap.dedent('''
+            from pathlib import Path
+            from tempfile import TemporaryDirectory
+            from dataclasses import replace
+            import warnings
+            import torch
+            from test_learning import make_scenario
+            from electricity_market_sim.config import load_market_settings
+            from electricity_market_sim.deep_learning.agent import MATD3Agent
+            from electricity_market_sim.simulation import simulate_learning_episode
+
+            torch.use_deterministic_algorithms(True)
+            with TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                path = make_scenario(root / "input")
+                cpu_config = load_market_settings(path / "config.yaml").learning_config
+                config = replace(cpu_config, device="cuda:0")
+                original = MATD3Agent(config, total_regular_steps=6, seed=7)
+                simulate_learning_episode(
+                    path, lambda state: original.exploration_action(state, initial_experience=False),
+                    transition_consumer=lambda transition: original.observe(transition, train=True),
+                    period="train",
+                )
+                checkpoint = root / "cuda.pt"
+                original.save_checkpoint(checkpoint, episode=1, validation_total_reward=None)
+                saved_state = torch.cuda.get_rng_state().clone()
+                payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+                assert payload["checkpoint_version"] == 2
+                assert torch.equal(payload["cuda_rng_state"], saved_state)
+                original._gradient_step()
+                expected = {name: tensor.detach().cpu().clone()
+                            for name, tensor in original.critics.state_dict().items()}
+                restored = MATD3Agent(config, total_regular_steps=6, seed=99)
+                restored.load_checkpoint(checkpoint, load_optimizers=True)
+                assert torch.equal(torch.cuda.get_rng_state(), saved_state)
+                restored._gradient_step()
+                for name, tensor in restored.critics.state_dict().items():
+                    torch.testing.assert_close(tensor.detach().cpu(), expected[name], rtol=0, atol=0)
+
+                # 旧检查点、CPU -> GPU、GPU -> CPU 的兼容性。
+                payload.pop("cuda_rng_state")
+                torch.save(payload, checkpoint)
+                with warnings.catch_warnings(record=True) as recorded:
+                    warnings.simplefilter("always")
+                    restored.load_checkpoint(checkpoint, load_optimizers=True)
+                assert any("CUDA" in str(item.message) for item in recorded)
+                cpu = MATD3Agent(cpu_config, total_regular_steps=6, seed=7)
+                cpu.save_checkpoint(checkpoint, episode=0, validation_total_reward=None)
+                with warnings.catch_warnings(record=True) as recorded:
+                    warnings.simplefilter("always")
+                    restored.load_checkpoint(checkpoint, load_optimizers=True)
+                assert any("CUDA" in str(item.message) for item in recorded)
+                original.save_checkpoint(checkpoint, episode=1, validation_total_reward=None)
+                with warnings.catch_warnings(record=True) as recorded:
+                    warnings.simplefilter("always")
+                    cpu.load_checkpoint(checkpoint, load_optimizers=True)
+                assert any("CPU" in str(item.message) and "GPU" in str(item.message) for item in recorded)
+            print("CUDA resume checks passed")
+        ''')
+        env = {**os.environ, "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "PYTHONUTF8": "1"}
+        project = Path(__file__).resolve().parents[1]
+        env["PYTHONPATH"] = os.pathsep.join((str(project), str(project / "tests")))
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", script], cwd=project, env=env,
+            capture_output=True, text=True, encoding="utf-8", timeout=90,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CUDA resume checks passed", result.stdout)
 
 
 if __name__ == "__main__":

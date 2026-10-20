@@ -21,6 +21,7 @@ if __name__ == "__main__":
     sys.path.insert(0, str(ROOT))
 
 from electricity_market_sim.config import load_market_settings
+from electricity_market_sim.config.loader import _LEARNING_PARAMETER_FIELDS
 from electricity_market_sim.reporting import write_results
 from electricity_market_sim.simulation import simulate
 
@@ -30,6 +31,29 @@ DATASETS = (
     "example_03", "example_02a",
 )
 
+# Fully pinned learning settings for the deterministic fixtures: tuning the shared
+# learning.yaml or the scenario YAML must not change their snapshots.
+_FIXTURE_LEARNING = {
+    "learning_mode": True, "continue_learning": False,
+    "trained_policies_save_path": None, "trained_policies_load_path": None,
+    "algorithm": "matd3", "actor_architecture": "mlp", "device": "cpu",
+    "learning_rate": 0.001, "replay_buffer_size": 10000, "gamma": 0.99,
+    "validation_episodes_interval": 5, "max_bid_price": 100,
+    "exploration_noise_std": 0.2, "action_noise_schedule": "linear",
+    "noise_sigma": 0.1, "noise_scale": 1, "noise_dt": 1, "tau": 0.005,
+    "policy_delay": 2, "target_policy_noise": 0.2, "target_noise_clip": 0.5,
+}
+_FIXTURE_SCENARIOS = {
+    "base": ((datetime(2019, 3, 1), datetime(2019, 3, 31)), {
+        "training_episodes": 100, "episodes_collecting_initial_experience": 5,
+        "train_freq": "100h", "gradient_steps": 10, "batch_size": 128,
+    }),
+    "tiny": ((datetime(2019, 1, 1), datetime(2019, 1, 5)), {
+        "training_episodes": 10, "episodes_collecting_initial_experience": 3,
+        "train_freq": "24h", "gradient_steps": 24, "batch_size": 64,
+    }),
+}
+
 
 def cases():
     for dataset in DATASETS:
@@ -38,32 +62,34 @@ def cases():
         for scenario in config:
             yield dataset, scenario, input_path, None
         if dataset == "example_02a":
-            # Upstream YAML lacks mandatory V5 fields. Exercise its market data
-            # with explicit test-only settings without altering the input files.
+            # Exercise delivery hours with test-only settings without altering
+            # the shared defaults or input files.
             # The train period reproduces the scenario's original delivery hours;
             # validation and test follow it and are not simulated here.
-            for scenario in ("base", "tiny"):
+            for scenario, ((start, end), parameters) in _FIXTURE_SCENARIOS.items():
                 fixture = dict(config[scenario])
-                start = datetime.fromisoformat(str(fixture["start_date"]))
-                end = datetime.fromisoformat(str(fixture["end_date"]))
                 day = timedelta(days=1)
                 fixture["learning_config"] = {
-                    **fixture["learning_config"],
-                    "replay_buffer_size": 10000,
-                    "exploration_noise_std": 0.2,
-                    "action_noise_schedule": "linear",
-                    "tau": 0.005,
-                    "policy_delay": 2,
-                    "target_policy_noise": 0.2,
-                    "target_noise_clip": 0.5,
+                    **_FIXTURE_LEARNING,
+                    **parameters,
                     "periods": {
                         "train": {"start": start + timedelta(hours=1), "end": end},
                         "validation": {"start": end, "end": end + day},
                         "test": {"start": end + day, "end": end + 2 * day},
                     },
                 }
+                unpinned = _LEARNING_PARAMETER_FIELDS - fixture["learning_config"].keys()
+                if unpinned:
+                    raise AssertionError(
+                        "Deterministic fixtures must pin every learning parameter: "
+                        + ", ".join(sorted(unpinned))
+                    )
+                original_safe_load = yaml.safe_load
+                scene_text = (input_path / "config.yaml").read_text(encoding="utf-8")
+                def scenario_safe_load(text):
+                    return {scenario: fixture} if text == scene_text else original_safe_load(text)
                 with patch("electricity_market_sim.config.loader.yaml.safe_load",
-                           return_value={scenario: fixture}):
+                           side_effect=scenario_safe_load):
                     settings = load_market_settings(input_path / "config.yaml", scenario)
                 yield dataset, scenario + "_deterministic_fixture", input_path, settings
 

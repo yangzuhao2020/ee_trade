@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: ASSUME Developers
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# 历史 LSTM 配置，仅作未来实现参考，不属于默认可运行场景。
+# 第五版尚未实现 LSTM 和 early_stopping_*，请使用 config.yaml 中的 base/tiny。
+
+base_lstm:
+  start_date: 2019-03-01 00:00
+  end_date: 2019-03-31 00:00
+  time_step: 1h
+  save_frequency_hours: null
+  seed: null
+
+  learning_config:
+    learning_mode: true
+    continue_learning: false
+    trained_policies_save_path: null
+    max_bid_price: 100
+    algorithm: matd3
+    learning_rate: 0.001
+    training_episodes: 50
+    episodes_collecting_initial_experience: 5
+    train_freq: 24h
+    gradient_steps: 24
+    batch_size: 256
+    gamma: 0.99
+    device: cpu
+    noise_sigma: 0.1
+    noise_scale: 1
+    noise_dt: 1
+    validation_episodes_interval: 5
+    early_stopping_steps: 10
+    early_stopping_threshold: 0.05
+    actor_architecture: lstm
+    periods:
+      train: {start: 2019-01-01 00:00, end: 2019-09-01 00:00}
+      validation: {start: 2019-09-01 00:00, end: 2019-11-01 00:00}
+      test: {start: 2019-11-01 00:00, end: 2020-01-01 00:00}
+
+  markets_config:
+    EOM:
+      operator: EOM_operator
+      product_type: energy
+      start_date: 2019-03-01 00:00
+      products:
+        - duration: 1h
+          count: 1
+          first_delivery: 1h
+      opening_frequency: 1h
+      opening_duration: 1h
+      volume_unit: MWh
+      maximum_bid_volume: 100000
+      maximum_bid_price: 3000
+      minimum_bid_price: -500
+      price_unit: EUR/MWh
+      market_mechanism: pay_as_clear

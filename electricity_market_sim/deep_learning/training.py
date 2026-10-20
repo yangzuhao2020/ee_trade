@@ -1,7 +1,9 @@
 """第五版 MATD3 训练、恢复训练、验证选模及多运行清单编排。"""
 
 import shutil
+import sys
 from pathlib import Path
+from time import monotonic
 from typing import Any
 import numpy as np
 from .agent import (
@@ -22,8 +24,37 @@ from ..models import LearningConfig, MarketSettings, SimulationResult
 from ..reporting import write_results
 from ..simulation import LearningEpisodeRunner, learning_period_settings, market_openings
 from .test import _evaluate_actor_and_baseline
+from .data_coverage import validate_learning_data_coverage
 
 _DEFAULT_INDEPENDENT_RUNS = 3
+
+
+def _training_progress(first_episode: int, total: int, run: int):
+    """终端中按轮刷新进度；预计时间只按本次实际完成的轮数计算。"""
+    if not sys.stderr.isatty() or first_episode > total:
+        yield from range(first_episode, total + 1)
+        return
+    started = monotonic()
+    current = first_episode - 1
+    width = 0
+    try:
+        while True:
+            elapsed = monotonic() - started
+            finished = current - first_episode + 1
+            eta = f"{elapsed * (total - current) / finished:.0f}s" if finished else "--"
+            filled = 20 * current // total
+            message = (
+                f"Run {run} [{'#' * filled}{'-' * (20 - filled)}] "
+                f"{current}/{total} | elapsed {elapsed:.0f}s | ETA {eta}"
+            )
+            print("\r" + message.ljust(width), end="", file=sys.stderr, flush=True)
+            width = len(message)
+            if current == total:
+                break
+            current += 1
+            yield current
+    finally:
+        print(file=sys.stderr, flush=True)
 
 
 def _restore_best_checkpoint(
@@ -200,7 +231,7 @@ def _train_single_run(
         # an unrelated earlier training so it cannot pass as this run's best.
         best_path.unlink(missing_ok=True)
 
-    for episode in range(first_episode, episode_count + 1):
+    for episode in _training_progress(first_episode, episode_count, run):
         initial_experience = episode <= config.initial_experience_episodes
         training_result = train_runner.run_episode(
             lambda state, initial=initial_experience: agent.exploration_action(
@@ -318,6 +349,8 @@ def train_learning_scenario(
         raise InputValidationError(
             "Resume training operates on one checkpoint; use independent_runs=1."
         )
+
+    validate_learning_data_coverage(input_path, settings)
 
     checkpoint_root = _default_checkpoint_root(config, output_path)
     manifest_path = checkpoint_root / _RUN_MANIFEST

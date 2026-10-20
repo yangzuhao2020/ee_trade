@@ -1,21 +1,66 @@
 """从 YAML 读取并校验单节点市场配置、时间参数及第五版学习设置。"""
 
 import re
+import warnings
 from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
 from typing import Any
-
 import yaml
-
 from ..errors import InputValidationError
 from ..models import LEARNING_PERIOD_NAMES, LearningConfig, LearningPeriod, MarketSettings
 
 _DURATION_PATTERN = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>min|m|h|d)$")
+_LEARNING_DEFAULTS_PATH = Path(__file__).with_name("learning.yaml")
+_LEARNING_SCENE_FIELDS = frozenset({
+    "learning_mode", "periods", "continue_learning",
+    "trained_policies_save_path", "trained_policies_load_path",
+})
+_LEARNING_PARAMETER_FIELDS = frozenset({
+    "algorithm", "actor_architecture", "device", "learning_rate",
+    "training_episodes", "episodes_collecting_initial_experience",
+    "replay_buffer_size", "batch_size", "gamma", "train_freq", "gradient_steps",
+    "validation_episodes_interval", "max_bid_price", "exploration_noise_std",
+    "action_noise_schedule", "noise_sigma", "noise_scale", "noise_dt", "tau",
+    "policy_delay", "target_policy_noise", "target_noise_clip",
+})
+_LEARNING_FIELDS = _LEARNING_PARAMETER_FIELDS | _LEARNING_SCENE_FIELDS
+
+
+def _warn_unknown_learning_fields(raw: dict[str, Any], source: str) -> None:
+    """仅由 _load_learning_config 调用，警告位置指向 load_market_settings 的调用方。"""
+    unknown = raw.keys() - _LEARNING_FIELDS
+    if unknown:
+        warnings.warn(
+            f"{source} 中的未知强化学习字段将被忽略："
+            + ", ".join(sorted(map(str, unknown))),
+            UserWarning,
+            stacklevel=4,
+        )
+
+
+def _load_learning_defaults() -> dict[str, Any]:
+    """读取与加载器同目录的公共训练参数；场景专属设置不能作为默认值。"""
+    path = _LEARNING_DEFAULTS_PATH
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise InputValidationError(f"无法读取公共强化学习配置 {path}：{exc}") from exc
+    if not isinstance(loaded, dict) or set(loaded) != {"learning_config"}:
+        raise InputValidationError(f"{path} 必须只包含 learning_config 映射。")
+    raw = loaded["learning_config"]
+    if not isinstance(raw, dict):
+        raise InputValidationError(f"{path} 中的 learning_config 必须是 YAML 映射。")
+    forbidden = raw.keys() & _LEARNING_SCENE_FIELDS
+    if forbidden:
+        raise InputValidationError(
+            f"{path} 不能包含场景专属字段：" + ", ".join(sorted(forbidden))
+        )
+    return raw
 
 
 def parse_duration(value: Any, field_name: str) -> timedelta:
-    """解析 ASSUME 风格 YAML 文件中使用的简写时长（如 '1h'、'15m'）。"""
+    """解析 YAML 文件中使用的简写时长（如 '1h'、'15m'）。"""
 
     if not isinstance(value, str):
         raise InputValidationError(f"{field_name} 必须是时长字符串，例如 '1h'。")
@@ -51,7 +96,7 @@ def _parse_datetime(value: Any, field_name: str) -> datetime:
 
 
 def _parse_additional_fields(eom: dict[str, Any]) -> frozenset[str]:
-    """读取可选的 ASSUME 订单元数据字段（additional_fields），不会静默丢弃这些字段。"""
+    """读取订单元数据字段（additional_fields），不会静默丢弃这些字段。"""
 
     raw_fields = eom.get("additional_fields", [])
     if not isinstance(raw_fields, list) or any(
@@ -120,7 +165,7 @@ def _validate_learning_period_alignment(settings: MarketSettings) -> None:
 
 
 def _load_learning_config(
-    data: dict[str, Any], *, time_step: timedelta
+    data: dict[str, Any], *, time_step: timedelta, source: str
 ) -> LearningConfig | None:
     raw = data.get("learning_config")
     if raw is None:
@@ -128,15 +173,37 @@ def _load_learning_config(
     if not isinstance(raw, dict):
         raise InputValidationError("learning_config 必须是 YAML 映射。")
 
+    _warn_unknown_learning_fields(raw, f"{source} 的 learning_config")
+    if raw.get("learning_mode") is True:
+        defaults = _load_learning_defaults()
+        _warn_unknown_learning_fields(defaults, str(_LEARNING_DEFAULTS_PATH))
+        raw = {**defaults, **raw}
+    nulls = sorted(
+        name for name in _LEARNING_PARAMETER_FIELDS if name in raw and raw[name] is None
+    )
+    if nulls:
+        raise InputValidationError(
+            f"{source} 的 learning_config 参数不能为 null（需要公共默认值时请省略该字段）："
+            + ", ".join(nulls)
+        )
+
+    def registered(name: str) -> str:
+        if name not in _LEARNING_FIELDS:
+            raise AssertionError(f"learning_config 字段 {name!r} 未登记到字段名单。")
+        return name
+
     def required(name: str) -> Any:
-        if name not in raw:
+        if registered(name) not in raw:
             raise InputValidationError(
                 f"learning_config 缺少必填字段：{name}"
             )
         return raw[name]
 
+    def optional(name: str, default: Any) -> Any:
+        return raw.get(registered(name), default)
+
     def optional_path(name: str) -> str | None:
-        value = raw.get(name)
+        value = optional(name, None)
         if value is None:
             return None
         if not isinstance(value, str) or not value.strip():
@@ -149,7 +216,7 @@ def _load_learning_config(
         learning_mode = required("learning_mode")
         if not isinstance(learning_mode, bool):
             raise InputValidationError("learning_config.learning_mode 必须是布尔值。")
-        continue_learning = raw.get("continue_learning", False)
+        continue_learning = optional("continue_learning", False)
         if not isinstance(continue_learning, bool):
             raise InputValidationError(
                 "learning_config.continue_learning 必须是布尔值。"
@@ -185,14 +252,14 @@ def _load_learning_config(
             policy_delay=int(required("policy_delay")),
             target_policy_noise=float(required("target_policy_noise")),
             target_noise_clip=float(required("target_noise_clip")),
-            actor_architecture=str(raw.get("actor_architecture", "mlp")),
-            device=str(raw.get("device", "cpu")),
+            actor_architecture=str(optional("actor_architecture", "mlp")),
+            device=str(optional("device", "cpu")),
             continue_learning=continue_learning,
             trained_policies_save_path=optional_path("trained_policies_save_path"),
             trained_policies_load_path=optional_path("trained_policies_load_path"),
-            max_bid_price=float(raw.get("max_bid_price", 100.0)),
+            max_bid_price=float(optional("max_bid_price", 100.0)),
             periods=_load_learning_periods(
-                raw.get("periods"), required=learning_mode
+                optional("periods", None), required=learning_mode
             ),
         )
     except InputValidationError:
@@ -356,7 +423,9 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
             exchange_units_file=exchange_units_file,
             industrial_dsm_units_file=industrial_dsm_units_file,
             additional_fields=additional_fields,
-            learning_config=_load_learning_config(data, time_step=time_step),
+            learning_config=_load_learning_config(
+                data, time_step=time_step, source=f"{config_path} 场景 {scenario!r}"
+            ),
             seed=seed,
         )
     except KeyError as exc:

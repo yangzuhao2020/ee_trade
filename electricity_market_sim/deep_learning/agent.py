@@ -1,6 +1,7 @@
 """第五版学习策略的网络、经验池、参数更新，以及检查点和运行清单持久化。"""
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 import numpy as np
@@ -345,6 +346,8 @@ class MATD3Agent:
             "torch_rng_state": torch.get_rng_state(),
             "numpy_rng_state": json.dumps(self.rng.bit_generator.state),
         }
+        if self.device.type == "cuda":
+            payload["cuda_rng_state"] = torch.cuda.get_rng_state(self.device).cpu()
         temporary_path = path.with_suffix(path.suffix + ".tmp")
         torch.save(payload, temporary_path)
         temporary_path.replace(path)
@@ -384,6 +387,24 @@ class MATD3Agent:
                     self.run = saved_run
                 torch.set_rng_state(payload["torch_rng_state"].cpu())
                 self.rng.bit_generator.state = json.loads(payload["numpy_rng_state"])
+                cuda_rng_state = payload.get("cuda_rng_state")
+                if cuda_rng_state is not None and not isinstance(cuda_rng_state, Tensor):
+                    raise TypeError("Checkpoint CUDA random state must be a tensor.")
+                if self.device.type == "cuda":
+                    if cuda_rng_state is None:
+                        warnings.warn(
+                            "检查点未保存 CUDA 随机数状态（旧检查点或 CPU 检查点）；"
+                            "GPU 续训无法精确恢复原随机序列。",
+                            UserWarning, stacklevel=2,
+                        )
+                    else:
+                        torch.cuda.set_rng_state(cuda_rng_state.cpu(), self.device)
+                elif cuda_rng_state is not None:
+                    warnings.warn(
+                        "正在 CPU 上恢复 GPU 检查点；跨设备续训无法精确复现"
+                        "原来的 GPU 训练序列。",
+                        UserWarning, stacklevel=2,
+                    )
         except (KeyError, RuntimeError, TypeError, ValueError) as exc:
             raise InputValidationError(
                 f"Learning checkpoint {path} is incomplete or incompatible."

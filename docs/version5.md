@@ -130,8 +130,15 @@ learning_config:
 - **严格时界**：学习场景把时段边界当作信息时界，所有前瞻窗口一律截取在时段 `end` 之前。启发式机组未来 13 小时的预测、储能的对称窗口及扩展声明的未来数据窗口，都不再跨越边界读取后一时段的真实需求或可用率。因此混合场景下每个时段只要求自身数据，也不经对手报价把后续行情泄漏进本时段出清。副作用是启发式对手在时段末约 12 小时的前瞻逐步缩短，与 ASSUME 在仿真末尾的截断处理一致；若需让对手在边界处仍有预测，应提供报价时可获得的独立预测输入，而非复用真实数据。
 - 测试段提供的是未见过的市场条件，价格和收益仍由冻结的 Actor 与市场重新交互产生；环境仍需读取测试段需求才能出清。`example_02a` 中燃料价格为静态值，没有可用率数据，也没有风光或 exchange，因此测试段实际只提供新的需求曲线（及交付小时）。对手仍使用相同的简单报价策略，所以测到的是对新时段行情的适应能力；对不同对手策略的适应需另行设计测试场景。
 - 验证段（秋季）与测试段（冬季）的需求水平不同，按验证段选出的模型在测试段上不一定最好，结果应如实报告。
+- 训练开始前预检三个时段的需求、已提供的可用率和已启用的交换数据覆盖，包括中间缺失的小时。预检只扫描表头、时间戳和必填单元格是否存在，不解析时序数值、不生成预测、不运行测试段，也不参与选模。每小时至少有一个样本即视为覆盖，时序数值合法性仍由实际运行时的加载器校验。测试段缺数据会在训练前报错；仅改变测试段数值不会影响训练权重。
 
 ## 5. 训练配置与流程
+公共训练参数保存在 `electricity_market_sim/config/learning.yaml`。仅当场景明确设置 `learning_config.learning_mode: true` 时，加载器才读取同目录的公共文件，按“公共配置 → 场景覆盖 → 命令行支持的参数覆盖”生效。配置文件路径不依赖运行目录；合并后统一校验。关闭学习的完整旧配置保留原来的校验行为，无学习配置的场景不读取公共文件。
+
+公共文件默认 `device: cpu`、`training_episodes: 30`，用于先进行较快的训练和调参。当前小型 MLP、逐小时单样本推理在本机测试中 CPU 更快；需要 GPU 时可在场景中显式覆盖为 `device: cuda:0`。30 轮包含前 5 轮经验收集，每轮仍使用完整训练时段；更充分的训练可通过命令行增加轮数，轮数减少是否影响效果应以验证结果判断。场景必须自行定义 `learning_mode`、`periods`，并可配置 `continue_learning`、检查点保存和加载路径；这些场景专属字段不能出现在公共文件里。未知字段保持忽略并发出警告，警告中注明配置文件和场景名，以便发现拼写错误；参数字段不能写 `null`，需要公共默认值时直接省略该字段。命令行 `--training-episodes` 覆盖训练轮数，`--training-runs` 控制独立运行次数；启动时显示最终设备和三个数据时段。
+
+`example_02a/base` 使用上文的全年划分；`tiny` 使用 2019-01-01 至 01-04 的 72 小时训练段、01-04 至 01-05 的验证段、01-05 至 01-06 的测试段，覆盖公共文件中的五个训练参数。短流程可运行 `./scripts/example_02a.ps1 tiny --training-episodes 4 --training-runs 1 --no-plots`，然后单独执行 `./scripts/example_02a.ps1 tiny --learning-mode test --no-plots`。正式训练默认至少三次独立运行。尚未支持的 LSTM、early-stopping 历史配置移至 `config_future.yaml`，默认场景选择不再包含它。
+
 一个训练 episode 为训练时段的全部交付小时。每次开市，`pp_6` 生成报价；出清后将 $(s_t,a_t,r_t,s_{t+1},d_t)$ 存入经验池。普通步 $d_t=0$；最后一步 $d_t=1$ 且 $s_{t+1}$ 为 16 维零向量。经验池保存价格排序前的 $a_t$；Critic 始终接收该未排序动作，Actor 更新时也将 $\pi(s_t)$ 直接送入 Critic。噪声衰减所需的总训练步数按训练时段的交付小时数计算。
 
 前 `episodes_collecting_initial_experience` 轮以边际成本为中心探索：
@@ -140,7 +147,7 @@ $$a_t=\operatorname{clip}\left(\frac{c_t^{marginal}}{P_{\mathrm{scale}}}+\xi_t,-
 
 一个完成的 1 h transition 计一个训练步。初始经验收集结束且经验池不少于 `batch_size` 后，常规训练步数跨 episode 累计；本场景每 `train_freq=100h`（100 步）执行 `gradient_steps=10` 次批量更新。
 
-训练参数在 `config.yaml` 的 `learning_config` 中记录：`training_episodes`、`episodes_collecting_initial_experience`、`replay_buffer_size`、`batch_size`、`gamma`、`train_freq`、`gradient_steps`、`learning_rate`、验证间隔，以及 `exploration_noise_std=0.2`、`noise_sigma=0.1`、`noise_scale=1`、`noise_dt=1`、`action_noise_schedule=linear`、`tau=0.005`、`policy_delay=2`、`target_policy_noise=0.2`、`target_noise_clip=0.5`。
+公共 `learning.yaml` 的 `learning_config` 中记录：`training_episodes`、`episodes_collecting_initial_experience`、`replay_buffer_size`、`batch_size`、`gamma`、`train_freq`、`gradient_steps`、`learning_rate`、验证间隔，以及 `exploration_noise_std=0.2`、`noise_sigma=0.1`、`noise_scale=1`、`noise_dt=1`、`action_noise_schedule=linear`、`tau=0.005`、`policy_delay=2`、`target_policy_noise=0.2`、`target_noise_clip=0.5`；各场景可覆盖这些参数。
 
 Actor 为 $16\rightarrow256\rightarrow128\rightarrow2$ 的 MLP，隐藏层使用 ReLU，输出使用 Softsign；双 Critic 均为 $18\rightarrow256\rightarrow128\rightarrow1$ 的 ReLU MLP。网络使用 Xavier 初始化、AdamW 和配置的同一 `learning_rate`，梯度范数裁剪为 1.0。目标动作不排序：
 $$\bar\epsilon=\operatorname{clip}(\epsilon,-0.5,0.5),\quad \epsilon\sim\mathcal N(0,0.2^2),\quad a'=\operatorname{clip}(\pi'(s')+\bar\epsilon,-1,1).$$
@@ -153,6 +160,8 @@ $$y_t=r_t+\gamma(1-d_t)\min\left(Q'_1(s_{t+1},a'),Q'_2(s_{t+1},a')\right).$$
 训练结束时不运行测试时段，只输出各运行的训练与验证指标、`best.pt`/`latest.pt`、最佳 Actor 与边际成本基线在**验证段**上的对比（`validation_actor`/`validation_baseline`，仅供调参参考，不参与选择），以及运行清单 `checkpoints/runs.json`（每个运行的序号、种子、最佳检查点路径、验证总奖励和三个时段）。多次独立运行时，按验证总奖励选出的全局 `best.pt` 仅作部署模型，不作为报告指标。
 
 检查点格式版本为 2，状态版本为 `v5-observation-16`，并保存三个时段；恢复训练、评估和测试时要求检查点及运行清单中的时段与当前配置完全一致，避免“在一种划分下训练、在另一种划分下测试”。版本 1 检查点未记录时段；旧 `v5-observation-38`、`v5-observation-26`、观测维度不等于 16、版本不符以及元数据缺失或非法的检查点，统一按不兼容拒绝，需按新的数据划分重新训练，不自动迁移模型。经验池按 16 维校验。恢复训练继续保留网络、优化器、经验池和随机状态；恢复配套最佳检查点时核对状态版本、验证总奖励、种子、`max_bid_price` 及时段。恢复单个检查点时沿用其记录的运行编号，写回对应的 `run_XX` 目录并把该运行条目合并进 `runs.json`；若已有清单是单运行根布局（条目指向根 `best.pt`），先把原模型文件迁移到各自的 `run_XX` 目录并改写条目，再写入恢复运行，其余运行的模型不受影响。根目录 `best.pt` 始终保存清单入选运行检查点的副本，根目录主结果写本次运行的验证段结果。作为新实验运行时应改用独立输出目录，避免与已有清单混淆。
+GPU 检查点额外保存当前 CUDA 设备的 `cuda_rng_state`，完整续训时与 CPU、NumPy 随机状态一并恢复。该字段为可选字段，检查点格式仍为版本 2。旧/CPU 检查点在 GPU 上续训，或 GPU 检查点在 CPU 上续训，都会发出随机序列无法精确复现的警告；纯评估不恢复随机状态。相同 CUDA 状态不保证跨硬件、跨库版本或非确定性 GPU 算法的逐位一致。GPU 回归测试在独立进程中设置 `CUBLAS_WORKSPACE_CONFIG=:4096:8` 并启用确定性算法，无 CUDA 时跳过。
+
 ## 6. 可执行的评估规则
 `example_02a` 是**场景数据**，不是训练完就不能再运行。评估时重新初始化指定时段的市场，加载训练好的 Actor，让 `pp_6` **只报价、不加探索噪声、不更新模型**，从头运行一次；再把 `pp_6` 改为固定策略，在相同条件下运行一次作基线。
 
@@ -175,6 +184,7 @@ $$y_t=r_t+\gamma(1-d_t)\min\left(Q'_1(s_{t+1},a'),Q'_2(s_{t+1},a')\right).$$
 | [learning.py](../electricity_market_sim/deep_learning/learning.py) | 构建观测、生成报价、计算奖励和收集状态转移 |
 | [agent.py](../electricity_market_sim/deep_learning/agent.py) | Actor、双 Critic、经验池、参数更新、检查点及运行清单读写 |
 | [training.py](../electricity_market_sim/deep_learning/training.py) | 单次与多次训练编排、恢复训练、验证选模和运行清单合并 |
+| [data_coverage.py](../electricity_market_sim/deep_learning/data_coverage.py) | 训练前扫描三个数据时段的时间索引和必填数据覆盖，不解析时序数值 |
 | [test.py](../electricity_market_sim/deep_learning/test.py) | `evaluate_learning_scenario`、`run_learning_test`，以及训练和测试共用的 Actor 与基线对比 |
 | [learning_metrics.py](../electricity_market_sim/deep_learning/learning_metrics.py) | 回合指标计算、指标 CSV 写出、跨运行均值与标准差 |
 

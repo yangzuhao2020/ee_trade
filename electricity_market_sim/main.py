@@ -90,6 +90,9 @@ def main(argv: list[str] | None = None) -> int:
         learning_episode_label = "Actor evaluation"
 
         if is_learning: # 对应第五版学习场景，用于训练、评估和测试机组报价。
+            print(f"强化学习设备：{settings.learning_config.device}")
+            for name, period in settings.learning_config.periods:
+                print(f"  {name}: [{period.start}, {period.end})")
             learning_mode = arguments.learning_mode or "train"
             if arguments.period is not None and learning_mode != "evaluate":
                 raise SimulationError("--period 只能与 --learning-mode evaluate 一起使用。")
