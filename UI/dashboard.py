@@ -1,5 +1,5 @@
 """使用 Streamlit 浏览 outputs/<数据集>/<场景> 下的仿真结果。
-展示基于 CSV 的交互式图表，并在存在时显示学习场景的 PNG 图表。
+展示基于 CSV 的交互式图表，并兼容旧输出中的学习 PNG 图表。
 在项目根目录的 ee_trade 环境中运行：
     streamlit run UI/dashboard.py"""
 
@@ -8,17 +8,16 @@ from pathlib import Path
 import streamlit as st
 
 import charts
+import learning_charts
 
 OUTPUTS_DIR = Path(__file__).resolve().parent.parent / "outputs"
-MAX_CHARTS = 6
-# Learning charts have no interactive version yet; their PNGs are shown when present.
-LEARNING_PLOTS = (
-    "learning_unit.png",
-    "learning_curves.png",
-    "learning_validation_comparison.png",
-    "learning_test_comparison.png",
-    "learning_train_comparison.png",
-)
+LEARNING_ERROR_LABELS = {
+    "learning_unit": "学习机组图",
+    "learning_curves": "学习曲线图",
+    "learning_train_comparison": "训练期对比图",
+    "learning_validation_comparison": "验证期对比图",
+    "learning_test_comparison": "测试期对比图",
+}
 
 
 def subdirectories(path: Path) -> list[str]:
@@ -39,13 +38,16 @@ def results_state(run_dir: Path) -> tuple:
     """返回图表读取的每个 CSV 文件是否存在、修改时间和文件大小。"""
 
     state = []
-    for filename in charts.TABLES.values():
+    for filename in (*charts.TABLES.values(), *learning_charts.DATA_FILES):
         try:
             stat = (run_dir / filename).stat()
         except FileNotFoundError:
             state.append((filename, None))
         else:
             state.append((filename, stat.st_mtime_ns, stat.st_size))
+    for path in sorted((run_dir / "plots").glob("learning_*.png")):
+        stat = path.stat()
+        state.append((str(path.relative_to(run_dir)), stat.st_mtime_ns, stat.st_size))
     return tuple(state)
 
 
@@ -53,7 +55,10 @@ def results_state(run_dir: Path) -> tuple:
 def load_charts(run_dir: str, files_state: tuple):
     """构建本次运行的图表；任一 CSV 发生变化时，files_state 会使缓存失效。"""
 
-    return charts.build_charts(charts.load_run(Path(run_dir)))
+    path = Path(run_dir)
+    market_figures = charts.build_charts(charts.load_run(path))
+    learning_figures, learning_errors = learning_charts.build_learning_charts(path)
+    return market_figures, learning_figures, learning_errors
 
 
 st.set_page_config(page_title="电力市场仿真结果", layout="wide")
@@ -70,16 +75,23 @@ dataset = dataset_column.selectbox("数据集", list(runs))
 scenario = scenario_column.selectbox("场景", runs[dataset])
 
 run_dir = OUTPUTS_DIR / dataset / scenario
-figures = load_charts(str(run_dir), results_state(run_dir))
-learning_plots = [run_dir / "plots" / name for name in LEARNING_PLOTS if (run_dir / "plots" / name).is_file()]
-items = [*figures, *learning_plots][:MAX_CHARTS]
+figures, learning_figures, learning_errors = load_charts(str(run_dir), results_state(run_dir))
+learning_items = learning_charts.learning_items(run_dir, learning_figures, learning_errors)
+chart_count = len(figures) + sum(kind != "error" for kind, _, _ in learning_items)
 st.caption(
-    f"{run_dir.relative_to(OUTPUTS_DIR.parent).as_posix()} · {len(items)} 张图 · "
-    "悬停查看数值，拖动框选缩放、双击还原，点击图例隐藏曲线"
+    f"{run_dir.relative_to(OUTPUTS_DIR.parent).as_posix()} · {chart_count} 张图 · "
+    "交互图可悬停查看数值、框选缩放、双击还原或点击图例隐藏曲线"
 )
 
-for item in items:
-    if isinstance(item, Path):
-        st.image(str(item), caption=item.stem, width="stretch")
-    else:
+for figure in figures:
+    st.plotly_chart(figure, width="stretch")
+for kind, name, item in learning_items:
+    if kind == "figure":
         st.plotly_chart(item, width="stretch")
+    elif kind == "image":
+        st.image(str(item), caption=name, width="stretch")
+    else:
+        st.error(f"{LEARNING_ERROR_LABELS.get(name, name)}：{item}")
+for name, error in learning_errors.items():
+    if name not in learning_charts.CHART_NAMES:
+        st.error(f"学习指标文件 {name}：{error}")

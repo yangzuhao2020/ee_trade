@@ -9,4 +9,5 @@ tests/*
 !tests/test_eom_engine.py
 !tests/test_industry_market.py
 !tests/test_learning.py
+!tests/test_ui_learning_charts.py
 *.pyc
