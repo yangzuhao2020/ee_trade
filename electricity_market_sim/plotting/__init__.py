@@ -1,4 +1,4 @@
-"""仿真结果 PNG 绘图入口，涵盖市场、机组、储能、工业及第五版训练与评估图表。"""
+"""???? PNG ?????????????????????????????"""
 
 from pathlib import Path
 
@@ -16,6 +16,7 @@ from .dispatch import (
     _plot_storage_dispatch,
 )
 from .industry import _plot_industry_dispatch
+from .household import _plot_household_dispatch
 from .learning import (
     _plot_evaluation_comparison,
     _plot_learning_curves,
@@ -24,7 +25,6 @@ from .learning import (
     comparison_periods,
 )
 from .market import (
-    _plot_first_pay_as_bid_order_book,
     _plot_market_overview,
     _plot_market_summary,
 )
@@ -43,7 +43,7 @@ def _comparison_plot_name(period: str) -> str:
 def generate_plots(
     result: SimulationResult,
     output_dir: str | Path,
-    learning_episode_label: str = "Actor evaluation",
+    learning_episode_label: str = "策略评估",
 ) -> tuple[Path, ...]:
     """根据完整的仿真结果生成持久保存的 PNG 汇总图。
     此函数刻意不承担任何仿真计算或 CSV 写出工作。只能在 ``write_results`` 完成后
@@ -80,12 +80,17 @@ def generate_plots(
                 dates,
                 results,
                 plot_directory / "dispatch_by_unit.png",),
-            _plot_operator_profit(
-                pyplot,
-                results,
-                storage_results,
-                plot_directory / "operator_profit.png",),
         ]
+        operator_plot_path = plot_directory / "operator_profit.png"
+        if result.household_results:
+            # 家庭场景不展示发电与储能运营商利润，并清理旧版输出。
+            operator_plot_path.unlink(missing_ok=True)
+        else:
+            paths.append(
+                _plot_operator_profit(
+                    pyplot, results, storage_results, operator_plot_path,
+                )
+            )
         storage_plot_path = plot_directory / "storage_dispatch.png"
         if storage_results:
             paths.append(
@@ -111,6 +116,19 @@ def generate_plots(
             )
         else:
             industry_plot_path.unlink(missing_ok=True)
+        household_plot_path = plot_directory / "household_dispatch.png"
+        if result.household_results:
+            paths.append(
+                _plot_household_dispatch(
+                    pyplot,
+                    dates,
+                    result.household_results,
+                    results,
+                    household_plot_path,
+                )
+            )
+        else:
+            household_plot_path.unlink(missing_ok=True)
         if result.learning_steps:
             paths.append(
                 _plot_learning_unit(
@@ -127,19 +145,6 @@ def generate_plots(
                 (plot_directory / name).unlink(missing_ok=True)
             for stale in plot_directory.glob(_LEARNING_COMPARISON_PATTERN):
                 stale.unlink()
-        if result.settings.market_mechanism == "pay_as_bid":
-            paths.append(
-                _plot_first_pay_as_bid_order_book(
-                    pyplot,
-                    results[0],
-                    unit_colors,
-                    plot_directory / "pay_as_bid_first_product.png",
-                )
-            )
-        else:
-            # A directory may have been rendered by an older version which
-            # incorrectly treated complex clearing as a simple merit order.
-            (plot_directory / "pay_as_bid_first_product.png").unlink(missing_ok=True)
         # Older versions rendered per-opening detail plots under openings/.
         _remove_stale_opening_plots(plot_directory / "openings")
     except PlottingError:

@@ -67,10 +67,10 @@ class LearningDashboardTests(unittest.TestCase):
             ["figure", "figure", "figure"],
         )
         training = next(trace for trace in figures["learning_curves"].data
-                        if trace.name == "Run 1 training")
+                        if trace.name == "训练")
         self.assertEqual(list(training.x), [1, 2])
         self.assertEqual(len([trace for trace in figures["learning_validation_comparison"].data
-                              if trace.type == "bar"]), 16)
+                              if trace.type == "bar"]), 8)
 
     def test_leftover_metrics_do_not_create_learning_charts(self):
         pd.DataFrame([_metrics("validation_actor"), _metrics("validation_baseline")]).to_csv(

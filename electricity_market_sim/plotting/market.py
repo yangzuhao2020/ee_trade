@@ -1,6 +1,5 @@
-"""市场供需与价格概览、成交汇总及按报价结算市场的首个供给订单簿 PNG 图表。"""
+"""?????????????? PNG ???"""
 
-from math import isfinite
 from pathlib import Path
 from ..errors import PlottingError
 from ..models import MarketClearingResult
@@ -10,6 +9,18 @@ from .common import (
     _format_time_axis,
     _save_figure,
 )
+
+
+def _chinese_font_families() -> list[str]:
+    from matplotlib.font_manager import fontManager
+
+    available_fonts = {font.name for font in fontManager.ttflist}
+    return [
+        name for name in (
+            "Microsoft YaHei", "SimHei", "PingFang SC", "Noto Sans CJK SC",
+            "WenQuanYi Zen Hei",
+        ) if name in available_fonts
+    ] + ["DejaVu Sans"]
 
 
 def _market_price_series(
@@ -50,6 +61,7 @@ def _market_price_series(
 def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
     times = [market.delivery_start for market in results]
     prices, price_label = _market_price_series(results)
+    price_label = {"Clearing price": "出清电价", "Average trade price": "平均成交电价"}[price_label]
     requested_demand = [market.requested_demand_mwh for market in results]
 
     def by_type(attribute: str, demand_type: str) -> list[float]:
@@ -58,29 +70,33 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
         ]
 
     accepted_layers = (
-        (by_type("accepted_energy_mwh", "inelastic_load"), "#4C78A8", "Served inelastic load"),
-        (by_type("accepted_energy_mwh", "household_load"), "#72B7B2", "Accepted household load"),
-        (by_type("accepted_energy_mwh", "industrial_load"), "#D4A72C", "Accepted industrial load"),
-        (by_type("accepted_energy_mwh", "elastic_load"), "#54A24B", "Accepted elastic demand"),
-        (by_type("accepted_energy_mwh", "storage_charge"), "#E45756", "Accepted storage charge"),
-        ([market.cleared_export_mwh for market in results], "#F58518", "Accepted export"),
+        (by_type("accepted_energy_mwh", "inelastic_load"), "#4C78A8", "已满足的刚性负荷"),
+        (by_type("accepted_energy_mwh", "household_load"), "#72B7B2", "已成交的居民用电需求"),
+        (by_type("accepted_energy_mwh", "industrial_load"), "#D4A72C", "已成交的工业用电需求"),
+        (by_type("accepted_energy_mwh", "elastic_load"), "#54A24B", "已成交的弹性需求"),
+        (by_type("accepted_energy_mwh", "storage_charge"), "#E45756", "已成交的储能充电需求"),
+        ([market.cleared_export_mwh for market in results], "#F58518", "已成交的外送需求"),
     )
+    demand_types = {demand.bid.demand_type for market in results for demand in market.demand_bids}
     unaccepted_lines = (
-        ([market.unserved_load_mwh for market in results], "#E45756", 1.2, "Unserved inelastic load"),
-        (by_type("unserved_energy_mwh", "elastic_load"), "#7F7F7F", 1.0, "Unaccepted elastic demand"),
-        (by_type("unserved_energy_mwh", "household_load"), "#72B7B2", 1.0, "Unaccepted household load"),
-        (by_type("unserved_energy_mwh", "industrial_load"), "#D4A72C", 1.0, "Unaccepted industrial load"),
-        (by_type("unserved_energy_mwh", "storage_charge"), "#B279A2", 1.0, "Unaccepted storage charge"),
-        ([market.unfulfilled_export_mwh for market in results], "#F58518", 1.0, "Unfulfilled export"),
+        ("inelastic_load", [market.unserved_load_mwh for market in results], "#E45756", "未满足的刚性负荷"),
+        ("elastic_load", by_type("unserved_energy_mwh", "elastic_load"), "#7F7F7F", "未成交的弹性需求"),
+        ("household_load", by_type("unserved_energy_mwh", "household_load"), "#72B7B2", "未成交的居民用电需求"),
+        ("industrial_load", by_type("unserved_energy_mwh", "industrial_load"), "#D4A72C", "未成交的工业用电需求"),
+        ("storage_charge", by_type("unserved_energy_mwh", "storage_charge"), "#B279A2", "未成交的储能充电需求"),
+        ("export", [market.unfulfilled_export_mwh for market in results], "#F58518", "未满足的外送需求"),
     )
+    unaccepted_panels = [panel for panel in unaccepted_lines if panel[0] in demand_types]
 
-    figure, (price_axis, demand_axis, unaccepted_axis) = pyplot.subplots(
-        3,
+    figure, axes = pyplot.subplots(
+        2 + len(unaccepted_panels),
         1,
-        figsize=(16, 11),
+        figsize=(16, 7 + 2.5 * len(unaccepted_panels)),
         sharex=True,
-        gridspec_kw={"height_ratios": (1, 1.45, 0.8)},
+        gridspec_kw={"height_ratios": [1, 1.45, *([0.8] * len(unaccepted_panels))]},
     )
+    price_axis, demand_axis = axes[:2]
+    figure.suptitle("电力市场概览")
     price_axis.step(
         times,
         prices,
@@ -89,13 +105,15 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
         linewidth=1.6,
         label=price_label,
     )
-    price_axis.set_title("Electricity market overview")
-    price_axis.set_ylabel("Price (EUR/MWh)")
+    price_axis.set_title(price_label, loc="left", fontsize=10)
+    price_axis.set_ylabel("电价（欧元/MWh）")
     price_axis.grid(axis="y", alpha=0.25)
     price_axis.legend(loc="upper right")
 
     lower = None
     for values, color, label in accepted_layers:
+        if not any(abs(value) > _ENERGY_TOLERANCE_MWH for value in values):
+            continue
         upper = (
             values
             if lower is None
@@ -117,27 +135,36 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
         where="mid",
         color="#1F1F1F",
         linewidth=1.1,
-        label="All submitted demand",
+        label="总申报需求",
     )
-    demand_axis.set_ylabel("Energy (MWh)")
+    demand_axis.set_title("成交需求与总申报需求", loc="left", fontsize=10)
+    demand_axis.set_ylabel("电量（MWh）")
     demand_axis.grid(axis="y", alpha=0.25)
     demand_axis.legend(loc="upper right", ncol=3)
 
-    for values, color, linewidth, label in unaccepted_lines:
-        unaccepted_axis.step(
-            times, values, where="mid", color=color, linewidth=linewidth, label=label
-        )
-    unaccepted_axis.set_ylabel("Unaccepted (MWh)")
-    unaccepted_axis.set_xlabel("Delivery start")
-    unaccepted_axis.grid(axis="y", alpha=0.25)
-    unaccepted_axis.legend(loc="upper right", ncol=3)
-    _format_time_axis(unaccepted_axis, dates)
+    for axis, (_, values, color, label) in zip(axes[2:], unaccepted_panels):
+        axis.step(times, values, where="mid", color=color, linewidth=1.2)
+        axis.set_title(label, loc="left", fontsize=10)
+        axis.set_ylabel("未成交电量（MWh）")
+        axis.set_ylim(bottom=0)
+        axis.grid(axis="y", alpha=0.25)
+        if all(abs(value) <= _ENERGY_TOLERANCE_MWH for value in values):
+            axis.set_ylim(0, 1)
+            axis.set_yticks([0])
+            axis.text(0.98, 0.75, "全时段为 0", transform=axis.transAxes, ha="right")
+    axes[-1].set_xlabel("交付开始时间")
+    _format_time_axis(axes[-1], dates)
+    from matplotlib.text import Text
+
+    font_families = _chinese_font_families()
+    for text in figure.findobj(Text):
+        text.set_fontfamily(font_families)
     figure.tight_layout()
     return _save_figure(pyplot, figure, path)
 
 
 def _plot_market_summary(pyplot, dates, results, path: Path) -> Path:
-    """绘制所有产品的 EOM 出清电量及对应的价格。
+    """绘制所有产品的 EOM 供需两侧成交功率，电价由市场概览图展示。
 
     尽管按定义每个已出清产品的供需相等，这里仍刻意分别绘制供给和需求。
     两条曲线能直观展示这种平衡，也与 ASSUME 市场汇总图的惯例一致。
@@ -151,13 +178,7 @@ def _plot_market_summary(pyplot, dates, results, path: Path) -> Path:
         sum(demand.accepted_power_mw for demand in market.demand_bids) / 1_000
         for market in results
     ]
-    prices, price_label = _market_price_series(results)
-
-    figure = pyplot.figure(figsize=(16, 9))
-    grid = figure.add_gridspec(2, 1, height_ratios=(5, 1.25), hspace=0.32)
-    axis = figure.add_subplot(grid[0])
-    price_axis = axis.twinx()
-    table_axis = figure.add_subplot(grid[1])
+    figure, axis = pyplot.subplots(figsize=(16, 7))
 
     demand_line = axis.step(
         times,
@@ -166,7 +187,7 @@ def _plot_market_summary(pyplot, dates, results, path: Path) -> Path:
         color="#54A24B",
         linewidth=1.5,
         linestyle="--",
-        label="Cleared demand volume",
+        label="需求侧成交功率",
         zorder=3,
     )[0]
     supply_line = axis.step(
@@ -175,186 +196,32 @@ def _plot_market_summary(pyplot, dates, results, path: Path) -> Path:
         where="mid",
         color="#4C78A8",
         linewidth=1.15,
-        label="Cleared supply volume",
+        label="供给侧成交功率",
         zorder=4,
     )[0]
-    price_line = price_axis.step(
-        times,
-        prices,
-        where="mid",
-        color="#D4A72C",
-        linewidth=1.15,
-        label=price_label,
-        zorder=2,
-    )[0]
-
-    axis.set_title("Market summary EOM")
-    axis.set_ylabel("Cleared volume (GW)")
-    price_axis.set_ylabel(f"{price_label} (EUR/MWh)")
+    axis.set_title("电能量市场出清汇总")
+    axis.set_ylabel("成交功率（GW）")
     axis.ticklabel_format(axis="y", style="plain", useOffset=False)
-    price_axis.ticklabel_format(axis="y", style="plain", useOffset=False)
     axis.grid(axis="y", alpha=0.25)
-    axis.set_xlabel("Delivery start")
+    axis.set_xlabel("交付开始时间")
     _format_time_axis(axis, dates)
+    axis.xaxis.set_major_formatter(dates.ConciseDateFormatter(
+        axis.xaxis.get_major_locator(),
+        formats=["%Y", "%m", "%d", "%H:%M", "%H:%M", "%S"],
+        zero_formats=["", "%Y", "%m-%d", "%m-%d", "%H:%M", "%H:%M"],
+        offset_formats=["", "%Y", "%Y-%m", "%Y-%m-%d", "%Y-%m-%d", "%Y-%m-%d %H:%M"],
+    ))
     axis.legend(
-        (demand_line, price_line, supply_line),
-        ("Cleared demand volume", price_label, "Cleared supply volume"),
+        (demand_line, supply_line),
+        ("需求侧成交功率", "供给侧成交功率"),
         loc="upper left",
-        ncol=3,
+        ncol=2,
     )
 
-    table_axis.axis("off")
-    table = table_axis.table(
-        cellText=[
-            _summary_row(cleared_demand_gw, "GW", 2),
-            _summary_row(prices, "EUR/MWh", 1),
-            _summary_row(cleared_supply_gw, "GW", 2),
-        ],
-        rowLabels=(
-            "Cleared demand volume",
-            price_label,
-            "Cleared supply volume",
-        ),
-        colLabels=("Min", "Max", "Mean"),
-        cellLoc="right",
-        rowLoc="left",
-        bbox=(0.12, 0.05, 0.84, 0.9),
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    for (row, column), cell in table.get_celld().items():
-        cell.set_edgecolor("#E5E7EB")
-        if row == 0:
-            cell.set_text_props(weight="bold", color="#2F5597")
-        if column == -1:
-            cell.set_text_props(ha="left")
+    from matplotlib.text import Text
 
-    return _save_figure(pyplot, figure, path)
-
-
-def _summary_row(values: list[float], unit: str, decimals: int) -> tuple[str, str, str]:
-    """返回可直接显示在图表表格中的最小值、最大值和平均值。"""
-
-    finite_values = [value for value in values if isfinite(value)]
-    if not finite_values:
-        return ("N/A", "N/A", "N/A")
-    mean = sum(finite_values) / len(finite_values)
-    return tuple(
-        f"{value:.{decimals}f} {unit}"
-        for value in (min(finite_values), max(finite_values), mean)
-    )
-
-
-def _plot_first_pay_as_bid_order_book(pyplot, market, unit_colors, path: Path) -> Path:
-    """绘制一个按报价结算市场的供给订单簿，并标出成交电量及其平均成交价格。"""
-
-    figure, axis = pyplot.subplots(figsize=(11, 6.5))
-    offers = sorted(
-        market.offers,
-        key=lambda cleared: (
-            cleared.offer.bid_price_eur_per_mwh,
-            cleared.offer.unit_name,
-            cleared.offer.identifier,
-        ),
-    )
-    average_trade_price = market.average_trade_price_eur_per_mwh
-    price_scale = max(
-        [abs(cleared.offer.bid_price_eur_per_mwh) for cleared in offers]
-        + ([abs(average_trade_price)] if average_trade_price is not None else [])
-        + [1.0]
-    )
-    label_offset = price_scale * 0.035
-    cumulative_energy = 0.0
-    accepted_label_added = False
-    unaccepted_label_added = False
-    show_unit_labels = len(offers) <= 20
-
-    for cleared in offers:
-        offer = cleared.offer
-        offered_end = cumulative_energy + offer.offered_energy_mwh
-        accepted_end = cumulative_energy + cleared.accepted_energy_mwh
-        color = unit_colors[offer.unit_name] if show_unit_labels else "#54A24B"
-        if cleared.accepted_energy_mwh > _ENERGY_TOLERANCE_MWH:
-            axis.hlines(
-                offer.bid_price_eur_per_mwh,
-                cumulative_energy,
-                accepted_end,
-                color=color,
-                linewidth=7,
-                label=("Traded offer energy" if not accepted_label_added else None),
-            )
-            accepted_label_added = True
-        if accepted_end < offered_end - _ENERGY_TOLERANCE_MWH:
-            axis.hlines(
-                offer.bid_price_eur_per_mwh,
-                accepted_end,
-                offered_end,
-                color="#B8B8B8",
-                linewidth=4,
-                label=("Untraded offer energy" if not unaccepted_label_added else None),
-            )
-            unaccepted_label_added = True
-        if show_unit_labels and offer.offered_energy_mwh > _ENERGY_TOLERANCE_MWH:
-            axis.text(
-                (cumulative_energy + offered_end) / 2,
-                offer.bid_price_eur_per_mwh + label_offset,
-                offer.unit_name,
-                ha="center",
-                va="bottom",
-                fontsize=9,
-            )
-        cumulative_energy = offered_end
-
-    if not show_unit_labels:
-        axis.text(
-            0.99,
-            0.02,
-            f"{len(offers)} offers; unit labels omitted",
-            transform=axis.transAxes,
-            ha="right",
-            va="bottom",
-            fontsize=8,
-            color="#555555",
-        )
-
-    axis.axvline(
-        market.requested_demand_mwh,
-        color="#7F7F7F",
-        linestyle="--",
-        linewidth=1.1,
-        label="Submitted demand energy",
-    )
-    axis.axvline(
-        market.cleared_energy_mwh,
-        color="#1F1F1F",
-        linestyle=":",
-        linewidth=1.4,
-        label="Traded energy",
-    )
-    if average_trade_price is not None:
-        axis.axhline(
-            average_trade_price,
-            color="#2F5597",
-            linestyle="-.",
-            linewidth=1.4,
-            label="Average trade price",
-        )
-    if not offers:
-        _annotate_no_supply(axis)
-
-    axis.set_title(
-        "Pay-as-bid supply offers and trades — "
-        + market.delivery_start.strftime("%Y-%m-%d %H:%M")
-    )
-    axis.set_xlabel("Cumulative offered energy (MWh)")
-    axis.set_ylabel("Offer / average trade price (EUR/MWh)")
-    maximum_energy = max(
-        cumulative_energy,
-        market.requested_demand_mwh,
-        market.cleared_energy_mwh,
-    )
-    axis.set_xlim(0, maximum_energy * 1.03 if maximum_energy > 0 else 1.0)
-    axis.grid(axis="y", alpha=0.25)
-    axis.legend(loc="upper left")
+    font_families = _chinese_font_families()
+    for text in figure.findobj(Text):
+        text.set_fontfamily(font_families)
     figure.tight_layout()
     return _save_figure(pyplot, figure, path)

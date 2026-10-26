@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         is_learning = (settings.learning_config is not None
                        and settings.learning_config.learning_mode)
         # 存在学习配置 且学习模式不为None，说明是第五版学习场景
-        learning_episode_label = "Actor evaluation"
+        learning_episode_label = "策略评估"
 
         if is_learning: # 对应第五版学习场景，用于训练、评估和测试机组报价。
             print(f"强化学习设备：{settings.learning_config.device}")
@@ -106,20 +106,20 @@ def main(argv: list[str] | None = None) -> int:
                 )
             evaluation_period = arguments.period or "validation"
             if learning_mode == "train":
-                learning_episode_label = "Best Actor (validation period)"
+                learning_episode_label = "验证期最佳模型"
             elif learning_mode == "test":
-                learning_episode_label = "Selected Actor (test period)"
+                learning_episode_label = "测试期所选模型"
             elif (
                 arguments.checkpoint is not None
                 and arguments.checkpoint.name != "best.pt"
             ):
                 learning_episode_label = (
-                    f"Actor evaluation ({arguments.checkpoint.stem}, "
-                    f"{evaluation_period} period)"
+                    f"策略评估：{arguments.checkpoint.stem}，"
+                    f"{'训练期' if evaluation_period == 'train' else '验证期'}"
                 )
             else:
                 learning_episode_label = (
-                    f"Best Actor evaluation ({evaluation_period} period)"
+                    f"最佳模型评估：{'训练期' if evaluation_period == 'train' else '验证期'}"
                 )
 
             if learning_mode == "train":

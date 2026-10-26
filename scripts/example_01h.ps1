@@ -34,7 +34,7 @@ if (-not (Test-Path $configFile)) {
 
 $remaining = [System.Collections.Generic.List[string]]::new()
 $remaining.AddRange([string[]]$args)
-$scenarioSelector = "eom"
+$scenarioSelector = "base"
 if ($remaining.Count -gt 0 -and -not $remaining[0].StartsWith("-")) {
     $scenarioSelector = $remaining[0]
     $remaining.RemoveAt(0)

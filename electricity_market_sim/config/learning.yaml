@@ -32,7 +32,7 @@ learning_config:
   # 在当前 1h 时间步下，每累计 100 步触发一次训练，执行 10 次梯度更新。
   train_freq: 100h
   gradient_steps: 10
-  # 每 10 轮验证一次；最后一轮也会验证，按验证总奖励选择 best.pt。
+  # 每 5 轮验证一次；最后一轮也会验证，按验证总奖励选择 best.pt。
   validation_episodes_interval: 10
 
   # 价格和自身成本的归一化基数，也是动作映射为报价的价格基数（EUR/MWh）。

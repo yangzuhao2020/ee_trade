@@ -26,24 +26,20 @@ SEGMENTS = ("learning_minimum", "learning_flexible")
 ACCEPTED_TOLERANCE_MW = 1e-7
 COLORS = ("#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2", "#B279A2")
 CURVE_FIELDS = (
-    ("mean_reward_per_hour", "Mean reward per hour"),
-    ("total_reward", "Total reward"),
-    ("total_profit_eur", "Total profit (EUR)"),
+    ("mean_reward_per_hour", "每小时平均奖励"),
+    ("total_profit_eur", "总利润（欧元，受时段长度影响）"),
 )
 COMPARISON_FIELDS = (
-    ("total_profit_eur", "Total profit (EUR)"),
-    ("total_reward", "Total reward"),
-    ("mean_reward_per_hour", "Mean reward per hour"),
-    ("accepted_energy_mwh", "Accepted energy (MWh)"),
-    ("minimum_segment_average_bid_eur_per_mwh", "Minimum-segment avg bid (EUR/MWh)"),
-    ("flexible_segment_average_bid_eur_per_mwh", "Flexible-segment avg bid (EUR/MWh)"),
-    ("minimum_segment_acceptance_ratio", "Minimum-segment acceptance ratio"),
-    ("flexible_segment_acceptance_ratio", "Flexible-segment acceptance ratio"),
+    ("total_profit_eur", "总利润（欧元）"),
+    ("accepted_energy_mwh", "成交电量（MWh）"),
+    ("minimum_segment_average_bid_eur_per_mwh", "最低出力段平均报价（欧元/MWh）"),
+    ("flexible_segment_average_bid_eur_per_mwh", "灵活出力段平均报价（欧元/MWh）"),
 )
-METRIC_FIELDS = {name for name, _ in (*CURVE_FIELDS, *COMPARISON_FIELDS)}
+# 累计奖励仍用于学习曲线中最佳验证模型的选择。
+METRIC_FIELDS = {name for name, _ in (*CURVE_FIELDS, *COMPARISON_FIELDS)} | {"total_reward"}
 UNIT_FIELDS = {
     "delivery_start", "available_power_mw", "clearing_price_eur_per_mwh",
-    "profit_eur", "regret_eur", "reward",
+    "profit_eur",
 }
 OFFER_FIELDS = {
     "delivery_start", "offer_segment", "bid_price_eur_per_mwh",
@@ -113,55 +109,42 @@ def learning_unit(results: pd.DataFrame, offers: pd.DataFrame) -> go.Figure:
     times = results["delivery_start"]
     figure = make_subplots(
         rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.055,
-        row_heights=(1.25, 1, 1), specs=[[{}], [{}], [{"secondary_y": True}]],
+        row_heights=(1.25, 1, 1),
     )
-    figure.add_trace(_step(times, results["clearing_price_eur_per_mwh"], "Clearing price", "#1F1F1F"), row=1, col=1)
+    figure.add_trace(_step(times, results["clearing_price_eur_per_mwh"], "出清电价", "#1F1F1F"), row=1, col=1)
     for name, label, color in (
-        (SEGMENTS[0], "Minimum-segment bid", COLORS[0]),
-        (SEGMENTS[1], "Flexible-segment bid", COLORS[1]),
+        (SEGMENTS[0], "最低出力段报价", COLORS[0]),
+        (SEGMENTS[1], "灵活出力段报价", COLORS[1]),
     ):
         figure.add_trace(_step(times, segments[name]["bid_price_eur_per_mwh"], label, color), row=1, col=1)
     marginal_cost = segments[SEGMENTS[0]]["marginal_cost_eur_per_mwh"].combine_first(
         segments[SEGMENTS[1]]["marginal_cost_eur_per_mwh"]
     )
-    figure.add_trace(_step(times, marginal_cost, "Marginal cost", COLORS[3], dash="dash"), row=1, col=1)
+    figure.add_trace(_step(times, marginal_cost, "边际成本", "#7F7F7F", dash="dash", opacity=0.65), row=1, col=1)
     accepted = {
         name: segments[name]["accepted_power_mw"].fillna(0.0) for name in SEGMENTS
     }
-    for name, label, color in (
-        (SEGMENTS[0], "Accepted minimum segment", COLORS[0]),
-        (SEGMENTS[1], "Accepted flexible segment", COLORS[1]),
-    ):
-        figure.add_trace(
-            _step(times, accepted[name], label, color,
-                  stackgroup="accepted"), row=2, col=1,
-        )
-    figure.add_trace(_step(times, results["available_power_mw"], "Available power", "#1F1F1F"), row=2, col=1)
-    if (accepted[SEGMENTS[0]] + accepted[SEGMENTS[1]]).max() <= ACCEPTED_TOLERANCE_MW:
+    accepted_power = accepted[SEGMENTS[0]] + accepted[SEGMENTS[1]]
+    figure.add_trace(
+        _step(times, accepted_power, "总成交功率", COLORS[1],
+              fill="tozeroy", fillcolor="rgba(245, 133, 24, 0.45)"), row=2, col=1,
+    )
+    figure.add_trace(_step(times, results["available_power_mw"], "可用功率", "#1F1F1F", dash="dash"), row=2, col=1)
+    if accepted_power.max() <= ACCEPTED_TOLERANCE_MW:
         figure.add_annotation(
             x=0.5, y=0.5, xref="x2 domain", yref="y2 domain",
-            text="No accepted output", showarrow=False,
+            text="无成交出力", showarrow=False,
             bgcolor="rgba(255, 255, 255, 0.85)",
         )
-    figure.add_trace(_step(times, results["profit_eur"], "Profit", COLORS[2]), row=3, col=1)
-    figure.add_trace(_step(times, -results["regret_eur"], "Regret penalty (negative)", COLORS[5]), row=3, col=1)
-    figure.add_trace(_step(times, results["reward"], "Reward", "#1F1F1F"), row=3, col=1, secondary_y=True)
-    figure.update_yaxes(title_text="Price (EUR/MWh)", row=1, col=1)
-    figure.update_yaxes(title_text="Power (MW)", rangemode="tozero", row=2, col=1)
-    figure.update_yaxes(title_text="EUR per delivery", row=3, col=1, secondary_y=False)
-    figure.update_yaxes(title_text="Normalised reward", row=3, col=1, secondary_y=True)
-    figure.update_xaxes(title_text="Delivery start", row=3, col=1)
-    start, end = times.iloc[0], times.iloc[-1]
-    total_reward = results["reward"].sum()
-    total_profit = results["profit_eur"].sum()
+    figure.add_trace(_step(times, results["profit_eur"], "利润", COLORS[2]), row=3, col=1)
+    figure.update_yaxes(title_text="电价（欧元/MWh）", row=1, col=1)
+    figure.update_yaxes(title_text="功率（MW）", rangemode="tozero", row=2, col=1)
+    figure.update_yaxes(title_text="每时段利润（欧元）", row=3, col=1)
+    figure.update_xaxes(title_text="交付开始时间", tickformat="%m-%d\n%H:%M", row=3, col=1)
     figure.update_layout(
-        title=(
-            "Learning unit: bids, dispatch and reward"
-            f"<br><sup>{start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M}"
-            f" · total reward {total_reward:.3f}"
-            f" · total profit {total_profit:,.0f} EUR</sup>"
-        ),
-        height=900, hovermode="x unified", margin={"t": 95, "b": 40},
+        title="学习机组报价与收益",
+        font={"family": "Microsoft YaHei, SimHei, Noto Sans CJK SC, sans-serif"},
+        height=900, hovermode="x unified", margin={"t": 75, "b": 40},
     )
     return figure
 
@@ -172,16 +155,20 @@ def learning_curves(metrics: pd.DataFrame) -> go.Figure:
     metrics = metrics[metrics["phase"].isin(("initial_experience", "train", "validation"))]
     if metrics.empty:
         raise LearningChartError("learning_metrics.csv 没有训练或验证记录。")
-    figure = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.07)
+    curve_count = len(CURVE_FIELDS)
+    figure = make_subplots(rows=curve_count, cols=1, shared_xaxes=True, vertical_spacing=0.09)
     initial_episodes = metrics.loc[metrics["phase"] == "initial_experience", "episode"]
     if not initial_episodes.empty:
-        for row in range(1, 4):
+        for row in range(1, curve_count + 1):
             figure.add_vrect(
                 x0=initial_episodes.min() - 0.5, x1=initial_episodes.max() + 0.5,
                 fillcolor="#E5E7EB", opacity=0.7, line_width=0, row=row, col=1,
             )
+    run_count = metrics["run"].nunique()
     for index, (run, run_rows) in enumerate(metrics.groupby("run", sort=True)):
         color = COLORS[index % len(COLORS)]
+        training_color = COLORS[(index + 1) % len(COLORS)]
+        label_prefix = f"第 {run} 次运行：" if run_count > 1 else ""
         run_rows = run_rows.sort_values("episode")
         initial = run_rows[run_rows["phase"] == "initial_experience"]
         training = run_rows[run_rows["phase"] == "train"]
@@ -189,18 +176,19 @@ def learning_curves(metrics: pd.DataFrame) -> go.Figure:
         best = validation.loc[validation["total_reward"].idxmax()] if not validation.empty else None
         for row, (field, label) in enumerate(CURVE_FIELDS, start=1):
             for phase_rows, phase, dash, mode in (
-                (initial, "initial experience", "dash", "lines"),
+                (initial, "初始经验收集（不更新策略网络）", "dash", "lines"),
                 (pd.concat([initial.tail(1), training]) if not training.empty else training,
-                 "training", "solid", "lines"),
-                (validation, "validation", "solid", "lines+markers"),
+                 "训练", "solid", "lines"),
+                (validation, "验证", "solid", "lines+markers"),
             ):
                 if phase_rows.empty:
                     continue
                 figure.add_trace(
                     go.Scatter(
                         x=phase_rows["episode"], y=phase_rows[field],
-                        name=f"Run {run} {phase}", mode=mode,
-                        line={"color": color, "dash": dash, "width": 1.5},
+                        name=f"{label_prefix}{phase}", mode=mode,
+                        line={"color": training_color if phase == "训练" else color,
+                              "dash": dash, "width": 1.5},
                         marker={"size": 5}, legendgroup=f"{run}-{phase}",
                         showlegend=row == 1,
                     ), row=row, col=1,
@@ -209,34 +197,35 @@ def learning_curves(metrics: pd.DataFrame) -> go.Figure:
                 figure.add_trace(
                     go.Scatter(
                         x=[best["episode"]], y=[best[field]], mode="markers",
-                        name=f"Run {run} best validation", marker={"symbol": "star", "size": 13, "color": color,
+                        name=f"{label_prefix}最佳验证模型", marker={"symbol": "star", "size": 13, "color": color,
                         "line": {"color": "#1F1F1F", "width": 1}},
                         legendgroup=f"{run}-best", showlegend=row == 1,
                     ), row=row, col=1,
                 )
             figure.update_yaxes(title_text=label, row=row, col=1)
-    figure.update_xaxes(title_text="Episode", tickformat="d", row=3, col=1)
+    figure.update_xaxes(title_text="训练轮次", tickformat="d", row=curve_count, col=1)
     figure.update_layout(
-        title="Learning curves — dashed: initial experience; star: best validation reward",
-        height=850, hovermode="x unified", margin={"t": 85, "b": 40},
+        title="学习曲线",
+        font={"family": "Microsoft YaHei, SimHei, Noto Sans CJK SC, sans-serif"},
+        height=650, hovermode="x unified", margin={"t": 85, "b": 40},
     )
     return figure
 
 
 def learning_comparison(metrics: pd.DataFrame, period: str) -> go.Figure:
-    """沿用 PNG 图的八项指标，对比 Actor 和基准策略。"""
+    """沿用 PNG 图的四项指标，对比学习策略和边际成本基准。"""
 
-    phases = ((f"{period}_actor", "Actor", COLORS[0]),
-              (f"{period}_baseline", "Baseline", "#9CA3AF"))
+    phases = ((f"{period}_actor", "学习策略", COLORS[0]),
+              (f"{period}_baseline", "边际成本基准", "#9CA3AF"))
+    period_label = {"train": "训练期", "validation": "验证期", "test": "测试期"}.get(period, period)
     if any(metrics.loc[metrics["phase"] == phase].empty for phase, _, _ in phases):
-        period_label = {"train": "训练期", "validation": "验证期", "test": "测试期"}.get(period, period)
-        raise LearningChartError(f"{period_label}对比图缺少 Actor 或基准策略记录。")
+        raise LearningChartError(f"{period_label}对比图缺少学习策略或基准策略记录。")
     figure = make_subplots(
-        rows=2, cols=4, subplot_titles=[label for _, label in COMPARISON_FIELDS],
-        horizontal_spacing=0.07, vertical_spacing=0.16,
+        rows=2, cols=2, subplot_titles=[label for _, label in COMPARISON_FIELDS],
+        horizontal_spacing=0.12, vertical_spacing=0.16,
     )
     for index, (field, _) in enumerate(COMPARISON_FIELDS):
-        row, col = divmod(index, 4)
+        row, col = divmod(index, 2)
         for phase, label, color in phases:
             rows = metrics[metrics["phase"] == phase]
             values = [float(value) for value in rows[field]]
@@ -249,7 +238,7 @@ def learning_comparison(metrics: pd.DataFrame, period: str) -> go.Figure:
                     textposition="outside", cliponaxis=False,
                     error_y={"type": "data", "array": [spread], "visible": True} if len(values) > 1 else None,
                     customdata=[[len(values), spread]],
-                    hovertemplate="%{x}<br>Mean: %{y:,.4g}<br>Runs: %{customdata[0]}<br>Std: %{customdata[1]:,.4g}<extra></extra>",
+                    hovertemplate="%{x}<br>均值：%{y:,.4g}<br>运行次数：%{customdata[0]}<br>总体标准差：%{customdata[1]:,.4g}<extra></extra>",
                     legendgroup=label, showlegend=index == 0,
                 ), row=row + 1, col=col + 1,
             )
@@ -257,7 +246,7 @@ def learning_comparison(metrics: pd.DataFrame, period: str) -> go.Figure:
                 figure.add_trace(
                     go.Scatter(
                         x=[label] * len(values), y=values, mode="markers",
-                        text=[f"Run {run}" for run in rows["run"]],
+                        text=[f"第 {run} 次运行" for run in rows["run"]],
                         marker={"size": 6, "color": "#1F1F1F"},
                         hovertemplate="%{text}<br>%{y:,.4g}<extra></extra>",
                         showlegend=False,
@@ -265,7 +254,8 @@ def learning_comparison(metrics: pd.DataFrame, period: str) -> go.Figure:
                 )
         figure.add_hline(y=0, line_color="#1F1F1F", line_width=0.6, row=row + 1, col=col + 1)
     figure.update_layout(
-        title=f"Deterministic Actor vs marginal-cost baseline — {period} period",
+        title=f"学习策略与边际成本基准对比（无探索噪声）——{period_label}",
+        font={"family": "Microsoft YaHei, SimHei, Noto Sans CJK SC, sans-serif"},
         height=780, barmode="group", hovermode="closest", margin={"t": 90, "b": 40},
     )
     return figure
@@ -325,7 +315,7 @@ def build_learning_charts(run_dir: Path) -> tuple[dict[str, go.Figure], dict[str
             path, table = max(candidates, key=lambda item: (item[0].stat().st_mtime_ns, item[0].name))
             try:
                 figure = learning_comparison(table, period)
-                figure.update_layout(title=f"{figure.layout.title.text}<br><sup>Source: {path.name}</sup>")
+                figure.update_layout(title=f"{figure.layout.title.text}<br><sup>数据来源：{path.name}</sup>")
                 figures[name] = figure
             except Exception as exc:
                 errors[name] = _error_text(exc)

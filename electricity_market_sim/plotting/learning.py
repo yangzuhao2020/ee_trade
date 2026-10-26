@@ -1,4 +1,4 @@
-"""第五版学习机组报价与奖励、训练和验证曲线，以及各数据时段上 Actor 与边际成本基准策略的对比图表。"""
+"""学习机组报价、出力与收益、学习曲线，以及学习策略与边际成本基准的对比图表。"""
 
 import csv
 from pathlib import Path
@@ -17,20 +17,27 @@ from .common import (
 
 _LEARNING_SEGMENTS = ("learning_minimum", "learning_flexible")
 _CURVE_FIELDS = (
-    ("mean_reward_per_hour", "Mean reward per hour"),
-    ("total_reward", "Total reward (period-length dependent)"),
-    ("total_profit_eur", "Total profit (EUR, period-length dependent)"),
+    ("mean_reward_per_hour", "每小时平均奖励"),
+    ("total_profit_eur", "总利润（欧元，受时段长度影响）"),
 )
 _COMPARISON_FIELDS = (
-    ("total_profit_eur", "Total profit (EUR)"),
-    ("total_reward", "Total reward"),
-    ("mean_reward_per_hour", "Mean reward per hour"),
-    ("accepted_energy_mwh", "Accepted energy (MWh)"),
-    ("minimum_segment_average_bid_eur_per_mwh", "Minimum-segment avg bid (EUR/MWh)"),
-    ("flexible_segment_average_bid_eur_per_mwh", "Flexible-segment avg bid (EUR/MWh)"),
-    ("minimum_segment_acceptance_ratio", "Minimum-segment acceptance ratio"),
-    ("flexible_segment_acceptance_ratio", "Flexible-segment acceptance ratio"),
+    ("total_profit_eur", "总利润（欧元）"),
+    ("accepted_energy_mwh", "成交电量（MWh）"),
+    ("minimum_segment_average_bid_eur_per_mwh", "最低出力段平均报价（欧元/MWh）"),
+    ("flexible_segment_average_bid_eur_per_mwh", "灵活出力段平均报价（欧元/MWh）"),
 )
+
+
+def _chinese_font_families() -> list[str]:
+    from matplotlib.font_manager import fontManager
+
+    available_fonts = {font.name for font in fontManager.ttflist}
+    return [
+        name for name in (
+            "Microsoft YaHei", "SimHei", "PingFang SC", "Noto Sans CJK SC",
+            "WenQuanYi Zen Hei",
+        ) if name in available_fonts
+    ] + ["DejaVu Sans"]
 
 
 def comparison_periods(rows: list[dict[str, Any]]) -> list[str]:
@@ -51,7 +58,7 @@ def _plot_learning_unit(
     path: Path,
     episode_label: str,
 ) -> Path:
-    """按交付时段绘制学习机组的两段报价、出力和奖励。"""
+    """按完整交付时段绘制两段报价、总成交功率和利润。"""
 
     markets = {market.delivery_start: market for market in results}
     segments_by_start = {
@@ -105,7 +112,7 @@ def _plot_learning_unit(
         for segment in _LEARNING_SEGMENTS
     }
 
-    figure, (price_axis, power_axis, reward_axis) = pyplot.subplots(
+    figure, (price_axis, power_axis, profit_axis) = pyplot.subplots(
         3,
         1,
         figsize=(16, 11),
@@ -118,11 +125,11 @@ def _plot_learning_unit(
         where="mid",
         color="#1F1F1F",
         linewidth=1.3,
-        label="Clearing price",
+        label="出清电价",
     )
     for segment, label, color in (
-        ("learning_minimum", "Minimum-segment bid", "#4C78A8"),
-        ("learning_flexible", "Flexible-segment bid", "#F58518"),
+        ("learning_minimum", "最低出力段报价", "#4C78A8"),
+        ("learning_flexible", "灵活出力段报价", "#F58518"),
     ):
         price_axis.step(
             times,
@@ -136,24 +143,16 @@ def _plot_learning_unit(
         times,
         marginal_costs,
         where="mid",
-        color="#E45756",
+        color="#7F7F7F",
+        alpha=0.65,
         linestyle="--",
         linewidth=1.0,
-        label="Marginal cost",
+        label="边际成本",
     )
-    price_axis.set_ylabel("Price (EUR/MWh)")
+    price_axis.set_ylabel("电价（欧元/MWh）")
     price_axis.grid(axis="y", alpha=0.25)
     price_axis.legend(loc="upper left", ncol=4, fontsize=8)
 
-    power_axis.stackplot(
-        times,
-        accepted["learning_minimum"],
-        accepted["learning_flexible"],
-        labels=("Accepted minimum segment", "Accepted flexible segment"),
-        colors=("#4C78A8", "#F58518"),
-        alpha=0.6,
-        step="mid",
-    )
     available_power = [step.available_power_mw for step in steps]
     accepted_power = [
         minimum + flexible
@@ -161,70 +160,55 @@ def _plot_learning_unit(
             accepted["learning_minimum"], accepted["learning_flexible"]
         )
     ]
+    power_axis.fill_between(
+        times, 0, accepted_power, step="mid", color="#F58518", alpha=0.45,
+        linewidth=0, label="总成交功率",
+    )
     power_axis.step(
         times,
         available_power,
         where="mid",
         color="#1F1F1F",
+        linestyle="--",
         linewidth=1.1,
-        label="Available power",
+        label="可用功率",
     )
     power_top = max([*available_power, *accepted_power, 0.0])
     power_axis.set_ylim(0.0, power_top * 1.05 if power_top > 0 else 1.0)
     if max(accepted_power, default=0.0) <= _ENERGY_TOLERANCE_MWH:
-        _annotate_no_supply(power_axis, "No accepted output")
-    power_axis.set_ylabel("Power (MW)")
+        _annotate_no_supply(power_axis, "无成交出力")
+    power_axis.set_ylabel("功率（MW）")
     power_axis.grid(axis="y", alpha=0.25)
-    power_axis.legend(loc="upper left", ncol=3, fontsize=8)
+    power_axis.legend(loc="upper left", ncol=2, fontsize=8)
 
-    reward_twin = reward_axis.twinx()
-    reward_axis.step(
+    profit_axis.step(
         times,
         [step.profit_eur for step in steps],
         where="mid",
         color="#54A24B",
         linewidth=1.1,
-        label="Profit",
+        label="利润",
     )
-    reward_axis.step(
-        times,
-        [-step.regret_eur for step in steps],
-        where="mid",
-        color="#B279A2",
-        linewidth=1.1,
-        label="Regret penalty (negative)",
-    )
-    reward_twin.step(
-        times,
-        [step.reward for step in steps],
-        where="mid",
-        color="#1F1F1F",
-        linewidth=0.9,
-        alpha=0.7,
-        label="Reward",
-    )
-    reward_axis.axhline(0, color="#1F1F1F", linewidth=0.6)
-    reward_axis.set_ylabel("EUR per delivery")
-    reward_twin.set_ylabel("Normalised reward")
-    reward_axis.set_xlabel("Delivery start")
-    reward_axis.grid(axis="y", alpha=0.25)
-    handles, labels = reward_axis.get_legend_handles_labels()
-    twin_handles, twin_labels = reward_twin.get_legend_handles_labels()
-    reward_axis.legend(
-        [*handles, *twin_handles],
-        [*labels, *twin_labels],
-        loc="upper left",
-        ncol=3,
-        fontsize=8,
-    )
-    _format_time_axis(reward_axis, dates)
+    profit_axis.axhline(0, color="#1F1F1F", linewidth=0.6)
+    profit_axis.set_ylabel("每时段利润（欧元）")
+    profit_axis.set_xlabel("交付开始时间")
+    profit_axis.grid(axis="y", alpha=0.25)
+    profit_axis.legend(loc="upper left", fontsize=8)
+    _format_time_axis(profit_axis, dates)
+    profit_axis.xaxis.set_major_formatter(dates.ConciseDateFormatter(
+        profit_axis.xaxis.get_major_locator(),
+        formats=["%Y", "%m", "%d", "%H:%M", "%H:%M", "%S"],
+        zero_formats=["", "%Y", "%m-%d", "%m-%d", "%H:%M", "%H:%M"],
+        offset_formats=["", "%Y", "%Y-%m", "%Y-%m-%d", "%Y-%m-%d", "%Y-%m-%d %H:%M"],
+    ))
 
-    unit_label = ", ".join(unit_names) or "learning unit"
-    figure.suptitle(
-        f"{episode_label} — {unit_label}: bids, dispatch and reward "
-        f"(total reward {sum(step.reward for step in steps):.3f}, "
-        f"total profit {sum(step.profit_eur for step in steps):,.0f} EUR)"
-    )
+    unit_label = "、".join(unit_names) or "学习机组"
+    figure.suptitle(f"学习机组报价与收益——{unit_label}（{episode_label}）")
+    from matplotlib.text import Text
+
+    font_families = _chinese_font_families()
+    for text in figure.findobj(Text):
+        text.set_fontfamily(font_families)
     figure.tight_layout()
     return _save_figure(pyplot, figure, path)
 
@@ -264,7 +248,7 @@ def _plot_learning_curves(pyplot, rows: list[dict[str, Any]], path: Path) -> Pat
     """绘制每次独立运行中训练回合和验证回合的指标。"""
 
     runs = sorted({row["run"] for row in rows})
-    figure, axes = pyplot.subplots(len(_CURVE_FIELDS), 1, figsize=(12, 10), sharex=True)
+    figure, axes = pyplot.subplots(len(_CURVE_FIELDS), 1, figsize=(12, 7), sharex=True)
     initial_episodes = [
         row["episode"] for row in rows if row["phase"] == "initial_experience"
     ]
@@ -276,10 +260,12 @@ def _plot_learning_curves(pyplot, rows: list[dict[str, Any]], path: Path) -> Pat
                 color="#E5E7EB",
                 alpha=0.7,
                 zorder=0,
-                label="Initial experience (no Actor updates)",
+                label="初始经验收集（不更新策略网络）",
             )
     for index, run in enumerate(runs):
         color = _UNIT_COLORS[index % len(_UNIT_COLORS)]
+        training_color = _UNIT_COLORS[(index + 1) % len(_UNIT_COLORS)]
+        label_prefix = f"第 {run} 次运行：" if len(runs) > 1 else ""
         run_rows = sorted(
             (row for row in rows if row["run"] == run), key=lambda row: row["episode"]
         )
@@ -306,10 +292,10 @@ def _plot_learning_curves(pyplot, rows: list[dict[str, Any]], path: Path) -> Pat
                 axis.plot(
                     [row["episode"] for row in connected],
                     [row[field] for row in connected],
-                    color=color,
-                    alpha=0.45,
-                    linewidth=1.0,
-                    label=f"Run {run} training",
+                    color=training_color,
+                    alpha=0.85,
+                    linewidth=1.2,
+                    label=f"{label_prefix}训练",
                 )
             if validation:
                 axis.plot(
@@ -319,7 +305,7 @@ def _plot_learning_curves(pyplot, rows: list[dict[str, Any]], path: Path) -> Pat
                     marker="o",
                     markersize=3.5,
                     linewidth=1.5,
-                    label=f"Run {run} validation",
+                    label=f"{label_prefix}验证",
                 )
             if best is not None:
                 axis.scatter(
@@ -331,18 +317,20 @@ def _plot_learning_curves(pyplot, rows: list[dict[str, Any]], path: Path) -> Pat
                     edgecolors="#1F1F1F",
                     linewidths=0.6,
                     zorder=4,
-                    label=f"Run {run} best (validation total)",
+                    label=f"{label_prefix}最佳验证模型",
                 )
     for axis, (_, label) in zip(axes, _CURVE_FIELDS):
         axis.set_ylabel(label)
         axis.grid(alpha=0.25)
     axes[0].legend(loc="best", ncol=3, fontsize=8)
-    axes[-1].set_xlabel("Episode")
+    axes[-1].set_xlabel("训练轮次")
     axes[-1].xaxis.set_major_locator(pyplot.MaxNLocator(integer=True))
-    figure.suptitle(
-        f"Learning curves — {len(runs)} independent run(s); dashed: initial "
-        "experience; star: validation episode with the highest total reward"
-    )
+    figure.suptitle("学习曲线")
+    from matplotlib.text import Text
+
+    font_families = _chinese_font_families()
+    for text in figure.findobj(Text):
+        text.set_fontfamily(font_families)
     figure.tight_layout()
     return _save_figure(pyplot, figure, path)
 
@@ -356,15 +344,16 @@ def _plot_evaluation_comparison(
 ) -> Path:
     """对比确定性 Actor 与边际成本基准策略在指定数据时段上的结果。"""
 
+    font_families = _chinese_font_families()
     phases = (
-        (f"{period}_actor", "Actor", "#4C78A8"),
-        (f"{period}_baseline", "Baseline", "#9CA3AF"),
+        (f"{period}_actor", "学习策略", "#4C78A8"),
+        (f"{period}_baseline", "边际成本基准", "#9CA3AF"),
     )
     run_count = max(
         len([row for row in rows if row["phase"] == phase])
         for phase, _, _ in phases
     )
-    figure, axes = pyplot.subplots(2, 4, figsize=(16, 7.5))
+    figure, axes = pyplot.subplots(2, 2, figsize=(12, 7.5))
     for axis, (field, title) in zip(axes.flat, _COMPARISON_FIELDS):
         for position, (phase, _, color) in enumerate(phases):
             values = [row[field] for row in rows if row["phase"] == phase]
@@ -407,14 +396,20 @@ def _plot_evaluation_comparison(
         axis.set_xticks(
             range(len(phases)),
             [label for _, label, _ in phases],
+            fontfamily=font_families,
         )
         axis.set_xlim(-0.6, len(phases) - 0.4)
         axis.margins(y=0.15)
-        axis.set_title(title, fontsize=10)
+        axis.set_title(title, fontsize=10, fontfamily=font_families)
         axis.grid(axis="y", alpha=0.25)
-    spread_note = "mean ± population std, dots are runs" if run_count > 1 else "1 run"
+    period_label = {"train": "训练期", "validation": "验证期", "test": "测试期"}.get(period, period)
+    spread_note = (
+        f"{run_count} 次独立运行；柱形为均值，误差线为总体标准差，圆点为各次结果"
+        if run_count > 1 else "1 次独立运行"
+    )
     figure.suptitle(
-        f"Deterministic Actor vs marginal-cost baseline — {period} period, {spread_note}"
+        f"学习策略与边际成本基准对比（无探索噪声）——{period_label}，{spread_note}",
+        fontfamily=font_families,
     )
     figure.tight_layout()
     return _save_figure(pyplot, figure, path)

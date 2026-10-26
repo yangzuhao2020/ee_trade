@@ -53,7 +53,7 @@ def results_state(run_dir: Path) -> tuple:
 
 @st.cache_data(show_spinner="正在读取结果 CSV…", max_entries=8)
 def load_charts(run_dir: str, files_state: tuple):
-    """构建本次运行的图表；任一 CSV 发生变化时，files_state 会使缓存失效。"""
+    """构建中文图表，概览图按需求类型拆分未成交电量；CSV 变化时使缓存失效。"""
 
     path = Path(run_dir)
     market_figures = charts.build_charts(charts.load_run(path))
@@ -89,7 +89,7 @@ for kind, name, item in learning_items:
     if kind == "figure":
         st.plotly_chart(item, width="stretch")
     elif kind == "image":
-        st.image(str(item), caption=name, width="stretch")
+        st.image(str(item), caption=LEARNING_ERROR_LABELS.get(name, name), width="stretch")
     else:
         st.error(f"{LEARNING_ERROR_LABELS.get(name, name)}：{item}")
 for name, error in learning_errors.items():
