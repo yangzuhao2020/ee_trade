@@ -3,6 +3,7 @@ examples/*
 examples/input/*/*
 !examples/input/*/config.yaml
 !examples/input/example_02a/config_future.yaml
+!examples/input/example_01h_saving/*
 outputs
 tests/*
 !tests/eom_regression.py

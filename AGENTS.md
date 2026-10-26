@@ -6,3 +6,6 @@
 
 - 运行测试需使用 `ee_trade` conda 环境（默认 base 环境缺少 scipy）：
   `C:\Users\yang\miniconda3\envs\ee_trade\python.exe -m unittest discover -s tests`
+- 示例场景回归快照（改动前先记录，改动后对比；ARCHIVE 放在仓库外，如 `%TEMP%`）：
+  `python -B tests/eom_regression.py baseline ARCHIVE` / `python -B tests/eom_regression.py compare ARCHIVE`（需设置 `PYTHONPATH=.`）
+- `outputs/` 和大部分 `examples/input/*/*.csv` 被 .gitignore 忽略；`examples/input/example_01h_saving/` 已放行。

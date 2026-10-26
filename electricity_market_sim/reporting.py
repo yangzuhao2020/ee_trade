@@ -14,6 +14,18 @@ from .utils import format_timestamp, hours_between
 
 
 _POWER_TOLERANCE_MW = 1e-7
+_HOUSEHOLD_COST_FIELDS = (
+    "accepted_grid_energy_mwh",
+    "actual_price_eur_per_mwh",
+    "payment_eur",
+    "baseline_grid_energy_mwh",
+    "baseline_payment_eur",
+    "actual_saving_eur",
+    "forecast_saving_eur",
+    "baseline_unmet_electricity_mwh",
+    "baseline_unmet_heat_mwh_th",
+    "baseline_soc_after",
+)
 
 
 def _number(value: float) -> str:
@@ -83,7 +95,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
     operator_totals: dict[str, dict[str, float]] = defaultdict(
         lambda: {
             "accepted_energy_mwh": 0.0,
+            "accepted_charge_mwh": 0.0,
             "revenue_eur": 0.0,
+            "purchase_cost_eur": 0.0,
             "variable_cost_eur": 0.0,
             "startup_cost_eur": 0.0,
             "total_cost_eur": 0.0,
@@ -130,6 +144,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "unserved_load_mwh": _number(market_result.unserved_load_mwh),
                 "unserved_total_demand_mwh": _number(
                     market_result.unserved_demand_mwh
+                ),
+                "unaccepted_storage_charge_mwh": _number(
+                    market_result.unaccepted_storage_charge_mwh
                 ),
                 "clearing_price_eur_per_mwh": _optional_number(
                     market_result.clearing_price_eur_per_mwh
@@ -390,6 +407,20 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "net_cash_flow_eur": _number(storage_result.net_cash_flow_eur),
             }
         )
+        additional_cost_eur = (
+            storage_result.additional_charge_cost_eur
+            + storage_result.additional_discharge_cost_eur
+        )
+        totals = operator_totals[storage_result.operator]
+        totals["accepted_energy_mwh"] += storage_result.accepted_discharge_mwh
+        totals["accepted_charge_mwh"] += storage_result.accepted_charge_mwh
+        totals["revenue_eur"] += storage_result.discharge_revenue_eur
+        totals["purchase_cost_eur"] += storage_result.charge_payment_eur
+        totals["variable_cost_eur"] += additional_cost_eur
+        totals["total_cost_eur"] += (
+            storage_result.charge_payment_eur + additional_cost_eur
+        )
+        totals["profit_eur"] += storage_result.net_cash_flow_eur
 
     household_by_key, flexibility_by_key = _paired_results(
         "household",
@@ -397,6 +428,29 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         simulation_result.household_results,
         simulation_result.household_flexibility_results,
     )
+
+    cost_by_key = {
+        (cost.unit_name, cost.delivery_start, cost.delivery_end): cost
+        for cost in simulation_result.household_cost_results
+    }
+
+    def household_cost_columns(key: tuple) -> dict[str, str]:
+        # 节省指标与不使用电池的基准方案对比；没有基准结果时留空。
+        cost = cost_by_key.get(key)
+        if cost is None:
+            return {field: "" for field in _HOUSEHOLD_COST_FIELDS}
+        return {
+            "accepted_grid_energy_mwh": _number(cost.accepted_grid_energy_mwh),
+            "actual_price_eur_per_mwh": _optional_number(cost.actual_price_eur_per_mwh),
+            "payment_eur": _number(cost.payment_eur),
+            "baseline_grid_energy_mwh": _number(cost.baseline_grid_energy_mwh),
+            "baseline_payment_eur": _number(cost.baseline_payment_eur),
+            "actual_saving_eur": _number(cost.actual_saving_eur),
+            "forecast_saving_eur": _number(cost.forecast_saving_eur),
+            "baseline_unmet_electricity_mwh": _number(cost.baseline_unmet_electricity_mwh),
+            "baseline_unmet_heat_mwh_th": _number(cost.baseline_unmet_heat_mwh_th),
+            "baseline_soc_after": _number(cost.baseline_soc_after),
+        }
 
     household_rows = [
         {
@@ -426,6 +480,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "soc_after": _number(result.soc_after),
             "unmet_electricity_mwh": _number(result.unmet_electricity_mwh),
             "unmet_heat_mwh_th": _number(result.unmet_heat_mwh_th),
+            **household_cost_columns(key),
         }
         for key, result in household_by_key.items()
     ]
@@ -541,6 +596,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "cleared_energy_mwh",
             "unserved_load_mwh",
             "unserved_total_demand_mwh",
+            "unaccepted_storage_charge_mwh",
             "clearing_price_eur_per_mwh",
             "average_trade_price_eur_per_mwh",
             "pricing_method",
@@ -601,7 +657,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         [
             "unit_operator",
             "accepted_energy_mwh",
+            "accepted_charge_mwh",
             "revenue_eur",
+            "purchase_cost_eur",
             "variable_cost_eur",
             "startup_cost_eur",
             "total_cost_eur",
@@ -706,6 +764,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "soc_after",
                 "unmet_electricity_mwh",
                 "unmet_heat_mwh_th",
+                *_HOUSEHOLD_COST_FIELDS,
             ],
             household_rows,
         )

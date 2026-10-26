@@ -517,6 +517,8 @@ def plan_household_opening(
     initial_heat_pump_power_mw: dict[str, float],
     initial_battery_charge_power_mw: dict[str, float],
     initial_battery_discharge_power_mw: dict[str, float],
+    *,
+    evaluate_flexibility: bool = True,
 ) -> tuple[
     dict[str, tuple[HouseholdPlan, ...]],
     dict[str, tuple[HouseholdFlexibilityResult, ...]],
@@ -529,6 +531,7 @@ def plan_household_opening(
     5. 评估灵活性：复用模型，加入成本容忍度对应的总费用上限，
     分别求解各时段购电功率的最小值和最大值。
     6. 返回结果：返回按家庭名称组织的基准计划和购电功率上下限。
+    evaluate_flexibility=False 时跳过第 5 步，各家庭的灵活性结果为空。
     """
     problems: dict[str, _HouseholdProblem] = {}
     plans_by_household: dict[str, tuple[HouseholdPlan, ...]] = {}
@@ -560,7 +563,7 @@ def plan_household_opening(
 
     flexibility_by_household: dict[str, tuple[HouseholdFlexibilityResult, ...]] = {}
     for household in households:
-        if not products:
+        if not products or not evaluate_flexibility:
             flexibility_by_household[household.name] = ()
             continue
         if household.cost_tolerance_percent < 0 or not np.isfinite(

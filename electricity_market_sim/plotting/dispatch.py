@@ -233,6 +233,10 @@ def _plot_storage_dispatch(
         name: storage_color_map(index / max(1, len(storage_names) - 1))
         for index, name in enumerate(storage_names)
     }
+    # A single unit needs no per-unit colors, so net power is colored by direction instead.
+    single_unit = len(storage_names) == 1
+    if single_unit:
+        storage_colors = {name: "#4C78A8" for name in storage_names}
 
     figure, (soc_axis, power_axis) = pyplot.subplots(
         2,
@@ -246,7 +250,6 @@ def _plot_storage_dispatch(
             by_unit[unit_name],
             key=lambda storage: (storage.delivery_start, storage.opening_time),
         )
-        color = storage_colors[unit_name]
         soc_times: list[datetime] = []
         soc_values: list[float] = []
         net_power: list[float] = []
@@ -264,7 +267,7 @@ def _plot_storage_dispatch(
         soc_axis.plot(
             soc_times,
             soc_values,
-            color=color,
+            color=storage_colors[unit_name],
             linewidth=1.45,
             label=unit_name,
         )
@@ -281,14 +284,32 @@ def _plot_storage_dispatch(
                 row.delivery_end for row, _ in chunk
             ]
             power_values = [power for _, power in chunk] + [chunk[-1][1]]
-            power_axis.step(
-                power_times,
-                power_values,
-                where="post",
-                color=color,
-                linewidth=1.25,
-                label=unit_name if index == 0 else None,
-            )
+            if not single_unit:
+                power_axis.step(
+                    power_times,
+                    power_values,
+                    where="post",
+                    color=storage_colors[unit_name],
+                    linewidth=1.25,
+                    label=unit_name if index == 0 else None,
+                )
+                continue
+            for label, color, clip in (
+                ("Discharge", "#54A24B", max),
+                ("Charge", "#F58518", min),
+            ):
+                clipped = [clip(value, 0.0) for value in power_values]
+                power_axis.step(
+                    power_times,
+                    clipped,
+                    where="post",
+                    color=color,
+                    linewidth=1.0,
+                    label=label if index == 0 else None,
+                )
+                power_axis.fill_between(
+                    power_times, 0.0, clipped, step="post", color=color, alpha=0.35
+                )
 
     figure.suptitle("Storage dispatch and state of charge")
     soc_axis.set_ylabel("SOC (%)")
@@ -307,6 +328,8 @@ def _plot_storage_dispatch(
         fontsize=9,
         color="#555555",
     )
+    if single_unit:
+        power_axis.legend(loc="upper right", ncol=2, fontsize=8)
     _format_time_axis(power_axis, dates)
     handles, labels = soc_axis.get_legend_handles_labels()
     figure.legend(

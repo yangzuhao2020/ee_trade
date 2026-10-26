@@ -51,9 +51,43 @@ soc_after
 unmet_electricity_mwh
 unmet_heat_mwh_th
 ```
-其中，`planned_grid_power_mw` 为基准计划购电功率；热泵功率、电池充放电功率和 SOC 均为成交后的实际运行结果。买单、成交量、报价及支付统一记录在 `demand_results.csv`，不在此重复保存。
+其中，`planned_grid_power_mw` 为基准计划购电功率；热泵功率、电池充放电功率和 SOC 均为成交后的实际运行结果。买单、报价及逐笔成交统一记录在 `demand_results.csv`；为直接对比节省效果，本表末尾附带下述购电成本列。
 
 `minimum_grid_power_mw` 和 `maximum_grid_power_mw` 为出清前按预测电价评估的最低、最高可行购电功率：在相同初始状态、供热及设备约束和整个优化窗口的成本容忍度限制下，对每个时段分别最小化、最大化购电功率。各上下界可能来自不同的完整运行方案，不对应同一行的实际设备运行及 SOC，也不能将整列上下界直接拼接为一套可执行计划。灵活性分析结果不直接用于 EOM 买单。
+### 购电成本与节省（对比不使用电池的基准方案）
+居民仿真结束后，以相同输入再完整仿真一次**基准方案**：电池不参与运行，即各居民电池的最大充、放电功率和自放电率均设为 0，储能量保持初始值；其余优化、报价、出清及调度流程不变（跳过灵活性评估）。若保留自放电，储能量会降到最低 SOC 以下而又无法充电，使基准求解不可行。基准方案的结果只用于成本对比，不写入市场、订单及设备结果。`household_results.csv` 末尾追加：
+```
+accepted_grid_energy_mwh    # 优化方案买单的实际成交电量
+actual_price_eur_per_mwh    # payment_eur ÷ accepted_grid_energy_mwh（逐笔成交加权均价，未成交时留空）
+payment_eur                 # 优化方案买单的实际支付，与 demand_results.csv 一致
+baseline_grid_energy_mwh    # 基准方案的实际成交电量
+baseline_payment_eur        # 基准方案的实际支付
+actual_saving_eur           # baseline_payment_eur − payment_eur
+forecast_saving_eur         # 预测电价 × (基准计划购电量 − 优化计划购电量)
+baseline_unmet_electricity_mwh  # 基准方案的未满足用电量
+baseline_unmet_heat_mwh_th      # 基准方案的未满足热量
+baseline_soc_after              # 基准方案的时段末 SOC
+```
+`actual_saving_eur` 是按实际结算的节省，为主要评价指标；`forecast_saving_eur` 是优化时按预测电价预期的节省，两者差异反映预测电价与实际成交价不一致造成的偏差。
+
+**对照有效性。** 支付差额只有在两个方案提供同等服务时才代表节省。规划中的“窗口末端 SOC 不低于起点”只约束计划，实际调度并不保证：买单部分成交时电池会被动放电供热泵，供给不足时会出现未满足热量。因此按居民汇总三项差异：
+- 缺电量逐时段不一致 = Σ|`unmet_electricity_mwh` − `baseline_unmet_electricity_mwh`|；
+- 缺热量逐时段不一致 = Σ|`unmet_heat_mwh_th` − `baseline_unmet_heat_mwh_th`|；
+- 期末 SOC 差 = 最后一个时段的 `soc_after` − `baseline_soc_after`。
+
+本例没有热储能，热需求须当期满足，因此缺供量按时段逐一比较，不同时段的差异不能相互抵消；净差（优化方案 − 基准方案的合计）仅作参考一并列出。两项逐时段不一致均为 0、且期末 SOC 差不小于 0 时（容差 1e-6）判为**对照可比**；否则判为**对照不可比**，实际节省不构成同等服务下的节省，三项差异单独报告，剩余电量差异不折算为金额。命令行在各居民总计后打印该判断。
+
+图表新增 `household_savings.png`（累计节省、每日节省、每日支付对比；文本框给出对照判断与三项差异，不可比时标题标红，当天缺供量与基准不同的柱子加斜线）和 `household_dispatch_zoom.png`（前 3 天）；`household_dispatch.png` 改为电价与充放电时段、电池功率（kW）、SOC、购电功率（含基准购电与灵活性区间）四个子图；`market_overview.png` 在价格子图叠加预测电价。交互界面（`UI/charts.py`）在居民场景中同样显示“居民调度”和“居民购电成本与节省”两张图，判断规则与上面相同；读取缺少对照列的旧结果时，节省图只显示“请重新运行仿真生成”的提示，其余图照常显示。
+
+注意：pay_as_bid 下 A360 的买单报价为 3000，总是最先与当时最便宜的卖单撮合，因此其实际成交价取决于“当时最便宜的可用供给”，与普通负荷的大小无关。`example_01h` 只有一台机组，实际成交价日内几乎不变，而预测电价有明显峰谷，因此该例的实际节省约为 0（电池效率损失使其略为负值）。
+### 演示场景 example_01h_saving
+`examples/input/example_01h_saving` 由 `example_01h` 派生，用于展示居民优化的省钱能力，`example_01h` 本身保持不变：
+- `powerplant_units.csv` 增加 50 MW 光伏机组 `solar`（`fuel_type=renewable`，边际成本 0），可用率取 `availability_df.csv` 的 `solar` 曲线；NEURATH F 不变。
+- `residential_dsm_units.csv` 中 A360 电池改为容量 `2 MWh`，最大充放电功率及爬坡 `0.5 MW`，其余参数不变。
+- `forecasts_df.csv` 的 `price_EOM` 采用持续性预测：按前一天同一时刻的光伏可用率和燃料价格，估计 A360 当时可买到的最便宜供给价格，即 $\hat\lambda_t = MC^{NEURATH}_{t-24h}\times(1-\min(1, 50\,\mathrm{MW}\times a^{solar}_{t-24h}/1.5\,\mathrm{MW}))$；首日没有前一天数据，使用当日数据。不读取未来出清价。
+- `demand_df.csv` 仅保留 `demand_EOM`；燃料价格、需求单元及 `config.yaml` 与 `example_01h` 相同。
+
+运行：`PYTHONPATH=. python -m electricity_market_sim.main --input-dir examples/input/example_01h_saving --output-dir outputs/example_01h_saving/base`。
 ## demand and supply
 ### demand
 - demand_df: 

@@ -1,5 +1,5 @@
 """从仿真结果 CSV 文件构建交互式 Plotly 图表。
-展示市场供需、成交价格与出力、运营商利润，以及可用的储能、工业和按报价结算订单簿数据。"""
+展示市场供需、成交价格与出力、运营商利润，以及可用的储能和工业数据。"""
 
 from pathlib import Path
 
@@ -30,7 +30,6 @@ TABLES = {
     "demand": "demand_results.csv",
     "unit": "unit_results.csv",
     "operator": "operator_results.csv",
-    "offer": "offer_results.csv",
     "exchange": "exchange_results.csv",
     "storage": "storage_results.csv",
     "industry": "industry_results.csv",
@@ -44,7 +43,6 @@ ACCEPTED_LAYERS = (
     ("household_load", "#72B7B2", "已成交的居民用电需求"),
     ("industrial_load", "#D4A72C", "已成交的工业用电需求"),
     ("elastic_load", "#54A24B", "已成交的弹性需求"),
-    ("storage_charge", "#E45756", "已成交的储能充电需求"),
     ("export", "#F58518", "已成交的外送需求"),
 )
 UNACCEPTED_LINES = (
@@ -52,10 +50,19 @@ UNACCEPTED_LINES = (
     ("elastic_load", "#7F7F7F", "未成交的弹性需求"),
     ("household_load", "#72B7B2", "未成交的居民用电需求"),
     ("industrial_load", "#D4A72C", "未成交的工业用电需求"),
-    ("storage_charge", "#B279A2", "未成交的储能充电需求"),
     ("export", "#F58518", "未满足的外送需求"),
 )
-DEMAND_TYPES = [demand_type for demand_type, _, _ in ACCEPTED_LAYERS]
+DEMAND_TYPES = [*(demand_type for demand_type, _, _ in ACCEPTED_LAYERS), "storage_charge"]
+# 较早版本的 household_results.csv 缺少部分或全部成本对照列，相应内容不绘制。
+HOUSEHOLD_DISPATCH_COST_COLUMNS = (
+    "accepted_grid_energy_mwh", "actual_price_eur_per_mwh", "baseline_grid_energy_mwh",
+)
+HOUSEHOLD_SAVING_COLUMNS = (
+    "payment_eur", "baseline_payment_eur", "actual_saving_eur",
+    "unmet_electricity_mwh", "baseline_unmet_electricity_mwh",
+    "unmet_heat_mwh_th", "baseline_unmet_heat_mwh_th", "soc_after", "baseline_soc_after",
+)
+COMPARISON_TOLERANCE = 1e-6
 
 
 def has_results(run_dir: Path) -> bool:
@@ -98,12 +105,13 @@ def build_charts(tables: dict[str, pd.DataFrame]) -> list[go.Figure]:
     ]
     if "household" not in tables:
         figures.append(operator_profit(tables))
+    else:
+        figures.append(household_dispatch(tables))
+        figures.append(household_savings(tables))
     if "storage" in tables:
         figures.append(storage_dispatch(tables))
     if "industry" in tables:
         figures.append(industry_dispatch(tables))
-    if (tables["market"]["pricing_method"] == "pay_as_bid").all():
-        figures.append(pay_as_bid_order_book(tables))
     return figures
 
 
@@ -135,8 +143,15 @@ def market_overview(tables: dict[str, pd.DataFrame]) -> go.Figure:
                 row=2,
                 col=1,
             )
+    requested_storage = _demand_by_type(tables, "requested_energy_mwh")["storage_charge"]
     figure.add_trace(
-        _line(times, market["requested_demand_energy_mwh"], "总申报需求", "#1F1F1F", width=1.1),
+        _line(
+            times,
+            market["requested_demand_energy_mwh"] - requested_storage.to_numpy(),
+            "总申报需求（不含储能充电）",
+            "#1F1F1F",
+            width=1.1,
+        ),
         row=2,
         col=1,
     )
@@ -217,9 +232,6 @@ def operator_profit(tables: dict[str, pd.DataFrame]) -> go.Figure:
     metric_label = "利润／净现金流" if "storage" in tables else "利润"
     title = "各运营商累计发电利润与储能净现金流" if "storage" in tables else "各运营商累计利润"
     profits = tables["operator"].groupby("unit_operator")["profit_eur"].sum()
-    if "storage" in tables:
-        storage_cash_flow = tables["storage"].groupby("unit_operator")["net_cash_flow_eur"].sum()
-        profits = profits.add(storage_cash_flow, fill_value=0.0)
     profits = profits[profits.abs() > 1e-6]
     ranked = sorted(profits.index, key=lambda operator: (-abs(profits[operator]), operator))
     shown = profits[ranked[:MAX_OPERATORS]].to_dict()
@@ -257,7 +269,11 @@ def operator_profit(tables: dict[str, pd.DataFrame]) -> go.Figure:
 def storage_dispatch(tables: dict[str, pd.DataFrame]) -> go.Figure:
     storage = tables["storage"].sort_values(["unit_name", "delivery_start", "opening_time"], kind="stable")
     names = sorted(storage["unit_name"].unique())
-    colors = sample_colorscale("Turbo", [index / max(1, len(names) - 1) for index in range(len(names))])
+    # A single unit needs no per-unit colors, so net power is colored by direction instead.
+    single_unit = len(names) == 1
+    colors = ["#4C78A8"] if single_unit else sample_colorscale(
+        "Turbo", [index / (len(names) - 1) for index in range(len(names))]
+    )
 
     figure = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=(1.1, 1))
     for name, color in zip(names, colors):
@@ -282,11 +298,29 @@ def storage_dispatch(tables: dict[str, pd.DataFrame]) -> go.Figure:
         power_x.append(previous_end)
         power_y.append(previous_power)
         figure.add_trace(_line(soc_x, soc_y, name, color, shape="linear", legendgroup=name), row=1, col=1)
-        figure.add_trace(
-            _line(power_x, power_y, name, color, shape="hv", width=1.25, legendgroup=name, showlegend=False),
-            row=2,
-            col=1,
-        )
+        if not single_unit:
+            figure.add_trace(
+                _line(power_x, power_y, name, color, shape="hv", width=1.25, legendgroup=name, showlegend=False),
+                row=2,
+                col=1,
+            )
+            continue
+        for label, power_color, clip in (("放电", "#54A24B", max), ("充电", "#F58518", min)):
+            red, green, blue = hex_to_rgb(power_color)
+            figure.add_trace(
+                _line(
+                    power_x,
+                    [None if value is None else clip(value, 0.0) for value in power_y],
+                    label,
+                    power_color,
+                    shape="hv",
+                    width=1.0,
+                    fill="tozeroy",
+                    fillcolor=f"rgba({red}, {green}, {blue}, 0.35)",
+                ),
+                row=2,
+                col=1,
+            )
     figure.add_hline(y=0, line_color="#1F1F1F", line_width=0.8, row=2, col=1)
     figure.update_yaxes(title_text="荷电状态（%）", range=[0, 100], row=1, col=1)
     figure.update_yaxes(title_text="净功率（MW）<br>正值放电／负值充电", row=2, col=1)
@@ -365,54 +399,182 @@ def industry_dispatch(tables: dict[str, pd.DataFrame]) -> go.Figure:
     return _finish(figure, title, 820)
 
 
-def pay_as_bid_order_book(tables: dict[str, pd.DataFrame]) -> go.Figure:
-    """第一个产品的供给订单簿；按报价结算市场中只有发电机组的报价。"""
+def household_dispatch(tables: dict[str, pd.DataFrame]) -> go.Figure:
+    """各居民的电价、电池充放电功率、SOC 及电网购电功率。"""
 
-    market = tables["market"].iloc[0]
-    start = market["delivery_start"]
-    columns = ["unit_name", "bid_price_eur_per_mwh", "offered_energy_mwh", "accepted_energy_mwh"]
-    units = tables["unit"][tables["unit"]["delivery_start"] == start]
-    # unit_results.csv merges split offers at a volume-weighted price; use the
-    # individual orders from offer_results.csv wherever they were written.
-    offers = tables.get("offer", units.iloc[0:0])
-    detailed = offers[offers["delivery_start"] == start]
-    book = pd.concat(
-        [detailed[columns], units[~units["unit_name"].isin(detailed["unit_name"])][columns]]
-    ).sort_values(["bid_price_eur_per_mwh", "unit_name"], kind="stable")
-    offered_end = book["offered_energy_mwh"].cumsum()
-    offered_start = offered_end - book["offered_energy_mwh"]
-    accepted_end = offered_start + book["accepted_energy_mwh"]
-    traded = book["accepted_energy_mwh"] > ENERGY_TOLERANCE_MWH
-    untraded = accepted_end < offered_end - ENERGY_TOLERANCE_MWH
-
-    average_price = market["average_trade_price_eur_per_mwh"]
-    prices = [*book["bid_price_eur_per_mwh"], *([average_price] if pd.notna(average_price) else [])]
-    padding = max([abs(price) for price in prices] + [1.0]) * 0.08
-    price_range = [min(prices, default=0.0) - padding, max(prices, default=0.0) + padding]
-    energy_end = max(offered_end.max() if len(book) else 0.0, market["requested_demand_energy_mwh"], market["cleared_energy_mwh"])
-
-    figure = go.Figure()
-    figure.add_trace(_segments(offered_start[traded], accepted_end[traded], book[traded], "已成交供给电量", "#54A24B", 7))
-    figure.add_trace(_segments(accepted_end[untraded], offered_end[untraded], book[untraded], "未成交供给电量", "#B8B8B8", 4))
-    for energy, label, color, dash in (
-        (market["requested_demand_energy_mwh"], "申报需求电量", "#7F7F7F", "dash"),
-        (market["cleared_energy_mwh"], "成交电量", "#1F1F1F", "dot"),
-    ):
-        figure.add_trace(_line([energy, energy], price_range, label, color, shape="linear", dash=dash, width=1.2))
-    if pd.notna(average_price):
-        figure.add_trace(
-            _line([0.0, energy_end], [average_price] * 2, "平均成交电价", "#2F5597", shape="linear", dash="dashdot", width=1.4)
-        )
-    if book.empty:
-        _annotate_empty(figure, "暂无供给报价")
-    figure.update_xaxes(title_text="累计申报供给电量（MWh）", range=[0, energy_end * 1.03 or 1.0])
-    figure.update_yaxes(title_text="报价／平均成交电价（欧元/MWh）")
-    return _finish(
-        figure,
-        f"按报价结算的供给订单与成交——{start:%Y-%m-%d %H:%M}",
-        520,
-        hovermode="closest",
+    household = tables["household"].sort_values(["unit_name", "delivery_start"], kind="stable")
+    has_costs = all(column in household for column in HOUSEHOLD_DISPATCH_COST_COLUMNS)
+    figure = make_subplots(
+        rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=(1.2, 0.9, 0.8, 1.1),
+        subplot_titles=["电价", "电池充放电功率（充电为正、放电为负）", "电池 SOC", "电网购电功率"],
     )
+    names = sorted(household["unit_name"].unique())
+    for name in names:
+        rows = household[household["unit_name"] == name]
+        prefix = f"{name} " if len(names) > 1 else ""
+        step_x = [*rows["delivery_start"], rows["delivery_end"].iloc[-1]]
+        hours = (rows["delivery_end"] - rows["delivery_start"]).dt.total_seconds() / 3600
+        step = {"shape": "hv", "legendgroup": name}
+        figure.add_trace(
+            _line(step_x, _repeat_last(rows["forecast_price_eur_per_mwh"]), f"{prefix}预测电价（优化依据）",
+                  "#F58518", dash="dash", width=1.3, **step),
+            row=1, col=1,
+        )
+        if has_costs:
+            figure.add_trace(
+                _line(step_x, _repeat_last(rows["actual_price_eur_per_mwh"]), f"{prefix}实际成交均价（结算依据）",
+                      "#2F5597", width=1.3, **step),
+                row=1, col=1,
+            )
+        for label, values, color in (
+            ("充电", rows["battery_charge_power_mw"] * 1000, "#54A24B"),
+            ("放电", -rows["battery_discharge_power_mw"] * 1000, "#E45756"),
+        ):
+            red, green, blue = hex_to_rgb(color)
+            figure.add_trace(
+                _line(step_x, _repeat_last(values), f"{prefix}{label}", color, width=0.8, fill="tozeroy",
+                      fillcolor=f"rgba({red}, {green}, {blue}, 0.45)", **step),
+                row=2, col=1,
+            )
+        figure.add_trace(
+            _line([rows["delivery_start"].iloc[0], *rows["delivery_end"]],
+                  [rows["soc_before"].iloc[0] * 100, *(rows["soc_after"] * 100)],
+                  f"{prefix}SOC", "#2F5597", shape="linear", legendgroup=name),
+            row=3, col=1,
+        )
+        figure.add_trace(
+            _line(step_x, _repeat_last(rows["minimum_grid_power_mw"]), f"{prefix}灵活性下界", "#9ECAE9",
+                  width=0.5, showlegend=False, **step),
+            row=4, col=1,
+        )
+        figure.add_trace(
+            _line(step_x, _repeat_last(rows["maximum_grid_power_mw"]), f"{prefix}灵活性区间（成本容忍度内）",
+                  "#9ECAE9", width=0.5, fill="tonexty", fillcolor="rgba(158, 202, 233, 0.35)", **step),
+            row=4, col=1,
+        )
+        if has_costs:
+            figure.add_trace(
+                _line(step_x, _repeat_last(rows["baseline_grid_energy_mwh"] / hours), f"{prefix}基准购电（不使用电池）",
+                      "#1F1F1F", dash="dash", width=1.1, **step),
+                row=4, col=1,
+            )
+            grid_power, grid_label = rows["accepted_grid_energy_mwh"] / hours, "实际购电（优化后）"
+        else:
+            grid_power, grid_label = rows["planned_grid_power_mw"], "计划购电"
+        figure.add_trace(
+            _line(step_x, _repeat_last(grid_power), f"{prefix}{grid_label}", "#4C78A8", width=1.4, **step),
+            row=4, col=1,
+        )
+    figure.add_hline(y=0, line_color="#1F1F1F", line_width=0.8, row=2, col=1)
+    figure.update_yaxes(title_text="电价（欧元/MWh）", row=1, col=1)
+    figure.update_yaxes(title_text="功率（kW）", row=2, col=1)
+    figure.update_yaxes(title_text="SOC（%）", rangemode="tozero", row=3, col=1)
+    figure.update_yaxes(title_text="功率（MW）", row=4, col=1)
+    figure.update_xaxes(title_text="交付开始时间", row=4, col=1)
+    return _finish(figure, "居民调度", 980)
+
+
+def household_savings(tables: dict[str, pd.DataFrame]) -> go.Figure:
+    """各居民相对不使用电池基准方案的累计节省、每日节省及每日购电支付，并标明对照是否可比。
+
+    只有每个时段的缺电量、缺热量都与基准相同且期末 SOC 不低于基准时，支付差额才是同等服务下的节省；
+    结果缺少对照列时只显示提示。
+    """
+
+    title = "居民购电成本与节省（对比：不使用电池的基准方案）"
+    missing = [column for column in HOUSEHOLD_SAVING_COLUMNS if column not in tables["household"]]
+    if missing:
+        figure = go.Figure()
+        _annotate_empty(figure, "结果缺少对照数据（" + "、".join(missing) + "），请重新运行仿真生成")
+        figure.update_xaxes(visible=False)
+        figure.update_yaxes(visible=False)
+        return _finish(figure, title, 320)
+
+    household = tables["household"].sort_values(["unit_name", "delivery_start"], kind="stable").copy()
+    household["service_gap"] = (
+        (household["unmet_electricity_mwh"] - household["baseline_unmet_electricity_mwh"]).abs()
+        + (household["unmet_heat_mwh_th"] - household["baseline_unmet_heat_mwh_th"]).abs()
+    )
+    household["day"] = household["delivery_start"].dt.floor("D")
+    figure = make_subplots(
+        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.07, row_heights=(1.2, 1, 1),
+        subplot_titles=[
+            "相对不使用电池的累计节省",
+            "每日实际节省（斜线表示当天缺供量与基准不同）",
+            "每日购电支付",
+        ],
+    )
+    names = sorted(household["unit_name"].unique())
+    notes = []
+    all_comparable = True
+    for index, name in enumerate(names):
+        rows = household[household["unit_name"] == name]
+        prefix = f"{name} " if len(names) > 1 else ""
+        cumulative_x = [rows["delivery_start"].iloc[0], *rows["delivery_end"]]
+        figure.add_trace(
+            _line(cumulative_x, [0.0, *rows["actual_saving_eur"].cumsum()], f"{prefix}实际节省（按实际成交价）",
+                  "#54A24B", shape="linear", width=1.8, legendgroup=name),
+            row=1, col=1,
+        )
+        daily = rows.groupby("day")[["actual_saving_eur", "baseline_payment_eur", "payment_eur", "service_gap"]].sum()
+        days = daily.index + pd.Timedelta(hours=12)
+        figure.add_trace(
+            go.Bar(
+                x=days, y=daily["actual_saving_eur"], name=f"{prefix}每日实际节省", legendgroup=name,
+                marker_color=["#54A24B" if value >= 0 else "#E45756" for value in daily["actual_saving_eur"]],
+                marker_pattern_shape=[
+                    "/" if gap > COMPARISON_TOLERANCE else "" for gap in daily["service_gap"]
+                ],
+                hovertemplate="%{x|%Y-%m-%d}<br>节省：%{y:,.2f} 欧元<extra></extra>",
+            ),
+            row=2, col=1,
+        )
+        for label, column, color in (
+            ("基准支付（不使用电池）", "baseline_payment_eur", "#BAB0AC"),
+            ("实际支付（优化后）", "payment_eur", "#4C78A8"),
+        ):
+            figure.add_trace(
+                go.Bar(x=days, y=daily[column], name=f"{prefix}{label}", marker_color=color, legendgroup=name,
+                       hovertemplate=f"%{{x|%Y-%m-%d}}<br>{label}：%{{y:,.2f}} 欧元<extra></extra>"),
+                row=3, col=1,
+            )
+
+        baseline = rows["baseline_payment_eur"].sum()
+        saving = rows["actual_saving_eur"].sum()
+        # 逐时段比较，不同时段的缺供差不会相互抵消；净差仅供参考。
+        electricity_gap = rows["unmet_electricity_mwh"] - rows["baseline_unmet_electricity_mwh"]
+        heat_gap = rows["unmet_heat_mwh_th"] - rows["baseline_unmet_heat_mwh_th"]
+        electricity_mismatch, heat_mismatch = electricity_gap.abs().sum(), heat_gap.abs().sum()
+        soc_gap = rows["soc_after"].iloc[-1] - rows["baseline_soc_after"].iloc[-1]
+        comparable = (
+            electricity_mismatch <= COMPARISON_TOLERANCE
+            and heat_mismatch <= COMPARISON_TOLERANCE
+            and soc_gap >= -COMPARISON_TOLERANCE
+        )
+        all_comparable &= comparable
+        share = f"（{saving / baseline:.2%}）" if baseline else ""
+        verdict = "对照可比" if comparable else "<b>对照不可比：实际节省不构成同等服务下的节省</b>"
+        notes.append(
+            f"{name}：实际节省 {saving:,.2f} 欧元{share}；"
+            f"{verdict}<br>缺电量逐时段不一致 {electricity_mismatch:.6f} MWh（净差 {electricity_gap.sum():+.6f}），"
+            f"缺热量逐时段不一致 {heat_mismatch:.6f} MWh_th（净差 {heat_gap.sum():+.6f}），"
+            f"期末 SOC 差 {soc_gap * 100:+.2f} 个百分点"
+        )
+    figure.add_hline(y=0, line_color="#1F1F1F", line_width=0.8, row=1, col=1)
+    figure.add_hline(y=0, line_color="#1F1F1F", line_width=0.8, row=2, col=1)
+    figure.add_annotation(
+        text="<br>".join(notes), x=0.01, y=0.99, xref="x domain", yref="y domain", xanchor="left",
+        yanchor="top", showarrow=False, align="left", bgcolor="rgba(255, 255, 255, 0.85)",
+        bordercolor="#D1D5DB" if all_comparable else "#E45756",
+    )
+    figure.update_yaxes(title_text="累计节省（欧元）", row=1, col=1)
+    figure.update_yaxes(title_text="节省（欧元）", row=2, col=1)
+    figure.update_yaxes(title_text="支付（欧元）", row=3, col=1)
+    figure.update_xaxes(title_text="交付日期", row=3, col=1)
+    figure.update_layout(barmode="group")
+    if not all_comparable:
+        title += "<br><sup><span style='color:#E45756'>对照不可比</span></sup>"
+    return _finish(figure, title, 900)
 
 
 def _price(market: pd.DataFrame) -> tuple[pd.Series, str]:
@@ -471,25 +633,6 @@ def _line(x, y, name: str, color: str, *, shape: str = "hvh", dash: str | None =
         mode="lines",
         line={"color": color, "shape": shape, "dash": dash, "width": width},
         **trace,
-    )
-
-
-def _segments(starts, ends, book: pd.DataFrame, name: str, color: str, width: float) -> go.Scatter:
-    """绘制订单簿的水平线段，并为每段加入中点，使悬停在线段任意位置都能显示该报价。"""
-
-    x, y, text = [], [], []
-    for start, end, price, unit in zip(starts, ends, book["bid_price_eur_per_mwh"], book["unit_name"]):
-        x += [start, (start + end) / 2, end, None]
-        y += [price, price, price, None]
-        text += [unit, unit, unit, None]
-    return go.Scatter(
-        x=x,
-        y=y,
-        text=text,
-        name=name,
-        mode="lines",
-        line={"color": color, "width": width},
-        hovertemplate="%{text}<br>报价：%{y:.2f} 欧元/MWh<br>累计电量：%{x:,.1f} MWh<extra></extra>",
     )
 
 

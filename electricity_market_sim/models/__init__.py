@@ -23,10 +23,13 @@ from .clearing import (
 )
 from .demand import DemandUnit, ExchangeSchedule, ExchangeUnit
 from .household import (
+    HouseholdCostResult,
     HouseholdDispatchResult,
     HouseholdFlexibilityResult,
     HouseholdPlan,
+    HouseholdSavingSummary,
     HouseholdUnit,
+    summarize_household_savings,
 )
 from .industry import (
     IndustrialDevice,

@@ -3,7 +3,11 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from .clearing import MarketClearingResult
-from .household import HouseholdDispatchResult, HouseholdFlexibilityResult
+from .household import (
+    HouseholdCostResult,
+    HouseholdDispatchResult,
+    HouseholdFlexibilityResult,
+)
 from .industry import (
     IndustrialDispatchResult,
     IndustrialFlexibilityResult,
@@ -27,3 +31,4 @@ class SimulationResult:
     industry_optimization_windows: tuple[IndustrialOptimizationWindowResult, ...] = ()
     learning_steps: tuple[LearningStepResult, ...] = ()
     learning_transitions: tuple[LearningTransition, ...] = ()
+    household_cost_results: tuple[HouseholdCostResult, ...] = ()

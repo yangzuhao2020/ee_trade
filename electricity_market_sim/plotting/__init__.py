@@ -16,7 +16,7 @@ from .dispatch import (
     _plot_storage_dispatch,
 )
 from .industry import _plot_industry_dispatch
-from .household import _plot_household_dispatch
+from .household import _plot_household_dispatch, _plot_household_savings
 from .learning import (
     _plot_evaluation_comparison,
     _plot_learning_curves,
@@ -72,7 +72,12 @@ def generate_plots(
     try:
         paths = [
             _plot_market_overview(
-                pyplot, dates, results, plot_directory / "market_overview.png"),
+                pyplot, dates, results, plot_directory / "market_overview.png",
+                forecast_prices={
+                    household.delivery_start: household.forecast_price_eur_per_mwh
+                    for household in result.household_results
+                },
+            ),
             _plot_market_summary(
                 pyplot, dates, results, plot_directory / "market_summary.png"),
             _plot_dispatch_by_unit(
@@ -117,18 +122,36 @@ def generate_plots(
         else:
             industry_plot_path.unlink(missing_ok=True)
         household_plot_path = plot_directory / "household_dispatch.png"
+        household_zoom_path = plot_directory / "household_dispatch_zoom.png"
         if result.household_results:
+            for path, days in ((household_plot_path, None), (household_zoom_path, 3)):
+                paths.append(
+                    _plot_household_dispatch(
+                        pyplot,
+                        dates,
+                        result.household_results,
+                        result.household_flexibility_results,
+                        result.household_cost_results,
+                        path,
+                        days=days,
+                    )
+                )
+        else:
+            household_plot_path.unlink(missing_ok=True)
+            household_zoom_path.unlink(missing_ok=True)
+        household_savings_path = plot_directory / "household_savings.png"
+        if result.household_cost_results:
             paths.append(
-                _plot_household_dispatch(
+                _plot_household_savings(
                     pyplot,
                     dates,
                     result.household_results,
-                    results,
-                    household_plot_path,
+                    result.household_cost_results,
+                    household_savings_path,
                 )
             )
         else:
-            household_plot_path.unlink(missing_ok=True)
+            household_savings_path.unlink(missing_ok=True)
         if result.learning_steps:
             paths.append(
                 _plot_learning_unit(

@@ -50,12 +50,15 @@ def _validate_plot_data(results: tuple[MarketClearingResult, ...]) -> None:
             )
         if not isclose(
             market.requested_demand_mwh,
-            market.cleared_energy_mwh + market.unserved_demand_mwh,
+            market.cleared_energy_mwh
+            + market.unserved_demand_mwh
+            + market.unaccepted_storage_charge_mwh,
             rel_tol=0.0,
             abs_tol=_ENERGY_TOLERANCE_MWH,
         ):
             raise PlottingError(
-                "Demand energy must equal cleared energy plus unmet demand for "
+                "Demand energy must equal cleared energy plus unmet demand and "
+                "unaccepted storage charge for "
                 f"{market.delivery_start:%Y-%m-%d %H:%M}."
             )
 

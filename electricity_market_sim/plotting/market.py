@@ -58,11 +58,17 @@ def _market_price_series(
     )
 
 
-def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
+def _plot_market_overview(
+    pyplot, dates, results, path: Path, forecast_prices: dict | None = None
+) -> Path:
+    """forecast_prices 非空时（居民场景），在价格子图叠加居民优化所用的预测电价。"""
     times = [market.delivery_start for market in results]
     prices, price_label = _market_price_series(results)
     price_label = {"Clearing price": "出清电价", "Average trade price": "平均成交电价"}[price_label]
-    requested_demand = [market.requested_demand_mwh for market in results]
+    requested_demand = [
+        market.requested_demand_mwh - market.requested_storage_charge_mwh
+        for market in results
+    ]
 
     def by_type(attribute: str, demand_type: str) -> list[float]:
         return [
@@ -74,7 +80,6 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
         (by_type("accepted_energy_mwh", "household_load"), "#72B7B2", "已成交的居民用电需求"),
         (by_type("accepted_energy_mwh", "industrial_load"), "#D4A72C", "已成交的工业用电需求"),
         (by_type("accepted_energy_mwh", "elastic_load"), "#54A24B", "已成交的弹性需求"),
-        (by_type("accepted_energy_mwh", "storage_charge"), "#E45756", "已成交的储能充电需求"),
         ([market.cleared_export_mwh for market in results], "#F58518", "已成交的外送需求"),
     )
     demand_types = {demand.bid.demand_type for market in results for demand in market.demand_bids}
@@ -83,7 +88,6 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
         ("elastic_load", by_type("unserved_energy_mwh", "elastic_load"), "#7F7F7F", "未成交的弹性需求"),
         ("household_load", by_type("unserved_energy_mwh", "household_load"), "#72B7B2", "未成交的居民用电需求"),
         ("industrial_load", by_type("unserved_energy_mwh", "industrial_load"), "#D4A72C", "未成交的工业用电需求"),
-        ("storage_charge", by_type("unserved_energy_mwh", "storage_charge"), "#B279A2", "未成交的储能充电需求"),
         ("export", [market.unfulfilled_export_mwh for market in results], "#F58518", "未满足的外送需求"),
     )
     unaccepted_panels = [panel for panel in unaccepted_lines if panel[0] in demand_types]
@@ -105,6 +109,16 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
         linewidth=1.6,
         label=price_label,
     )
+    if forecast_prices:
+        price_axis.step(
+            times,
+            [forecast_prices.get(time, float("nan")) for time in times],
+            where="mid",
+            color="#F58518",
+            linewidth=1.2,
+            linestyle="--",
+            label="预测电价（居民优化使用）",
+        )
     price_axis.set_title(price_label, loc="left", fontsize=10)
     price_axis.set_ylabel("电价（欧元/MWh）")
     price_axis.grid(axis="y", alpha=0.25)
@@ -135,7 +149,7 @@ def _plot_market_overview(pyplot, dates, results, path: Path) -> Path:
         where="mid",
         color="#1F1F1F",
         linewidth=1.1,
-        label="总申报需求",
+        label="总申报需求（不含储能充电）",
     )
     demand_axis.set_title("成交需求与总申报需求", loc="left", fontsize=10)
     demand_axis.set_ylabel("电量（MWh）")

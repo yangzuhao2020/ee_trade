@@ -328,8 +328,18 @@ class MarketClearingResult:
 
     @property
     def unserved_demand_mwh(self) -> float:
-        """全部未被接受的需求，包括对价格敏感的弹性需求报价。"""
-        return self.demand_total("unserved_energy_mwh")
+        """除储能充电外全部未被接受的需求，包括对价格敏感的弹性需求报价。
+        储能未成交充电是未执行的充电计划，不属于未满足需求，由 unaccepted_storage_charge_mwh 单独统计。
+        """
+        return self.demand_total("unserved_energy_mwh") - self.unaccepted_storage_charge_mwh
+
+    @property
+    def requested_storage_charge_mwh(self) -> float:
+        return self.demand_total("bid.volume_mwh", demand_type="storage_charge")
+
+    @property
+    def unaccepted_storage_charge_mwh(self) -> float:
+        return self.demand_total("unserved_energy_mwh", demand_type="storage_charge")
 
     @property
     def unaccepted_elastic_demand_mwh(self) -> float:

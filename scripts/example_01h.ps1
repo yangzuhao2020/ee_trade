@@ -1,4 +1,4 @@
-# Run one or all scenarios from examples/input/example_01h.
+# Run one or all scenarios from examples/input/example_01h_saving.
 # PowerShell port of example_01h.sh.
 
 $ErrorActionPreference = "Stop"
@@ -9,11 +9,12 @@ Usage:
   ./scripts/example_01h.ps1 [SCENARIO|all] [simulator options]
 
 Examples:
-  ./scripts/example_01h.ps1 --no-plots       # defaults to eom
-  ./scripts/example_01h.ps1 eom --no-plots
+  ./scripts/example_01h.ps1 --no-plots       # defaults to base
+  ./scripts/example_01h.ps1 base --no-plots
   ./scripts/example_01h.ps1 all
 
-Outputs are written to outputs/example_01h/SCENARIO.
+Inputs are read from examples/input/example_01h_saving.
+Outputs are written to outputs/example_01h_saving/SCENARIO.
 "@
 }
 
@@ -23,7 +24,7 @@ if ($args.Count -gt 0 -and $args[0] -eq "--help") {
 }
 
 $projectDir = Split-Path $PSScriptRoot -Parent
-$datasetName = "example_01h"
+$datasetName = "example_01h_saving"
 $inputDir = Join-Path $projectDir "examples/input/$datasetName"
 $configFile = Join-Path $inputDir "config.yaml"
 

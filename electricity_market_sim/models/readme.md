@@ -32,7 +32,7 @@
 | [plants.py](plants.py) | `PowerPlant` | 发电机组参数及边际成本计算 |
 | [demand.py](demand.py) | `DemandUnit`、`ExchangeUnit`、`ExchangeSchedule` | 普通需求参与者与计划进出口 |
 | [storage.py](storage.py) | `StorageUnit`、`StorageClearingContext`、`StorageDispatchResult` | 储能参数、联合出清上下文与运行结果 |
-| [household.py](household.py) | `HouseholdUnit`、`HouseholdPlan`、`HouseholdDispatchResult`、`HouseholdFlexibilityResult` | 居民建筑参数、计划、实际运行与灵活性范围 |
+| [household.py](household.py) | `HouseholdUnit`、`HouseholdPlan`、`HouseholdDispatchResult`、`HouseholdCostResult`、`HouseholdFlexibilityResult` | 居民建筑参数、计划、实际运行、购电成本对比与灵活性范围 |
 | [industry.py](industry.py) | `IndustrialDevice`、`IndustrialUnit`、`IndustrialPlan`、`IndustrialDispatchResult`、`IndustrialFlexibilityResult`、`IndustrialOptimizationWindowResult` | 工业钢铁厂设备、生产计划、运行及滚动优化结果 |
 | [learning.py](learning.py) | `LearningConfig`、`LearningPeriod`、`LearningStepResult`、`LearningTransition` | 学习配置与数据时段、逐时段动作与奖励、经验回放记录 |
 | [orders.py](orders.py) | `DemandBid`、`SupplyOffer` | 出清前的买单与卖单 |
@@ -187,6 +187,8 @@ flowchart TD
 | --- | --- |
 | `HouseholdPlan` | 基于预测电价与热需求计算的电网用电、热泵功率和电池放电计划 |
 | `HouseholdDispatchResult` | 对应买单出清后的运行结果，包括设备功率、SOC 变化、未满足电量和未满足热量；同时保留部分预测及计划字段 |
+| `HouseholdCostResult` | 单个产品的实际成交电量与支付，以及不使用电池基准方案的成交电量、支付、缺供量、SOC 和按预测电价的计划节省；`actual_saving_eur = 基准支付 − 实际支付` |
+| `HouseholdSavingSummary` | 由 `summarize_household_savings` 按居民汇总的支付、节省，缺电量、缺热量与基准的净差及逐时段绝对差之和，以及期末 SOC 差；`comparable` 要求逐时段缺供完全一致且期末 SOC 不低于基准 |
 | `HouseholdFlexibilityResult` | 在成本容忍度内，单个已计划产品的电网功率上下界 |
 
 `planned_*` 字段表示计划值。成交受限时，计划值与运行结果可能不同。
@@ -255,7 +257,8 @@ flowchart TD
 `MarketClearingResult` 中几个统计口径需要区分：
 
 - `requested_demand_mwh`：所有买单的申报电量之和，可能包含本地负荷、出口和储能充电等。
-- `unserved_demand_mwh`：所有买单的未成交电量之和。
+- `unserved_demand_mwh`：除储能充电以外所有买单的未成交电量之和。储能未成交充电是未执行的充电计划，不属于未满足需求。
+- `requested_storage_charge_mwh`、`unaccepted_storage_charge_mwh`：储能充电的申报电量和未成交电量。`requested_demand_mwh` 等于成交电量、`unserved_demand_mwh` 与 `unaccepted_storage_charge_mwh` 之和。
 - `unserved_load_mwh`：仅统计 `demand_type="inelastic_load"` 的未满足电量。弹性、居民、工业、出口和储能充电类别不计入该字段。
 - `unaccepted_elastic_demand_mwh`：仅统计未成交的弹性需求，避免将价格响应误记为非自愿限电。
 - `unfulfilled_export_mwh`：未成交的出口电量。
@@ -291,6 +294,7 @@ flowchart TD
 | `industry_optimization_windows` | 工业滚动优化窗口与成本结果 |
 | `learning_steps` | 学习动作、成交结果与奖励 |
 | `learning_transitions` | 经验回放记录 |
+| `household_cost_results` | 居民实际支付与不使用电池基准方案的对比 |
 
 `settings` 和 `market_results` 是必填字段。其余结果序列默认是空元组 `()`。某个结果序列为空表示本次结果对象没有该类记录，读取时应按实际场景处理。学习观测已删除负荷输入，结果对象不再保存负荷归一化基数。
 
