@@ -16,7 +16,6 @@ from .market import _chinese_font_families
 
 
 _POWER_TOLERANCE_MW = 1e-9
-_SERVICE_TOLERANCE = 1e-6
 _COLORS = {
     "forecast": "#F58518",
     "actual_price": "#2F5597",
@@ -126,14 +125,14 @@ def _plot_household_dispatch(
         price_axis.step(
             edges, stepped([row.forecast_price_eur_per_mwh for row in rows]),
             where="post", color=_COLORS["forecast"], linewidth=1.3, linestyle="--",
-            label="预测电价（优化依据）",
+            label=f"{unit_name} 预测购电价（优化依据）",
         )
         price_axis.step(
             edges, stepped(actual_prices), where="post",
-            color=_COLORS["actual_price"], linewidth=1.3, label="实际成交均价（结算依据）",
+            color=_COLORS["actual_price"], linewidth=1.3, label=f"{unit_name} 实际购电均价",
         )
         price_axis.set_title(
-            f"{unit_name}：电价与电池动作（绿色背景为充电，红色背景为放电）",
+            f"{unit_name}：居民购电价格与电池动作（绿色背景为充电，红色背景为放电）",
             loc="left", fontsize=10,
         )
         price_axis.set_ylabel("电价（欧元/MWh）")
@@ -215,10 +214,9 @@ def _plot_household_savings(
     cost_results: tuple[HouseholdCostResult, ...],
     path: Path,
 ) -> Path:
-    """绘制各居民相对不使用电池基准方案的累计节省、每日节省及每日购电支付。
+    """绘制各居民相对不使用电池基准方案的累计节省。
 
-    对照不可比（缺供量不同或期末 SOC 低于基准）时标题标红；
-    当天缺供量与基准不同的柱子加斜线。
+    对照不可比（缺供量不同或期末 SOC 低于基准）时标题标红。
     """
 
     costs_by_unit = _by_unit(cost_results)
@@ -227,18 +225,17 @@ def _plot_household_savings(
         summary.unit_name: summary
         for summary in summarize_household_savings(dispatch_results, cost_results)
     }
-    dispatch = {(result.unit_name, result.delivery_start): result for result in dispatch_results}
     figure, axes = pyplot.subplots(
-        3 * len(household_names),
+        len(household_names),
         1,
-        figsize=(16, 10 * len(household_names)),
+        figsize=(16, 4.5 * len(household_names)),
         sharex=True,
         squeeze=False,
     )
 
     for index, unit_name in enumerate(household_names):
         rows = costs_by_unit[unit_name]
-        cumulative_axis, daily_axis, payment_axis = axes[3 * index: 3 * index + 3, 0]
+        cumulative_axis = axes[index, 0]
 
         summary = summaries[unit_name]
         times = [rows[0].delivery_start] + [row.delivery_end for row in rows]
@@ -274,50 +271,7 @@ def _plot_household_savings(
         cumulative_axis.grid(axis="y", alpha=0.25)
         cumulative_axis.legend(loc="lower right", fontsize=8)
 
-        daily: dict[datetime, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0])
-        for row in rows:
-            day = datetime.combine(row.delivery_start.date(), datetime.min.time())
-            result = dispatch[(unit_name, row.delivery_start)]
-            daily[day][0] += row.actual_saving_eur
-            daily[day][1] += row.baseline_payment_eur
-            daily[day][2] += row.payment_eur
-            daily[day][3] += abs(
-                result.unmet_electricity_mwh - row.baseline_unmet_electricity_mwh
-            ) + abs(result.unmet_heat_mwh_th - row.baseline_unmet_heat_mwh_th)
-        days = sorted(daily)
-        centers = [day + timedelta(hours=12) for day in days]
-        savings = [daily[day][0] for day in days]
-        bars = daily_axis.bar(
-            centers, savings, width=0.8,
-            color=[_COLORS["charge"] if value >= 0 else _COLORS["discharge"] for value in savings],
-        )
-        for bar, day in zip(bars, days):
-            if daily[day][3] > _SERVICE_TOLERANCE:
-                bar.set_hatch("//")
-                bar.set_edgecolor("#1F1F1F")
-        daily_axis.axhline(0, color="#1F1F1F", linewidth=0.8)
-        daily_axis.set_title(
-            "每日实际节省（绿色为节省，红色为多花；斜线表示当天缺供量与基准不同）",
-            loc="left", fontsize=10,
-        )
-        daily_axis.set_ylabel("节省（EUR）")
-        daily_axis.grid(axis="y", alpha=0.25)
-
-        offset = timedelta(hours=4.8)
-        payment_axis.bar(
-            [center - offset for center in centers], [daily[day][1] for day in days],
-            width=0.4, color="#BAB0AC", label="基准支付（不使用电池）",
-        )
-        payment_axis.bar(
-            [center + offset for center in centers], [daily[day][2] for day in days],
-            width=0.4, color=_COLORS["grid"], label="实际支付（优化后）",
-        )
-        payment_axis.set_title("每日购电支付", loc="left", fontsize=10)
-        payment_axis.set_ylabel("支付（EUR）")
-        payment_axis.grid(axis="y", alpha=0.25)
-        payment_axis.legend(loc="upper right", ncol=2, fontsize=8)
-
-    axes[-1, 0].set_xlabel("交付日期")
+    axes[-1, 0].set_xlabel("交付时间")
     _format_time_axis(axes[-1, 0], dates)
     figure.suptitle("居民购电成本与节省（对比：不使用电池的基准方案）")
     _apply_chinese_fonts(figure)

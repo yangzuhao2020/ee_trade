@@ -324,6 +324,8 @@ class ReportingContracts(unittest.TestCase):
 class StorageChargeCharts(unittest.TestCase):
     def setUp(self):
         bid, offer = orders(START)
+        household = DemandBid("household", "operator", START, START + HOUR, 0.5, 100.0,
+                              demand_type="household_load")
         charge = DemandBid("storage", "operator", START, START + HOUR, 2.0, 5.0,
                            bid_type="storage_charge")
         storage = StorageDispatchResult(
@@ -334,17 +336,36 @@ class StorageChargeCharts(unittest.TestCase):
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         write_results(Path(directory.name), SimulationResult(
-            SETTINGS, (clear_pay_as_clear([bid, charge], [offer]),), (storage,)))
+            SETTINGS, (clear_pay_as_clear([bid, household, charge], [offer]),), (storage,)))
         self.tables = charts.load_run(Path(directory.name))
 
-    def test_market_overview_excludes_storage_charge(self):
+    def test_market_overview_only_shows_household_requested_demand(self):
         figure = charts.market_overview(self.tables)
+        self.assertNotIn("总申报需求（不含储能充电）", [trace.name for trace in figure.data])
         self.assertNotIn("已成交的储能充电需求", [trace.name for trace in figure.data])
         self.assertNotIn("未成交的储能充电需求",
                          [item.text for item in figure.layout.annotations])
         (requested,) = [trace for trace in figure.data
-                        if trace.name == "总申报需求（不含储能充电）"]
-        self.assertEqual(list(requested.y), [1.0])
+                        if trace.name == "居民申报需求"]
+        self.assertEqual(list(requested.y), [0.5])
+
+    def test_market_overview_without_households_keeps_market_demand(self):
+        bid, offer = orders(START, quantity=2.0)
+        elastic = DemandBid("elastic", "operator", START, START + HOUR, 0.5, 50.0,
+                            demand_type="elastic_load")
+        charge = DemandBid("storage", "operator", START, START + HOUR, 2.0, 5.0,
+                           bid_type="storage_charge")
+        with TemporaryDirectory() as directory:
+            write_results(Path(directory), SimulationResult(
+                SETTINGS, (clear_pay_as_clear([bid, elastic, charge], [offer]),)))
+            figure = charts.market_overview(charts.load_run(Path(directory)))
+        traces = {trace.name: trace for trace in figure.data}
+        self.assertNotIn("居民申报需求", traces)
+        self.assertNotIn("已成交的居民用电需求", traces)
+        self.assertEqual(list(traces["总申报需求（不含储能充电）"].y), [1.5])
+        self.assertEqual(list(traces["已满足的刚性负荷"].y), [1.0])
+        self.assertEqual(list(traces["已成交的弹性需求"].y), [0.5])
+        self.assertIn("未满足的刚性负荷", [item.text for item in figure.layout.annotations])
 
     def test_single_storage_power_is_colored_by_direction(self):
         figure = charts.storage_dispatch(self.tables)
@@ -430,6 +451,33 @@ def _write_household_scenario(directory, battery_power_mw, *, min_soc=0, initial
 
 
 class HouseholdSavingContracts(unittest.TestCase):
+    def test_positive_solar_quote_is_used_in_optimized_and_baseline_payments(self):
+        from electricity_market_sim.simulation import simulate
+
+        with TemporaryDirectory() as directory:
+            path = _write_household_scenario(directory, 0.5)
+            plants_path = path / "powerplant_units.csv"
+            with plants_path.open(encoding="utf-8", newline="") as stream:
+                plants = list(csv.DictReader(stream))
+            for plant in plants:
+                plant["bid_price"] = 20 if plant["name"] == "cheap" else ""
+            _write_csv(plants_path, list(plants[0]), [list(row.values()) for row in plants])
+            forecast_path = path / "forecasts_df.csv"
+            with forecast_path.open(encoding="utf-8", newline="") as stream:
+                forecasts = list(csv.DictReader(stream))
+            for row in forecasts:
+                if float(row["price_EOM"]) == 0:
+                    row["price_EOM"] = 20
+            _write_csv(forecast_path, list(forecasts[0]),
+                       [list(row.values()) for row in forecasts])
+            result = simulate(path)
+        summary = self.summary(result)
+        self.assertTrue(summary.comparable)
+        # 首个产品从 00:15 开始：低价时段 11.75 h，高价时段 12 h。
+        self.assertAlmostEqual(summary.baseline_payment_eur, 835)
+        self.assertAlmostEqual(summary.payment_eur, 805)
+        self.assertAlmostEqual(summary.actual_saving_eur, 30)
+
     def simulate(self, battery_power_mw, **battery):
         from electricity_market_sim.simulation import simulate
 
@@ -527,8 +575,7 @@ class HouseholdSavingContracts(unittest.TestCase):
         tables["household"].loc[0, "unmet_heat_mwh_th"] = 0.25
         figure = charts.household_savings(tables)
         self.assertIn("对照不可比", figure.layout.title.text)
-        daily = [trace for trace in figure.data if trace.name == "每日实际节省"][0]
-        self.assertEqual(daily.marker.pattern.shape[0], "/")
+        self.assertIn("缺热量逐时段不一致 0.250000", figure.layout.annotations[-1].text)
 
     def test_offsetting_unmet_heat_in_different_periods_is_not_comparable(self):
         result = self.simulate(0.5)

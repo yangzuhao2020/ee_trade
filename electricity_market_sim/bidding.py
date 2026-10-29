@@ -227,7 +227,7 @@ def naive_offer(
     available_power: float,
     marginal_cost: float,
 ) -> SupplyOffer:
-    """为一台发电机、一个交付时段，生成一张按边际成本报价的卖单 SupplyOffer"""
+    """生成简单卖单：优先使用固定报价，未设置时按边际成本报价。"""
     duration_hours = hours_between(delivery_start, delivery_end)
     offer_id = f"{plant.name}::single::{delivery_start.isoformat()}"
     return SupplyOffer(
@@ -238,7 +238,11 @@ def naive_offer(
         delivery_end=delivery_end,
         offered_power_mw=available_power,
         offered_energy_mwh=available_power * duration_hours,
-        bid_price_eur_per_mwh=marginal_cost,
+        bid_price_eur_per_mwh=(
+            plant.bid_price_eur_per_mwh
+            if plant.bid_price_eur_per_mwh is not None
+            else marginal_cost
+        ),
         marginal_cost_eur_per_mwh=marginal_cost,
         offer_id=offer_id,
         bid_id=offer_id,

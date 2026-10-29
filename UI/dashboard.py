@@ -53,7 +53,7 @@ def results_state(run_dir: Path) -> tuple:
 
 @st.cache_data(show_spinner="正在读取结果 CSV…", max_entries=8)
 def load_charts(run_dir: str, files_state: tuple):
-    """构建中文图表，概览图按需求类型拆分未成交电量；CSV 变化时使缓存失效。"""
+    """构建中文图表；有居民需求时展示居民子图，其余场景保留市场供需概览。"""
 
     path = Path(run_dir)
     market_figures = charts.build_charts(charts.load_run(path))

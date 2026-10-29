@@ -127,7 +127,18 @@ def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
             min_down_time_hours=_optional_float(
                 row, "min_down_time", 1.0, path, row_number
             ),
+            bid_price_eur_per_mwh=(
+                _float(row, "bid_price", path, row_number)
+                if (row.get("bid_price") or "").strip()
+                else None
+            ),
         )
+        if (plant.bid_price_eur_per_mwh is not None
+                and strategy != "powerplant_energy_naive"):
+            raise InputValidationError(
+                f"{path.name}, row {row_number}: bid_price is only supported "
+                "for powerplant_energy_naive."
+            )
         if plant.max_power_mw <= 0:
             raise InputValidationError(f"{path.name}, row {row_number}: max_power must be positive.")
         if plant.min_power_mw < 0 or plant.min_power_mw > plant.max_power_mw:

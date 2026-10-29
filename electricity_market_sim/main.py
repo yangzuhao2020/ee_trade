@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 from .config import load_market_settings
 from .errors import SimulationError
-from .models import summarize_household_savings
 from .plotting import generate_learning_plots, generate_plots
 from .simulation import run_simulation
 from .deep_learning.test import evaluate_learning_scenario, run_learning_test
@@ -177,24 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"仿真完成：已将 {len(result.market_results)} 个交付时段的结果写入 "
         f"{arguments.output_dir}。")
-    _print_household_savings(result)
     return 0
-
-
-def _print_household_savings(result) -> None:
-    """按居民汇总与不使用电池的基准方案相比的实际节省、计划节省及对照有效性。"""
-    for summary in summarize_household_savings(
-        result.household_results, result.household_cost_results
-    ):
-        share = summary.actual_saving_share
-        share_text = "" if share is None else f"（{share:.2%}）"
-        print(
-            f"居民 {summary.unit_name}：不使用电池的实际支付 "
-            f"{summary.baseline_payment_eur:,.2f} EUR，优化后 {summary.payment_eur:,.2f} EUR，"
-            f"实际节省 {summary.actual_saving_eur:,.2f} EUR{share_text}；"
-            f"按预测电价的计划节省 {summary.forecast_saving_eur:,.2f} EUR。"
-            f"{summary.describe()}。"
-        )
 
 
 if __name__ == "__main__":

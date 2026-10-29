@@ -18,7 +18,7 @@ _MAX_DISPLAYED_OPERATORS = 20
 
 
 def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
-    """pyplot 用于创建图表，dates 是时间序列，results 是市场结果，path 是保存路径。"""
+    """以非堆叠曲线绘制各机组自身的成交出力。"""
     times = [market.delivery_start for market in results]
     accepted_energy_by_unit: dict[str, float] = defaultdict(float)
     for market in results:
@@ -40,7 +40,6 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
     if other_unit_names:
         series_names.append("Other accepted supply")
     power_by_unit = {name: [] for name in series_names}
-    demand_power: list[float] = []
     marginal_times = []
     marginal_y_positions: list[float] = []
 
@@ -52,7 +51,6 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
             accepted_power["Other accepted supply"] = sum(
                 accepted_power.get(name, 0.0) for name in other_unit_names
             )
-        cumulative_power = 0.0
         for name in series_names:
             unit_power = accepted_power.get(name, 0.0)
             power_by_unit[name].append(unit_power)
@@ -61,12 +59,9 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
                 and market.marginal_unit_name in other_unit_names
             )
             if contains_marginal_unit and unit_power > _ENERGY_TOLERANCE_MWH:
-                # Place the marker inside the displayed band containing the
-                # marginal unit, including the aggregate band when necessary.
+                # 标记对应机组自身的功率；合并单元则标记合并后的功率。
                 marginal_times.append(market.delivery_start)
-                marginal_y_positions.append(cumulative_power + unit_power / 2)
-            cumulative_power += unit_power
-        demand_power.append(market.cleared_power_mw)
+                marginal_y_positions.append(unit_power)
 
     figure, axis = pyplot.subplots(figsize=(16, 7.5)) # 创建画布
     if series_names:
@@ -78,14 +73,15 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
             )
             for index, name in enumerate(series_names)
         ]
-        axis.stackplot(
-            times,
-            *(power_by_unit[name] for name in series_names),
-            labels=series_names,
-            colors=series_colors,
-            alpha=0.78,
-            step="mid",
-        ) # 各机组接受出力的堆叠面积
+        for name, color in zip(series_names, series_colors):
+            axis.step(
+                times,
+                power_by_unit[name],
+                where="mid",
+                color=color,
+                linewidth=1.4,
+                label=name,
+            )
     else:
         axis.plot(
             times,
@@ -97,15 +93,6 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
         )
         _annotate_no_supply(axis)
         axis.set_ylim(bottom=0.0)
-    axis.step(
-        times,
-        demand_power,
-        where="mid",
-        color="#1F1F1F",
-        linewidth=1.2,
-        label="Cleared demand power",
-        zorder=4,
-    ) # Cleared demand power 黑色阶梯线
     if marginal_times:
         axis.scatter(
             marginal_times,
@@ -126,6 +113,7 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
         )
     axis.set_title(title)
     axis.set_ylabel("Power (MW)")
+    axis.set_ylim(bottom=0.0)
     axis.set_xlabel("Delivery start")
     axis.grid(axis="y", alpha=0.25)
     axis.legend(loc="upper left", ncol=3, fontsize=8)

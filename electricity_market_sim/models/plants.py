@@ -23,6 +23,8 @@ class PowerPlant:
     min_operating_time_hours: float = 1.0
     # 为保持兼容性而加载并校验；最小停机时间约束并未实际执行。
     min_down_time_hours: float = 1.0
+    # 简单卖单的可选固定报价；不改变边际成本及利润核算。
+    bid_price_eur_per_mwh: float | None = None
 
     def marginal_cost(self, fuel_prices: dict[str, float]) -> float:
         """边际成本的计算。

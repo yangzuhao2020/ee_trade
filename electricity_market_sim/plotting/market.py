@@ -64,7 +64,7 @@ def _plot_market_overview(
     """forecast_prices 非空时（居民场景），在价格子图叠加居民优化所用的预测电价。"""
     times = [market.delivery_start for market in results]
     prices, price_label = _market_price_series(results)
-    price_label = {"Clearing price": "出清电价", "Average trade price": "平均成交电价"}[price_label]
+    price_label = {"Clearing price": "出清电价", "Average trade price": "全市场成交量加权均价"}[price_label]
     requested_demand = [
         market.requested_demand_mwh - market.requested_storage_charge_mwh
         for market in results
@@ -117,7 +117,7 @@ def _plot_market_overview(
             color="#F58518",
             linewidth=1.2,
             linestyle="--",
-            label="预测电价（居民优化使用）",
+            label="居民预测购电价（优化依据）",
         )
     price_axis.set_title(price_label, loc="left", fontsize=10)
     price_axis.set_ylabel("电价（欧元/MWh）")
