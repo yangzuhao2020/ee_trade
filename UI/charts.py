@@ -5,12 +5,13 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.colors import hex_to_rgb, qualitative, sample_colorscale
+from plotly.colors import hex_to_rgb, qualitative
 from plotly.subplots import make_subplots
 
 ENERGY_TOLERANCE_MWH = 1e-7
-MAX_DISPATCH_UNITS = 10
-MAX_OPERATORS = 20
+MAX_DISPATCH_UNITS = 5
+MAX_OPERATORS = 5
+MAX_STORAGE_UNITS = 2
 # Above this many traces a unified hover box would cover the whole chart.
 MAX_UNIFIED_HOVER_TRACES = 12
 UNIT_COLORS = (
@@ -235,18 +236,16 @@ def dispatch_by_unit(tables: dict[str, pd.DataFrame]) -> go.Figure:
     )
     series = {name: power[name] for name in ranked[:MAX_DISPATCH_UNITS]}
     others = ranked[MAX_DISPATCH_UNITS:]
-    if len(others):
-        series["其他成交供给"] = power[others].sum(axis=1)
 
     figure = go.Figure()
     for index, (name, values) in enumerate(series.items()):
-        color = "#9CA3AF" if name == "其他成交供给" else UNIT_COLORS[index % len(UNIT_COLORS)]
+        color = UNIT_COLORS[index % len(UNIT_COLORS)]
         figure.add_trace(_line(times, values, name, color, width=1.25))
     if not series:
         _annotate_empty(figure, "暂无供给报价")
-    title = "各机组成交出力"
+    title = f"成交电量最多的 {MAX_DISPATCH_UNITS} 个供给单元"
     if len(others):
-        title += f"——展示成交电量最多的 {MAX_DISPATCH_UNITS} 个单元，其余 {len(others)} 个合并"
+        title += f"（其余 {len(others)} 个未展示）"
     figure.update_yaxes(title_text="功率（MW）", rangemode="tozero")
     figure.update_xaxes(title_text="交付开始时间")
     return _finish(figure, title, 560)
@@ -254,17 +253,12 @@ def dispatch_by_unit(tables: dict[str, pd.DataFrame]) -> go.Figure:
 
 def operator_profit(tables: dict[str, pd.DataFrame]) -> go.Figure:
     metric_label = "利润／净现金流" if "storage" in tables else "利润"
-    title = "各运营商累计发电利润与储能净现金流" if "storage" in tables else "各运营商累计利润"
+    title = f"累计{metric_label}最高的 {MAX_OPERATORS} 家运营商"
     profits = tables["operator"].groupby("unit_operator")["profit_eur"].sum()
     profits = profits[profits.abs() > 1e-6]
-    ranked = sorted(profits.index, key=lambda operator: (-abs(profits[operator]), operator))
-    shown = profits[ranked[:MAX_OPERATORS]].to_dict()
-    omitted = profits[ranked[MAX_OPERATORS:]]
-    for sign, values in (("盈利", omitted[omitted > 0]), ("亏损", omitted[omitted < 0])):
-        if len(values):
-            shown[f"其他{sign}运营商（{len(values)} 家）"] = values.sum()
-    operators = sorted(shown, key=lambda operator: (shown[operator], operator))
-    values = [shown[operator] for operator in operators]
+    ranked = sorted(profits.index, key=lambda operator: (-profits[operator], operator))
+    operators = ranked[:MAX_OPERATORS][::-1]
+    values = [profits[operator] for operator in operators]
 
     figure = go.Figure(
         go.Bar(
@@ -292,18 +286,21 @@ def operator_profit(tables: dict[str, pd.DataFrame]) -> go.Figure:
 
 def storage_dispatch(tables: dict[str, pd.DataFrame]) -> go.Figure:
     storage = tables["storage"].sort_values(["unit_name", "delivery_start", "opening_time"], kind="stable")
-    names = sorted(storage["unit_name"].unique())
+    energy = storage.groupby("unit_name")[["accepted_charge_mwh", "accepted_discharge_mwh"]].sum().sum(axis=1)
+    ranked = energy.sort_values(ascending=False, kind="stable").index
+    names = ranked[:MAX_STORAGE_UNITS].tolist()
+    omitted_count = len(ranked) - len(names)
     # A single unit needs no per-unit colors, so net power is colored by direction instead.
     single_unit = len(names) == 1
-    colors = ["#4C78A8"] if single_unit else sample_colorscale(
-        "Turbo", [index / (len(names) - 1) for index in range(len(names))]
-    )
+    colors = UNIT_COLORS[:len(names)]
 
     figure = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=(1.1, 1))
     for name, color in zip(names, colors):
+        rows = storage[storage["unit_name"] == name]
+        display_name = f"抽水蓄能电站 {name}" if rows["technology"].iloc[0] == "PSPP" else name
         soc_x, soc_y, power_x, power_y = [], [], [], []
         previous_end = previous_power = None
-        for row in storage[storage["unit_name"] == name].itertuples(index=False):
+        for row in rows.itertuples(index=False):
             if row.delivery_start != previous_end:
                 # A delivery gap breaks both curves instead of bridging the missing period.
                 if previous_end is not None:
@@ -321,10 +318,10 @@ def storage_dispatch(tables: dict[str, pd.DataFrame]) -> go.Figure:
             power_y.append(previous_power)
         power_x.append(previous_end)
         power_y.append(previous_power)
-        figure.add_trace(_line(soc_x, soc_y, name, color, shape="linear", legendgroup=name), row=1, col=1)
+        figure.add_trace(_line(soc_x, soc_y, display_name, color, shape="linear", legendgroup=name), row=1, col=1)
         if not single_unit:
             figure.add_trace(
-                _line(power_x, power_y, name, color, shape="hv", width=1.25, legendgroup=name, showlegend=False),
+                _line(power_x, power_y, display_name, color, shape="hv", width=1.25, legendgroup=name, showlegend=False),
                 row=2,
                 col=1,
             )
@@ -349,7 +346,11 @@ def storage_dispatch(tables: dict[str, pd.DataFrame]) -> go.Figure:
     figure.update_yaxes(title_text="荷电状态（%）", range=[0, 100], row=1, col=1)
     figure.update_yaxes(title_text="净功率（MW）<br>正值放电／负值充电", row=2, col=1)
     figure.update_xaxes(title_text="交付开始时间", row=2, col=1)
-    return _finish(figure, "储能调度与荷电状态", 720)
+    figure.update_layout(hoverlabel={"namelength": -1})
+    title = "储能调度与荷电状态"
+    if omitted_count:
+        title += f"——充放电量前 {MAX_STORAGE_UNITS} 个，其余 {omitted_count} 个未展示"
+    return _finish(figure, title, 720)
 
 
 def industry_dispatch(tables: dict[str, pd.DataFrame]) -> go.Figure:
@@ -384,28 +385,31 @@ def industry_dispatch(tables: dict[str, pd.DataFrame]) -> go.Figure:
             row=1,
             col=1,
         )
-        for kind, dash, width in (("planned", "dash", 1.5), ("actual", None, 1.8)):
-            kind_label = {"planned": "计划", "actual": "实际"}[kind]
-            line = {"shape": "hv", "dash": dash, "width": width}
-            figure.add_trace(
-                _line(step_x, _repeat_last(rows[f"{kind}_grid_power_mw"]), f"{name} {kind_label}功率", color, **line),
-                row=1,
-                col=1,
+        for row, x, planned, actual, planned_label, actual_label in (
+            (1, step_x,
+             _repeat_last(rows["planned_grid_power_mw"]),
+             _repeat_last(rows["actual_grid_power_mw"]), "计划功率", "实际功率"),
+            (2, step_x,
+             _repeat_last(rows["planned_steel_output_t"]),
+             _repeat_last(rows["actual_steel_output_t"]), "计划钢产量", "实际钢产量"),
+            (3, cumulative_x,
+             [0.0, *rows["planned_steel_output_t"].cumsum()],
+             [0.0, *rows["actual_steel_output_t"].cumsum()], "累计计划钢产量", "累计实际钢产量"),
+        ):
+            matches_plan = all(
+                abs(planned_value - actual_value) <= COMPARISON_TOLERANCE
+                for planned_value, actual_value in zip(planned, actual, strict=True)
             )
+            if not matches_plan:
+                figure.add_trace(
+                    _line(x, planned, f"{name} {planned_label}", color, shape="hv", dash="dash"),
+                    row=row,
+                    col=1,
+                )
+            label = f"{name} {actual_label}" + ("（与计划一致）" if matches_plan else "")
             figure.add_trace(
-                _line(step_x, _repeat_last(rows[f"{kind}_steel_output_t"]), f"{name} {kind_label}钢产量", color, **line),
-                row=2,
-                col=1,
-            )
-            figure.add_trace(
-                _line(
-                    cumulative_x,
-                    [0.0, *rows[f"{kind}_steel_output_t"].cumsum()],
-                    f"{name} 累计{kind_label}钢产量",
-                    color,
-                    **line,
-                ),
-                row=3,
+                _line(x, actual, label, color, shape="hv", width=1.8),
+                row=row,
                 col=1,
             )
 

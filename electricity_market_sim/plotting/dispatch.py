@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from ..models import StorageDispatchResult
 from ..utils import hours_between
+from .market import _chinese_font_families
 from .common import (
     _ENERGY_TOLERANCE_MWH,
     _UNIT_COLORS,
@@ -13,8 +14,9 @@ from .common import (
     _save_figure,
 )
 
-_MAX_DISPLAYED_DISPATCH_UNITS = 10
-_MAX_DISPLAYED_OPERATORS = 20
+_MAX_DISPLAYED_DISPATCH_UNITS = 5
+_MAX_DISPLAYED_OPERATORS = 5
+_MAX_DISPLAYED_STORAGE_UNITS = 2
 
 
 def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
@@ -37,8 +39,6 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
     unit_names = ranked_units[:_MAX_DISPLAYED_DISPATCH_UNITS]
     other_unit_names = set(ranked_units[_MAX_DISPLAYED_DISPATCH_UNITS:])
     series_names = [*unit_names]
-    if other_unit_names:
-        series_names.append("Other accepted supply")
     power_by_unit = {name: [] for name in series_names}
     marginal_times = []
     marginal_y_positions: list[float] = []
@@ -47,30 +47,19 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
         accepted_power: dict[str, float] = defaultdict(float)
         for cleared in market.offers:
             accepted_power[cleared.offer.unit_name] += cleared.accepted_power_mw
-        if other_unit_names:
-            accepted_power["Other accepted supply"] = sum(
-                accepted_power.get(name, 0.0) for name in other_unit_names
-            )
         for name in series_names:
             unit_power = accepted_power.get(name, 0.0)
             power_by_unit[name].append(unit_power)
-            contains_marginal_unit = name == market.marginal_unit_name or (
-                name == "Other accepted supply"
-                and market.marginal_unit_name in other_unit_names
-            )
+            contains_marginal_unit = name == market.marginal_unit_name
             if contains_marginal_unit and unit_power > _ENERGY_TOLERANCE_MWH:
-                # 标记对应机组自身的功率；合并单元则标记合并后的功率。
+                # 仅标记当前展示机组自身的功率。
                 marginal_times.append(market.delivery_start)
                 marginal_y_positions.append(unit_power)
 
     figure, axis = pyplot.subplots(figsize=(16, 7.5)) # 创建画布
     if series_names:
         series_colors = [
-            (
-                "#9CA3AF"
-                if name == "Other accepted supply"
-                else _UNIT_COLORS[index % len(_UNIT_COLORS)]
-            )
+            _UNIT_COLORS[index % len(_UNIT_COLORS)]
             for index, name in enumerate(series_names)
         ]
         for name, color in zip(series_names, series_colors):
@@ -105,12 +94,9 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
             label="Marginal unit",
             zorder=5,
         ) # Marginal unit 菱形点
-    title = "Accepted dispatch by unit"
+    title = f"Accepted dispatch — top {_MAX_DISPLAYED_DISPATCH_UNITS} units by traded energy"
     if other_unit_names:
-        title += (
-            f" — {_MAX_DISPLAYED_DISPATCH_UNITS} largest units and "
-            f"{len(other_unit_names)} aggregated"
-        )
+        title += f" ({len(other_unit_names)} omitted)"
     axis.set_title(title)
     axis.set_ylabel("Power (MW)")
     axis.set_ylim(bottom=0.0)
@@ -142,33 +128,9 @@ def _plot_operator_profit(
     }
     ranked_operators = sorted(
         displayed_profits,
-        key=lambda operator: (-abs(displayed_profits[operator]), operator),
+        key=lambda operator: (-displayed_profits[operator], operator),
     )
-    omitted_operators = ranked_operators[_MAX_DISPLAYED_OPERATORS:]
-    displayed_profits = {
-        operator: displayed_profits[operator]
-        for operator in ranked_operators[:_MAX_DISPLAYED_OPERATORS]
-    }
-    omitted_positive = sum(
-        profits[operator] for operator in omitted_operators if profits[operator] > 0
-    )
-    omitted_negative = sum(
-        profits[operator] for operator in omitted_operators if profits[operator] < 0
-    )
-    positive_count = sum(profits[operator] > 0 for operator in omitted_operators)
-    negative_count = sum(profits[operator] < 0 for operator in omitted_operators)
-    if positive_count:
-        displayed_profits[f"Other positive operators ({positive_count})"] = (
-            omitted_positive
-        )
-    if negative_count:
-        displayed_profits[f"Other negative operators ({negative_count})"] = (
-            omitted_negative
-        )
-    operators = sorted(
-        displayed_profits,
-        key=lambda operator: (displayed_profits[operator], operator),
-    )
+    operators = ranked_operators[:_MAX_DISPLAYED_OPERATORS][::-1]
     values = [displayed_profits[operator] for operator in operators]
     colors = ["#54A24B" if value >= 0 else "#E45756" for value in values]
 
@@ -177,7 +139,7 @@ def _plot_operator_profit(
     )
     bars = axis.barh(operators, values, color=colors)
     axis.axvline(0, color="#1F1F1F", linewidth=0.8)
-    axis.set_title("Cumulative generation and storage result by operator")
+    axis.set_title(f"Top {_MAX_DISPLAYED_OPERATORS} operators by cumulative profit / net cash flow")
     axis.set_xlabel("Profit / net cash flow (EUR)")
     axis.grid(axis="x", alpha=0.25)
     if not operators:
@@ -215,17 +177,19 @@ def _plot_storage_dispatch(
     by_unit: dict[str, list[StorageDispatchResult]] = defaultdict(list)
     for storage in storage_results:
         by_unit[storage.unit_name].append(storage)
-    storage_names = sorted(by_unit)
-    storage_color_map = pyplot.get_cmap("turbo")
+    ranked_storage_names = sorted(
+        by_unit,
+        key=lambda name: (-sum(row.accepted_charge_mwh + row.accepted_discharge_mwh
+                               for row in by_unit[name]), name),
+    )
+    storage_names = ranked_storage_names[:_MAX_DISPLAYED_STORAGE_UNITS]
+    omitted_count = len(ranked_storage_names) - len(storage_names)
     storage_colors = {
-        name: storage_color_map(index / max(1, len(storage_names) - 1))
+        name: _UNIT_COLORS[index]
         for index, name in enumerate(storage_names)
     }
     # A single unit needs no per-unit colors, so net power is colored by direction instead.
     single_unit = len(storage_names) == 1
-    if single_unit:
-        storage_colors = {name: "#4C78A8" for name in storage_names}
-
     figure, (soc_axis, power_axis) = pyplot.subplots(
         2,
         1,
@@ -238,6 +202,7 @@ def _plot_storage_dispatch(
             by_unit[unit_name],
             key=lambda storage: (storage.delivery_start, storage.opening_time),
         )
+        display_name = f"抽水蓄能电站 {unit_name}" if rows[0].technology == "PSPP" else unit_name
         soc_times: list[datetime] = []
         soc_values: list[float] = []
         net_power: list[float] = []
@@ -257,7 +222,7 @@ def _plot_storage_dispatch(
             soc_values,
             color=storage_colors[unit_name],
             linewidth=1.45,
-            label=unit_name,
+            label=display_name,
         )
         contiguous_chunks: list[list[tuple[StorageDispatchResult, float]]] = []
         for row, power in zip(rows, net_power, strict=True):
@@ -279,7 +244,7 @@ def _plot_storage_dispatch(
                     where="post",
                     color=storage_colors[unit_name],
                     linewidth=1.25,
-                    label=unit_name if index == 0 else None,
+                    label=display_name if index == 0 else None,
                 )
                 continue
             for label, color, clip in (
@@ -299,7 +264,10 @@ def _plot_storage_dispatch(
                     power_times, 0.0, clipped, step="post", color=color, alpha=0.35
                 )
 
-    figure.suptitle("Storage dispatch and state of charge")
+    title = "Storage dispatch and state of charge"
+    if omitted_count:
+        title += f" — top {_MAX_DISPLAYED_STORAGE_UNITS} by charge + discharge energy ({omitted_count} omitted)"
+    figure.suptitle(title)
     soc_axis.set_ylabel("SOC (%)")
     soc_axis.set_ylim(0, 100)
     soc_axis.grid(axis="y", alpha=0.25)
@@ -326,7 +294,7 @@ def _plot_storage_dispatch(
         loc="upper center",
         bbox_to_anchor=(0.5, 0.965),
         ncol=min(6, len(storage_names)),
-        fontsize=8,
+        prop={"family": _chinese_font_families(), "size": 8},
     )
     legend_rows = (len(storage_names) + 5) // 6
     top = max(0.70, 0.91 - max(0, legend_rows - 1) * 0.035)

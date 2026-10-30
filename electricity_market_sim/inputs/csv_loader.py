@@ -723,10 +723,10 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
                 raise InputValidationError(
                     f"{path.name}, row {row_number}: max_power must be positive."
                 )
-            if result.min_power_mw != 0:
+            if not 0 <= result.min_power_mw <= result.max_power_mw:
                 raise InputValidationError(
-                    f"{path.name}, row {row_number}: version four supports "
-                    "industrial min_power=0 only."
+                    f"{path.name}, row {row_number}: industrial min_power must "
+                    "be between 0 and max_power."
                 )
             if min(result.ramp_up_mw, result.ramp_down_mw) < 0:
                 raise InputValidationError(

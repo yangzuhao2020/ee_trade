@@ -53,7 +53,10 @@ def results_state(run_dir: Path) -> tuple:
 
 @st.cache_data(show_spinner="正在读取结果 CSV…", max_entries=8)
 def load_charts(run_dir: str, files_state: tuple):
-    """构建中文图表；有居民需求时展示居民子图，其余场景保留市场供需概览。"""
+    """构建中文图表；供给和运营商展示前5名，储能展示前2名并标注抽水蓄能类型。
+
+    工业计划与实际曲线在数值容差内一致时合并显示。
+    """
 
     path = Path(run_dir)
     market_figures = charts.build_charts(charts.load_run(path))

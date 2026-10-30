@@ -83,6 +83,19 @@ def process_coefficients(unit: IndustrialUnit) -> _ProcessCoefficients:
     )
 
 
+def _steel_lower_bound(
+    unit: IndustrialUnit,
+    coefficients: _ProcessCoefficients,
+    duration: float,
+) -> float:
+    """三台设备同时运行时，取各自最低功率对应钢产量的最大值。"""
+    return max(
+        unit.electrolyser.min_power_mw * duration / coefficients.electrolyser_mwh_per_steel_t,
+        unit.dri_plant.min_power_mw * duration / coefficients.dri_mwh_per_steel_t,
+        unit.eaf.min_power_mw * duration / coefficients.eaf_mwh_per_steel_t,
+    )
+
+
 def _steel_upper_bound(
     unit: IndustrialUnit, 
     coefficients: _ProcessCoefficients, 
@@ -213,7 +226,8 @@ def _build_industry_problem(
 
     # 钢产量、正负偏差变量的上下界。
     bounds: list[tuple[float | None, float | None]] = [
-        (0.0, _steel_upper_bound(unit, coefficients, duration))
+        (_steel_lower_bound(unit, coefficients, duration),
+         _steel_upper_bound(unit, coefficients, duration))
         for duration in remaining_durations]
     bounds.extend([(0.0, None)] * (2 * count))
 
@@ -266,23 +280,30 @@ def _build_industry_problem(
     equality_rows.append(row)
     equality_values.append(demand_to_schedule_t)
 
-    # 4.4 承诺区产量下限：-承诺区产量 ≤ -最低产量。
-    if commit_count < remaining_count:
-        remaining_profile_total = sum(remaining_load_profile)
-        commit_profile_total = sum(remaining_load_profile[:commit_count])
+    # 4.4 同时约束本轮和后续提交区间，提前保留跨区间的爬坡衔接空间。
+    commit_start = 0
+    commit_end = commit_count
+    while commit_end < remaining_count:
+        remaining_profile_total = sum(remaining_load_profile[commit_start:])
+        commit_profile_total = sum(remaining_load_profile[commit_start:commit_end])
         # 按参考负荷占比分配；总负荷近零时按时段数分配。
         ratio = (
             commit_profile_total / remaining_profile_total
             if remaining_profile_total > _TOLERANCE
-            else commit_count / remaining_count)
-        # 按允许偏差下调承诺区最低产量。
-        profile_minimum = demand_to_schedule_t * ratio * (
-            1.0 - unit.load_profile_deviation)
-        row = _constraint_row(
-            {variable: -1.0 for variable in steel[:commit_count]},
-            variable_count)
-        inequality_rows.append(row)
-        inequality_values.append(-profile_minimum)
+            else (commit_end - commit_start) / (remaining_count - commit_start))
+        for sign, allowance in ((-1.0, 1.0 - unit.load_profile_deviation),
+                                (1.0, 1.0 + unit.load_profile_deviation)):
+            factor = ratio * allowance
+            # 后续区间的待安排量还须扣除前面区间的计划产量，保持线性关系。
+            terms = {variable: sign * factor for variable in steel[:commit_start]}
+            terms.update({variable: sign for variable in steel[commit_start:commit_end]})
+            inequality_rows.append(_constraint_row(terms, variable_count))
+            inequality_values.append(sign * demand_to_schedule_t * factor)
+
+        commit_start = commit_end
+        next_commit_end = remaining_products[commit_start][0] + unit.commit_horizon
+        while commit_end < remaining_count and remaining_products[commit_end][0] < next_commit_end:
+            commit_end += 1
 
     # 可选的成本上限行，供限定可变成本时追加到不等式矩阵末尾。
     cost_limit_row = np.zeros(variable_count)
@@ -459,7 +480,8 @@ def maximum_industry_production(
         return 0.0
     coefficients = process_coefficients(unit)
     durations = np.array([hours_between(*product) for product in products])
-    bounds = [(0.0, _steel_upper_bound(unit, coefficients, duration))
+    bounds = [(_steel_lower_bound(unit, coefficients, duration),
+               _steel_upper_bound(unit, coefficients, duration))
         for duration in durations]
     power_per_tonne = [
         _power_coefficients(coefficients, duration)[:3] for duration in durations]
@@ -743,11 +765,24 @@ class IndustryRollingCoordinator:
                 continue
             accepted = self._cleared_industry_energy(result, unit.name)
             dispatch = dispatch_industry(plan, accepted)
+            actual_powers = self._actual_device_powers(plan, accepted)
+            devices = (unit.electrolyser, unit.dri_plant, unit.eaf)
+            for device, power, previous in zip(
+                devices, actual_powers, self.last_actual_powers_mw[unit.name]
+            ):
+                if power < device.min_power_mw - _TOLERANCE:
+                    raise InputValidationError(
+                        f"工业单元 {unit.name!r} 在 {plan.delivery_start} 的 "
+                        f"{device.technology} 实际功率 {power:.6f} MW "
+                        f"低于最低生产功率 {device.min_power_mw:.6f} MW。")
+                if (power - previous > device.ramp_up_mw + _TOLERANCE
+                        or previous - power > device.ramp_down_mw + _TOLERANCE):
+                    raise InputValidationError(
+                        f"工业单元 {unit.name!r} 在 {plan.delivery_start} 的 "
+                        f"{device.technology} 实际功率变化超过爬坡限制。")
             self.dispatch_results.append(dispatch)
             self.actual_steel_t[unit.name] += dispatch.actual_steel_output_t
-            self.last_actual_powers_mw[unit.name] = self._actual_device_powers(
-                plan, accepted
-            )
+            self.last_actual_powers_mw[unit.name] = actual_powers
             self.delivered.add(key)
 
     def validate_completion(self) -> None:

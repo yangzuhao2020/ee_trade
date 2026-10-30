@@ -46,14 +46,24 @@ UNIT = IndustrialUnit(
 
 
 class IndustryMarketContracts(unittest.TestCase):
-    def run_market(self, *, delay=HOUR, availability=None, events=None):
-        settings = replace(SETTINGS, first_delivery=delay, end=START + delay + 3 * HOUR)
+    def continuous_unit(self, *, demand_t=1.5, minimum_power=0.2):
+        devices = {
+            name: replace(getattr(UNIT, name), min_power_mw=minimum_power,
+                          ramp_up_mw=0.25, ramp_down_mw=0.25)
+            for name in ("electrolyser", "dri_plant", "eaf")
+        }
+        return replace(UNIT, demand_t=demand_t, commit_horizon=3 * HOUR,
+                       rolling_step=3 * HOUR, **devices)
+
+    def run_market(self, *, delay=HOUR, availability=None, events=None, unit=UNIT,
+                   product_count=3, load_profile=None):
+        settings = replace(SETTINGS, first_delivery=delay, end=START + delay + product_count * HOUR)
         openings = tuple(
             MarketOpening(
                 START + index * HOUR,
                 ((START + delay + index * HOUR, START + delay + (index + 1) * HOUR),),
             )
-            for index in range(3)
+            for index in range(product_count)
         )
         times = [START + index * HOUR for index in range(24)]
         profiles = {
@@ -61,6 +71,7 @@ class IndustryMarketContracts(unittest.TestCase):
             "steel_normalized_load_profile": {time: 1.0 for time in times},
             "electricity_price": {time: 50.0 for time in times},
         }
+        profiles["steel_normalized_load_profile"].update(load_profile or {})
         prices = {
             time: {"gas": 10.0, "co2": 0.0, "iron ore": 1.0, "lime": 1.0}
             for time in times
@@ -75,7 +86,7 @@ class IndustryMarketContracts(unittest.TestCase):
             base_module + "load_hourly_availability_profiles": (
                 {} if availability is None else {"plant": {t: availability.get(t, 1.0) for t in times}}
             ),
-            scenario_module + "load_industrial_units": (UNIT,),
+            scenario_module + "load_industrial_units": (unit,),
             scenario_module + "load_aligned_fuel_price_profiles": prices,
         }
         with ExitStack() as stack:
@@ -123,11 +134,68 @@ class IndustryMarketContracts(unittest.TestCase):
         self.assertAlmostEqual(sum(item.planned_steel_output_t for item in result.industry_results), 2.0)
         self.assertAlmostEqual(sum(item.actual_steel_output_t for item in result.industry_results), 2.0)
 
+    def test_small_task_is_spread_across_commits_instead_of_completed_early(self):
+        unit = replace(UNIT, demand_t=0.6)
+        for delay in (HOUR, 2 * HOUR):
+            with self.subTest(first_delivery=delay):
+                result = self.run_market(delay=delay, unit=unit)
+                first = result.industry_results[0]
+                self.assertGreaterEqual(first.planned_steel_output_t, 0.18 - 1e-7)
+                self.assertLessEqual(first.planned_steel_output_t, 0.22 + 1e-7)
+                self.assertTrue(all(item.actual_steel_output_t > 0
+                                    for item in result.industry_results))
+                self.assertAlmostEqual(sum(item.actual_steel_output_t
+                                           for item in result.industry_results), unit.demand_t)
+
     def test_partial_first_delivery_is_recovered_in_later_plans(self):
         result = self.run_market(availability={START + HOUR: 0.05})
         first = result.industry_results[0]
         self.assertLess(first.actual_steel_output_t, first.planned_steel_output_t)
         self.assertAlmostEqual(sum(item.actual_steel_output_t for item in result.industry_results), 2.0)
+
+    def test_continuous_load_respects_minimums_and_ramps_inside_a_commit(self):
+        unit = self.continuous_unit()
+        for delay in (HOUR, 2 * HOUR):
+            with self.subTest(first_delivery=delay):
+                result = self.run_market(delay=delay, unit=unit)
+                previous = 0.0
+                for row in result.industry_results:
+                    self.assertGreaterEqual(row.actual_grid_power_mw, 0.6 - 1e-7)
+                    self.assertLessEqual(abs(row.actual_grid_power_mw - previous), 0.75 + 1e-7)
+                    previous = row.actual_grid_power_mw
+                self.assertAlmostEqual(sum(row.actual_steel_output_t
+                                           for row in result.industry_results), unit.demand_t)
+
+    def test_minimum_load_is_not_dropped_to_fit_an_insufficient_task(self):
+        with self.assertRaises(InputValidationError):
+            self.run_market(unit=self.continuous_unit(demand_t=0.3))
+
+    def test_future_commit_limits_reserve_time_to_ramp_down(self):
+        unit = self.continuous_unit(demand_t=2.0, minimum_power=0.01)
+        profile = {
+            START + (index + 1) * HOUR: value
+            for index, value in enumerate((10, 10, 10, 1, 1, 1, 10, 10, 10))
+        }
+        result = self.run_market(unit=unit, product_count=9, load_profile=profile)
+        rows = result.industry_results
+        first = sum(row.actual_steel_output_t for row in rows[:3])
+        middle = sum(row.actual_steel_output_t for row in rows[3:6])
+        self.assertLessEqual(middle, (unit.demand_t - first) * 3 / 33 * 1.1 + 1e-7)
+        previous = 0.0
+        for row in rows:
+            self.assertGreaterEqual(row.actual_grid_power_mw, 0.03 - 1e-7)
+            self.assertLessEqual(abs(row.actual_grid_power_mw - previous), 0.75 + 1e-7)
+            previous = row.actual_grid_power_mw
+        self.assertAlmostEqual(sum(row.actual_steel_output_t for row in rows), unit.demand_t)
+
+    def test_partial_fill_below_minimum_production_power_is_reported(self):
+        with self.assertRaisesRegex(InputValidationError, "低于最低生产功率"):
+            self.run_market(unit=self.continuous_unit(), availability={START + HOUR: 0.05})
+
+    def test_actual_delivery_ramp_violation_is_reported(self):
+        with self.assertRaisesRegex(InputValidationError, "实际功率变化超过爬坡限制"):
+            self.run_market(unit=self.continuous_unit(minimum_power=0.0),
+                            availability={START + 3 * HOUR: 0.0})
 
     def test_final_delivery_shortfall_is_reported(self):
         with self.assertRaisesRegex(InputValidationError, "仿真结束时.*需求尚未完成"):

@@ -6,6 +6,9 @@ from ..models import IndustrialDispatchResult, IndustrialFlexibilityResult
 from .common import _format_time_axis, _save_figure
 
 
+_COMPARISON_TOLERANCE = 1e-6
+
+
 def _plot_industry_dispatch(
     pyplot,
     dates,
@@ -70,41 +73,6 @@ def _plot_industry_dispatch(
             alpha=0.16,
             label=f"{unit_name} flexibility range",
         )
-        power_axis.step(
-            step_times,
-            [*planned_power, planned_power[-1]],
-            where="post",
-            color=color,
-            linewidth=1.5,
-            linestyle="--",
-            label=f"{unit_name} planned power",
-        )
-        power_axis.step(
-            step_times,
-            [*actual_power, actual_power[-1]],
-            where="post",
-            color=color,
-            linewidth=1.8,
-            label=f"{unit_name} actual power",
-        )
-        steel_axis.step(
-            step_times,
-            [*planned_steel, planned_steel[-1]],
-            where="post",
-            color=color,
-            linewidth=1.5,
-            linestyle="--",
-            label=f"{unit_name} planned steel",
-        )
-        steel_axis.step(
-            step_times,
-            [*actual_steel, actual_steel[-1]],
-            where="post",
-            color=color,
-            linewidth=1.8,
-            label=f"{unit_name} actual steel",
-        )
-
         cumulative_planned: list[float] = []
         cumulative_actual: list[float] = []
         planned_total = 0.0
@@ -114,23 +82,29 @@ def _plot_industry_dispatch(
             actual_total += actual
             cumulative_planned.append(planned_total)
             cumulative_actual.append(actual_total)
-        cumulative_axis.step(
-            [rows[0].delivery_start, *(row.delivery_end for row in rows)],
-            [0.0, *cumulative_planned],
-            where="post",
-            color=color,
-            linewidth=1.5,
-            linestyle="--",
-            label=f"{unit_name} cumulative planned",
-        )
-        cumulative_axis.step(
-            [rows[0].delivery_start, *(row.delivery_end for row in rows)],
-            [0.0, *cumulative_actual],
-            where="post",
-            color=color,
-            linewidth=1.8,
-            label=f"{unit_name} cumulative actual",
-        )
+        cumulative_times = [rows[0].delivery_start, *(row.delivery_end for row in rows)]
+        for axis, x, planned, actual, planned_label, actual_label in (
+            (power_axis, step_times,
+             [*planned_power, planned_power[-1]], [*actual_power, actual_power[-1]],
+             "planned power", "actual power"),
+            (steel_axis, step_times,
+             [*planned_steel, planned_steel[-1]], [*actual_steel, actual_steel[-1]],
+             "planned steel", "actual steel"),
+            (cumulative_axis, cumulative_times,
+             [0.0, *cumulative_planned], [0.0, *cumulative_actual],
+             "cumulative planned", "cumulative actual"),
+        ):
+            matches_plan = all(
+                abs(planned_value - actual_value) <= _COMPARISON_TOLERANCE
+                for planned_value, actual_value in zip(planned, actual, strict=True)
+            )
+            if not matches_plan:
+                axis.step(
+                    x, planned, where="post", color=color, linewidth=1.5,
+                    linestyle="--", label=f"{unit_name} {planned_label}",
+                )
+            label = f"{unit_name} {actual_label}" + (" (matches plan)" if matches_plan else "")
+            axis.step(x, actual, where="post", color=color, linewidth=1.8, label=label)
 
     window_start_by_id = {}
     for result in results:
