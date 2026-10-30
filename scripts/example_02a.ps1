@@ -88,6 +88,8 @@ foreach ($scenario in $scenarios) {
         --input-dir $inputDir `
         --output-dir $outputDir `
         --scenario $scenario `
+        --training-runs 1 `
+        --training-episodes 70 `
         @remaining
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }

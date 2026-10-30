@@ -38,12 +38,11 @@ COMPARISON_FIELDS = (
 # 累计奖励仍用于学习曲线中最佳验证模型的选择。
 METRIC_FIELDS = {name for name, _ in (*CURVE_FIELDS, *COMPARISON_FIELDS)} | {"total_reward"}
 UNIT_FIELDS = {
-    "delivery_start", "available_power_mw", "clearing_price_eur_per_mwh",
-    "profit_eur",
+    "delivery_start", "available_power_mw", "profit_eur",
 }
 OFFER_FIELDS = {
     "delivery_start", "offer_segment", "bid_price_eur_per_mwh",
-    "marginal_cost_eur_per_mwh", "accepted_power_mw",
+    "accepted_power_mw",
 }
 
 
@@ -111,16 +110,11 @@ def learning_unit(results: pd.DataFrame, offers: pd.DataFrame) -> go.Figure:
         rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.055,
         row_heights=(1.25, 1, 1),
     )
-    figure.add_trace(_step(times, results["clearing_price_eur_per_mwh"], "出清电价", "#1F1F1F"), row=1, col=1)
     for name, label, color in (
         (SEGMENTS[0], "最低出力段报价", COLORS[0]),
         (SEGMENTS[1], "灵活出力段报价", COLORS[1]),
     ):
         figure.add_trace(_step(times, segments[name]["bid_price_eur_per_mwh"], label, color), row=1, col=1)
-    marginal_cost = segments[SEGMENTS[0]]["marginal_cost_eur_per_mwh"].combine_first(
-        segments[SEGMENTS[1]]["marginal_cost_eur_per_mwh"]
-    )
-    figure.add_trace(_step(times, marginal_cost, "边际成本", "#7F7F7F", dash="dash", opacity=0.65), row=1, col=1)
     accepted = {
         name: segments[name]["accepted_power_mw"].fillna(0.0) for name in SEGMENTS
     }
@@ -137,7 +131,7 @@ def learning_unit(results: pd.DataFrame, offers: pd.DataFrame) -> go.Figure:
             bgcolor="rgba(255, 255, 255, 0.85)",
         )
     figure.add_trace(_step(times, results["profit_eur"], "利润", COLORS[2]), row=3, col=1)
-    figure.update_yaxes(title_text="电价（欧元/MWh）", row=1, col=1)
+    figure.update_yaxes(title_text="报价（欧元/MWh）", row=1, col=1)
     figure.update_yaxes(title_text="功率（MW）", rangemode="tozero", row=2, col=1)
     figure.update_yaxes(title_text="每时段利润（欧元）", row=3, col=1)
     figure.update_xaxes(title_text="交付开始时间", tickformat="%m-%d\n%H:%M", row=3, col=1)

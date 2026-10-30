@@ -89,24 +89,6 @@ def _plot_learning_unit(
             for time in times
         ]
 
-    clearing_prices = [
-        (
-            markets[time].clearing_price_eur_per_mwh
-            if time in markets and markets[time].clearing_price_eur_per_mwh is not None
-            else float("nan")
-        )
-        for time in times
-    ]
-    marginal_costs = [
-        next(
-            (
-                cleared.offer.marginal_cost_eur_per_mwh
-                for cleared in segments_by_start.get(time, {}).values()
-            ),
-            float("nan"),
-        )
-        for time in times
-    ]
     accepted = {
         segment: segment_series(segment, lambda item: item.accepted_power_mw, 0.0)
         for segment in _LEARNING_SEGMENTS
@@ -118,14 +100,6 @@ def _plot_learning_unit(
         figsize=(16, 11),
         sharex=True,
         gridspec_kw={"height_ratios": (1.25, 1, 1)},
-    )
-    price_axis.step(
-        times,
-        clearing_prices,
-        where="mid",
-        color="#1F1F1F",
-        linewidth=1.3,
-        label="出清电价",
     )
     for segment, label, color in (
         ("learning_minimum", "最低出力段报价", "#4C78A8"),
@@ -139,19 +113,9 @@ def _plot_learning_unit(
             linewidth=1.1,
             label=label,
         )
-    price_axis.step(
-        times,
-        marginal_costs,
-        where="mid",
-        color="#7F7F7F",
-        alpha=0.65,
-        linestyle="--",
-        linewidth=1.0,
-        label="边际成本",
-    )
-    price_axis.set_ylabel("电价（欧元/MWh）")
+    price_axis.set_ylabel("报价（欧元/MWh）")
     price_axis.grid(axis="y", alpha=0.25)
-    price_axis.legend(loc="upper left", ncol=4, fontsize=8)
+    price_axis.legend(loc="upper left", ncol=2, fontsize=8)
 
     available_power = [step.available_power_mw for step in steps]
     accepted_power = [
