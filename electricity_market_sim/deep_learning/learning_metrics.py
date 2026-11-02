@@ -113,6 +113,24 @@ def _write_metrics(path: Path, metrics: list[_EpisodeMetrics]) -> None:
             )
 
 
+def _write_records(path: Path, rows: list[dict], *, append=False) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = append and path.is_file()
+    if existing and "elapsed_seconds" in rows[0]:
+        with path.open(newline="", encoding="utf-8") as handle:
+            previous = list(csv.DictReader(handle))[-1]
+        for row in rows:
+            for name in ("elapsed_seconds", "validation_seconds"):
+                row[name] += float(previous[name])
+    with path.open("a" if existing else "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        if not existing:
+            writer.writeheader()
+        writer.writerows(rows)
+
+
 def _comparison_phases(period: str) -> tuple[str, str]:
     """返回某个数据时段上 Actor 与边际成本基线对比的阶段名。"""
 

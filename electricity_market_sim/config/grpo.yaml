@@ -1,0 +1,23 @@
+# 第六版连续报价 GRPO；training_steps 由场景按完整组设置。
+learning_config:
+  algorithm: grpo
+  actor_architecture: mlp
+  device: cpu
+  learning_rate: 0.0001
+  min_lr_ratio: 0.25
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  gamma: 0.99
+  max_bid_price: 100
+  group_size: 12
+  # CPU 采样进程数，每个进程使用单线程；设为 1 切回串行。
+  sampling_workers: 4
+  # 每遍分批累积整组梯度，更新一次；整组 KL 超限后停止后续遍数。
+  update_epochs: 8 # 同一组采样数据最多用于训练 8 遍，期间不重新采样
+  minibatch_size: 256
+  clip_epsilon: 0.2
+  target_kl: 0.02
+  initial_std: 0.2
+  min_std: 0.02
+  max_std: 1.0
+  advantage_threshold: 0.000001

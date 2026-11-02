@@ -16,27 +16,27 @@ class LearningPeriod:
 
 @dataclass(frozen=True)
 class LearningConfig:
-    """经校验的 Version 5 单智能体 MATD3 学习配置。"""
+    """MATD3 / GRPO 的公共设置及各自训练参数。"""
     learning_mode: bool
     algorithm: str
     learning_rate: float
-    training_episodes: int
-    initial_experience_episodes: int
-    replay_buffer_size: int
-    batch_size: int
     gamma: float
-    train_frequency_steps: int
-    gradient_steps: int
     validation_interval: int
-    exploration_noise_std: float
-    noise_sigma: float
-    noise_scale: float
-    noise_dt: float
-    action_noise_schedule: str
-    tau: float
-    policy_delay: int
-    target_policy_noise: float
-    target_noise_clip: float
+    training_episodes: int = 30
+    initial_experience_episodes: int = 5
+    replay_buffer_size: int = 100000
+    batch_size: int = 128
+    train_frequency_steps: int = 100
+    gradient_steps: int = 10
+    exploration_noise_std: float = 0.2
+    noise_sigma: float = 0.1
+    noise_scale: float = 1.0
+    noise_dt: float = 1.0
+    action_noise_schedule: str = "linear"
+    tau: float = 0.005
+    policy_delay: int = 2
+    target_policy_noise: float = 0.2
+    target_noise_clip: float = 0.5
     actor_architecture: str = "mlp"
     device: str = "cpu"
     continue_learning: bool = False
@@ -45,6 +45,20 @@ class LearningConfig:
     max_bid_price: float = 100.0
     # 学习模式必填，按 train、validation、test 的顺序保存 (名称, 交付时段)。
     periods: tuple[tuple[str, LearningPeriod], ...] | None = None
+    training_steps: int = 0
+    group_size: int = 12
+    sampling_workers: int = 4
+    update_epochs: int = 4
+    minibatch_size: int = 256
+    clip_epsilon: float = 0.2
+    target_kl: float = 0.02
+    initial_std: float = 0.2
+    min_std: float = 0.02
+    max_std: float = 1.0
+    advantage_threshold: float = 1e-6
+    max_grad_norm: float = 1.0
+    weight_decay: float = 0.01
+    min_lr_ratio: float = 0.25
 
     def period(self, name: str) -> LearningPeriod:
         """返回指定数据集的交付时段；未配置时报错。"""

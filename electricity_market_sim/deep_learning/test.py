@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from .agent import (
-    MATD3Agent,
+    create_agent,
     _RUN_MANIFEST,
     _checkpoint_from_setting,
     _default_checkpoint_root,
@@ -46,7 +46,7 @@ def _marginal_cost_action(state: tuple[float, ...]) -> tuple[float, float]:
 
 def _evaluate_actor_and_baseline(
     *,
-    agent: MATD3Agent,
+    agent,
     input_path: Path,
     output_path: Path,
     scenario: str,
@@ -96,13 +96,13 @@ def evaluate_learning_scenario(
     output_path = Path(output_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
     config = _learning_config(settings)
-    agent = MATD3Agent(config, total_regular_steps=1)
+    agent = create_agent(config)
     checkpoint = (
         Path(checkpoint_path)
         if checkpoint_path is not None
         else _default_evaluation_checkpoint(config, output_path)
     )
-    payload = agent.load_checkpoint(checkpoint, load_optimizers=False)
+    payload = agent.load_checkpoint(checkpoint)
     saved_run = payload.get("run")
     run = (
         saved_run
@@ -152,9 +152,9 @@ def run_learning_test(
     results: dict[int, SimulationResult] = {}
     for entry in entries:
         run = entry["run"]
-        agent = MATD3Agent(config, total_regular_steps=1)
+        agent = create_agent(config)
         payload = agent.load_checkpoint(
-            manifest_file.parent / entry["best_checkpoint"], load_optimizers=False
+            manifest_file.parent / entry["best_checkpoint"]
         )
         run_output = (
             output_path / "test"

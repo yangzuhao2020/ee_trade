@@ -8,7 +8,7 @@ from .errors import SimulationError
 from .plotting import generate_learning_plots, generate_plots
 from .simulation import run_simulation
 from .deep_learning.test import evaluate_learning_scenario, run_learning_test
-from .deep_learning.training import train_learning_scenario
+from .deep_learning.training import _steps_per_episode, train_learning_scenario
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--checkpoint",
         type=Path,
         help=(
-            "Checkpoint to resume for training or load for evaluation (defaults to "
+            "Checkpoint to resume MATD3 training or load for evaluation (defaults to "
             "OUTPUT_DIR/checkpoints/best.pt). For test, the runs.json manifest or "
             "its directory (defaults to OUTPUT_DIR/checkpoints/runs.json)."
         ),
@@ -61,10 +61,19 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("train", "validation"),
         help="Data period for --learning-mode evaluate. Defaults to validation.",
     )
-    parser.add_argument(
+    budget = parser.add_mutually_exclusive_group()
+    budget.add_argument(
         "--training-episodes",
         type=int,
         help="Override learning_config.training_episodes for this training run.",
+    )
+    budget.add_argument(
+        "--training-steps", type=int,
+        help="Total hourly training interactions per run; GRPO requires complete groups.",
+    )
+    budget.add_argument(
+        "--training-rounds", type=int,
+        help="GRPO policy iterations per run (one trajectory group per round); overrides the scenario budget.",
     )
     parser.add_argument(
         "--training-runs",
@@ -91,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if is_learning: # 对应第五版学习场景，用于训练、评估和测试机组报价。
             print(f"强化学习设备：{settings.learning_config.device}")
+            print(f"强化学习算法：{settings.learning_config.algorithm}")
             for name, period in settings.learning_config.periods:
                 print(f"  {name}: [{period.start}, {period.end})")
             learning_mode = arguments.learning_mode or "train"
@@ -99,9 +109,11 @@ def main(argv: list[str] | None = None) -> int:
             if learning_mode != "train" and (
                 arguments.training_episodes is not None
                 or arguments.training_runs is not None
+                or arguments.training_steps is not None
+                or arguments.training_rounds is not None
             ):
                 raise SimulationError(
-                    "--training-episodes 和 --training-runs 只能与 "
+                    "--training-episodes、--training-steps、--training-rounds 和 --training-runs 只能与 "
                     "--learning-mode train 一起使用。"
                 )
             evaluation_period = arguments.period or "validation"
@@ -123,6 +135,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             if learning_mode == "train":
+                training_steps = arguments.training_steps
+                if arguments.training_rounds is not None:
+                    if settings.learning_config.algorithm != "grpo":
+                        raise SimulationError("--training-rounds 仅用于 GRPO。")
+                    training_steps = (arguments.training_rounds * settings.learning_config.group_size
+                                      * _steps_per_episode(settings, "train"))
                 result = train_learning_scenario(
                     input_dir=arguments.input_dir,
                     output_dir=arguments.output_dir,
@@ -130,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
                     checkpoint_path=arguments.checkpoint,
                     training_episodes=arguments.training_episodes,
                     independent_runs=arguments.training_runs,
+                    training_steps=training_steps,
                 )
                 learning_metrics_path = arguments.output_dir / "learning_metrics.csv"
             elif learning_mode == "test":

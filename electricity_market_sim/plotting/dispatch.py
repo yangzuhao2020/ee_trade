@@ -40,8 +40,6 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
     other_unit_names = set(ranked_units[_MAX_DISPLAYED_DISPATCH_UNITS:])
     series_names = [*unit_names]
     power_by_unit = {name: [] for name in series_names}
-    marginal_times = []
-    marginal_y_positions: list[float] = []
 
     for market in results:
         accepted_power: dict[str, float] = defaultdict(float)
@@ -50,11 +48,6 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
         for name in series_names:
             unit_power = accepted_power.get(name, 0.0)
             power_by_unit[name].append(unit_power)
-            contains_marginal_unit = name == market.marginal_unit_name
-            if contains_marginal_unit and unit_power > _ENERGY_TOLERANCE_MWH:
-                # 仅标记当前展示机组自身的功率。
-                marginal_times.append(market.delivery_start)
-                marginal_y_positions.append(unit_power)
 
     figure, axis = pyplot.subplots(figsize=(16, 7.5)) # 创建画布
     if series_names:
@@ -82,18 +75,6 @@ def _plot_dispatch_by_unit(pyplot, dates, results, path: Path) -> Path:
         )
         _annotate_no_supply(axis)
         axis.set_ylim(bottom=0.0)
-    if marginal_times:
-        axis.scatter(
-            marginal_times,
-            marginal_y_positions,
-            marker="D",
-            s=18,
-            color="#111111",
-            edgecolors="#FFFFFF",
-            linewidths=0.35,
-            label="Marginal unit",
-            zorder=5,
-        ) # Marginal unit 菱形点
     title = f"Accepted dispatch — top {_MAX_DISPLAYED_DISPATCH_UNITS} units by traded energy"
     if other_unit_names:
         title += f" ({len(other_unit_names)} omitted)"

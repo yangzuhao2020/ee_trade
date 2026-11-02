@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-base:
+base: &base
   # 学习模式以 periods 为准；顶层时间展示全部数据时段。
   start_date: 2019-01-01 00:00
   end_date: 2020-01-01 00:00
@@ -10,7 +10,7 @@ base:
   save_frequency_hours: null
   seed: 7
 
-  learning_config:
+  learning_config: &base_learning
     learning_mode: true
     continue_learning: false
     trained_policies_save_path: null
@@ -38,7 +38,7 @@ base:
       price_unit: EUR/MWh
       market_mechanism: pay_as_clear
 
-tiny:
+tiny: &tiny
   start_date: 2019-01-01 00:00
   end_date: 2019-01-06 00:00
   time_step: 1h
@@ -55,7 +55,7 @@ tiny:
     train_freq: 24h
     gradient_steps: 24
     batch_size: 64
-    periods:
+    periods: &tiny_periods
       train: {start: 2019-01-01 00:00, end: 2019-01-04 00:00}
       validation: {start: 2019-01-04 00:00, end: 2019-01-05 00:00}
       test: {start: 2019-01-05 00:00, end: 2019-01-06 00:00}
@@ -77,3 +77,19 @@ tiny:
       minimum_bid_price: -500
       price_unit: EUR/MWh
       market_mechanism: pay_as_clear
+
+# 与 MATD3 共用市场和输入数据，结果写入各自场景目录。
+grpo_base:
+  <<: *base
+  learning_config:
+    <<: *base_learning
+    algorithm: grpo
+    training_steps: 2099520  # 360 条完整轨迹，30 个组；充分性以验证结果判断。
+
+grpo_tiny:
+  <<: *tiny
+  learning_config:
+    <<: *base_learning
+    algorithm: grpo
+    training_steps: 1728  # 24 条 72 小时轨迹，2 个组，用于流程验证。
+    periods: *tiny_periods

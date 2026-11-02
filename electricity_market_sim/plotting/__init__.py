@@ -185,8 +185,8 @@ def generate_learning_plots(
     """绘制第五版的学习曲线，以及各数据时段上 Actor 与基准策略的对比图。
 
     唯一的输入是训练、评估或测试写出的指标 CSV，因此学习接口仍只返回普通的
-    ``SimulationResult``。训练与测试默认共用输出目录，所以只重绘本指标文件包含的
-    图表，不删除其他命令生成的学习曲线或其他时段的对比图。
+    ``SimulationResult``。只重绘本指标文件包含的图表，不删除输出目录中其他命令
+    生成的学习曲线或其他时段的对比图。
     """
 
     rows = _read_learning_metrics(Path(metrics_path))

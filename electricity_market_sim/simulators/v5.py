@@ -1,12 +1,13 @@
 """第五版学习机组的市场扩展：生成学习报价并记录奖励与状态转移。"""
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from ..errors import InputValidationError
 from ..deep_learning.learning import (
-    ActionProvider, LearningEpisodeSession, TransitionConsumer,
+    ActionProvider, LearningEpisodeSession, PRICE_HISTORY_HOURS, TransitionConsumer,
 )
 from ..models import (
     DemandBid,
@@ -80,6 +81,7 @@ class _LearningMarketExtension:
         self.transition_consumer = transition_consumer
         self.enforce_action_bounds = enforce_action_bounds
         self.session: LearningEpisodeSession | None = None
+        self._history: deque[MarketClearingResult] = deque(maxlen=PRICE_HISTORY_HOURS)
 
     def prepare(self, market: BaseMarket) -> EomExtensionInputs:
         self.plant = _learning_plant(market.settings, market.plants)
@@ -128,13 +130,14 @@ class _LearningMarketExtension:
                 delivery_end=end,
                 available_power_mw=available_powers[start],
                 marginal_cost_eur_per_mwh=marginal_cost_at(start),
-                scheduled_results=scheduled_results,
+                scheduled_results={result.delivery_start: result for result in self._history},
             )
         )
 
     def record_delivery_start(self, result: MarketClearingResult) -> None:
         assert self.session is not None
         self.session.record_result(result)
+        self._history.append(result)
 
     def record_delivery(self, result: MarketClearingResult) -> None:
         pass

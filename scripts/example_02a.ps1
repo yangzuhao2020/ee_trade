@@ -11,6 +11,7 @@ Usage:
 Examples:
   ./scripts/example_02a.ps1 --no-plots
   ./scripts/example_02a.ps1 tiny --training-episodes 4 --training-runs 1 --no-plots
+  ./scripts/example_02a.ps1 grpo_tiny --training-steps 1728 --training-runs 1 --no-plots
   ./scripts/example_02a.ps1 base --learning-mode evaluate --no-plots
 
 The default scenario is base and the default learning mode is train.
@@ -88,8 +89,6 @@ foreach ($scenario in $scenarios) {
         --input-dir $inputDir `
         --output-dir $outputDir `
         --scenario $scenario `
-        --training-runs 1 `
-        --training-episodes 70 `
         @remaining
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }

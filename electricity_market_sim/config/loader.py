@@ -24,7 +24,12 @@ _LEARNING_PARAMETER_FIELDS = frozenset({
     "action_noise_schedule", "noise_sigma", "noise_scale", "noise_dt", "tau",
     "policy_delay", "target_policy_noise", "target_noise_clip",
 })
-_LEARNING_FIELDS = _LEARNING_PARAMETER_FIELDS | _LEARNING_SCENE_FIELDS
+_GRPO_PARAMETER_FIELDS = frozenset({
+    "training_steps", "group_size", "sampling_workers", "update_epochs", "minibatch_size",
+    "clip_epsilon", "target_kl", "initial_std", "min_std", "max_std", "advantage_threshold",
+    "max_grad_norm", "weight_decay", "min_lr_ratio",
+})
+_LEARNING_FIELDS = _LEARNING_PARAMETER_FIELDS | _LEARNING_SCENE_FIELDS | _GRPO_PARAMETER_FIELDS
 
 
 def _warn_unknown_learning_fields(raw: dict[str, Any], source: str) -> None:
@@ -39,9 +44,10 @@ def _warn_unknown_learning_fields(raw: dict[str, Any], source: str) -> None:
         )
 
 
-def _load_learning_defaults() -> dict[str, Any]:
+def _load_learning_defaults(algorithm="matd3") -> dict[str, Any]:
     """读取与加载器同目录的公共训练参数；场景专属设置不能作为默认值。"""
-    path = _LEARNING_DEFAULTS_PATH
+    path = (_LEARNING_DEFAULTS_PATH if algorithm == "matd3"
+            else Path(__file__).with_name("grpo.yaml"))
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
@@ -172,14 +178,17 @@ def _load_learning_config(
         return None
     if not isinstance(raw, dict):
         raise InputValidationError("learning_config 必须是 YAML 映射。")
+    if raw.get("algorithm", "matd3") not in {"matd3", "grpo"}:
+        raise InputValidationError("learning_config.algorithm 仅支持 matd3 或 grpo。")
 
     _warn_unknown_learning_fields(raw, f"{source} 的 learning_config")
     if raw.get("learning_mode") is True:
-        defaults = _load_learning_defaults()
+        defaults = _load_learning_defaults(raw.get("algorithm", "matd3"))
         _warn_unknown_learning_fields(defaults, str(_LEARNING_DEFAULTS_PATH))
         raw = {**defaults, **raw}
     nulls = sorted(
-        name for name in _LEARNING_PARAMETER_FIELDS if name in raw and raw[name] is None
+        name for name in _LEARNING_PARAMETER_FIELDS | _GRPO_PARAMETER_FIELDS
+        if name in raw and raw[name] is None
     )
     if nulls:
         raise InputValidationError(
@@ -187,20 +196,15 @@ def _load_learning_config(
             + ", ".join(nulls)
         )
 
-    def registered(name: str) -> str:
-        if name not in _LEARNING_FIELDS:
-            raise AssertionError(f"learning_config 字段 {name!r} 未登记到字段名单。")
-        return name
-
     def required(name: str) -> Any:
-        if registered(name) not in raw:
+        if name not in raw:
             raise InputValidationError(
                 f"learning_config 缺少必填字段：{name}"
             )
         return raw[name]
 
     def optional(name: str, default: Any) -> Any:
-        return raw.get(registered(name), default)
+        return raw.get(name, default)
 
     def optional_path(name: str) -> str | None:
         value = optional(name, None)
@@ -221,6 +225,30 @@ def _load_learning_config(
             raise InputValidationError(
                 "learning_config.continue_learning 必须是布尔值。"
             )
+        grpo = required("algorithm") == "grpo"
+        # GRPO 不读取 TD3 专属字段；旧配置仍保持原必填校验。
+        if grpo:
+            config = LearningConfig(
+                learning_mode=learning_mode, algorithm="grpo",
+                learning_rate=float(required("learning_rate")), gamma=float(required("gamma")),
+                validation_interval=1,
+                actor_architecture=str(optional("actor_architecture", "mlp")),
+                device=str(optional("device", "cpu")), continue_learning=continue_learning,
+                trained_policies_save_path=optional_path("trained_policies_save_path"),
+                trained_policies_load_path=optional_path("trained_policies_load_path"),
+                max_bid_price=float(optional("max_bid_price", 100.0)),
+                periods=_load_learning_periods(optional("periods", None), required=learning_mode),
+                **{name: int(required(name)) for name in (
+                    "training_steps", "group_size", "sampling_workers", "update_epochs", "minibatch_size"
+                )},
+                **{name: float(required(name)) for name in (
+                    "clip_epsilon", "target_kl", "initial_std", "min_std", "max_std",
+                    "advantage_threshold",
+                    "max_grad_norm", "weight_decay", "min_lr_ratio",
+                )},
+            )
+            _validate_grpo_config(config)
+            return config
         train_frequency = parse_duration(
             required("train_freq"), "learning_config.train_freq"
         )
@@ -258,6 +286,7 @@ def _load_learning_config(
             trained_policies_save_path=optional_path("trained_policies_save_path"),
             trained_policies_load_path=optional_path("trained_policies_load_path"),
             max_bid_price=float(optional("max_bid_price", 100.0)),
+            training_steps=int(optional("training_steps", 0)),
             periods=_load_learning_periods(
                 optional("periods", None), required=learning_mode
             ),
@@ -324,6 +353,24 @@ def _load_learning_config(
             "以下 learning_config 字段不能为负数：" + ", ".join(invalid)
         )
     return config
+
+
+def _validate_grpo_config(config):
+    positive = (
+        "learning_rate", "training_steps", "group_size", "sampling_workers", "update_epochs", "minibatch_size",
+        "target_kl", "initial_std", "min_std", "max_std", "advantage_threshold", "max_bid_price",
+        "max_grad_norm",
+    )
+    if any(not isfinite(getattr(config, name)) or getattr(config, name) <= 0 for name in positive):
+        raise InputValidationError("GRPO 的步数、批大小、学习率、标准差和阈值必须为有限正数。")
+    if config.group_size < 2 or not 0 < config.clip_epsilon < 1:
+        raise InputValidationError("GRPO group_size 至少为 2，clip_epsilon 必须在 (0, 1) 内。")
+    if not config.min_std <= config.initial_std <= config.max_std:
+        raise InputValidationError("GRPO 必须满足 min_std <= initial_std <= max_std。")
+    if not isfinite(config.weight_decay) or config.weight_decay < 0 or not 0 <= config.min_lr_ratio <= 1:
+        raise InputValidationError("GRPO weight_decay 必须为有限非负数，min_lr_ratio 必须在 [0, 1] 内。")
+    if not 0 <= config.gamma <= 1 or config.actor_architecture != "mlp":
+        raise InputValidationError("GRPO 要求 gamma 在 [0, 1] 内，actor_architecture 为 mlp。")
 
 
 def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSettings:

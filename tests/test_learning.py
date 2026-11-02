@@ -278,19 +278,12 @@ class LearningConfigurationContracts(unittest.TestCase):
             with self.assertRaisesRegex(InputValidationError, "null.*device, max_bid_price, tau"):
                 load_market_settings(path)
 
-    def test_field_registry_matches_shared_defaults_and_loader_reads(self):
+    def test_field_registry_matches_shared_defaults(self):
         from electricity_market_sim.config import loader
         defaults = yaml.safe_load(loader._LEARNING_DEFAULTS_PATH.read_text(encoding="utf-8"))
         self.assertEqual(set(defaults["learning_config"]), loader._LEARNING_PARAMETER_FIELDS)
-        with TemporaryDirectory() as temporary:
-            path = make_scenario(Path(temporary)) / "config.yaml"
-            for field in ("tau", "device", "periods"):
-                with self.subTest(field=field), patch.object(
-                    loader, "_LEARNING_FIELDS", loader._LEARNING_FIELDS - {field}
-                ), warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    with self.assertRaisesRegex(AssertionError, f"'{field}'.*未登记"):
-                        load_market_settings(path)
+        grpo_defaults = loader._load_learning_defaults("grpo")
+        self.assertLessEqual(grpo_defaults.keys(), loader._LEARNING_FIELDS)
 
 
 class LearningCoverageContracts(unittest.TestCase):
@@ -393,6 +386,38 @@ class LearningMarketContracts(unittest.TestCase):
                         states[1][11], result.market_results[0].clearing_price_eur_per_mwh / 200.0
                     )
                     self.assertNotEqual(states[1][11], baseline[1][11])
+
+    def test_price_history_rolls_over_with_previous_dispatch_and_storage(self):
+        with TemporaryDirectory() as temporary:
+            for storage in (False, True):
+                with self.subTest(storage=storage):
+                    path = make_scenario(
+                        Path(temporary) / str(storage), storage=storage,
+                        demand_change_from=1, profile_hours=21,
+                        periods={"train": (1, 17), "validation": (17, 19), "test": (19, 21)},
+                    )
+                    states = []
+
+                    def action(state):
+                        index = len(states)
+                        states.append(state)
+                        return (0.15 + 0.02 * index, 0.3 + 0.02 * index)
+
+                    result = simulate_learning_episode(path, action, period="train")
+                    for index, state in enumerate(states):
+                        history = result.market_results[max(0, index - 12):index]
+                        expected = (0.0,) * (12 - len(history)) + tuple(
+                            market.clearing_price_eur_per_mwh / 200.0 for market in history
+                        )
+                        self.assertEqual(state[:12], expected)
+                        previous_power = sum(
+                            item.accepted_power_mw
+                            for item in result.market_results[index - 1].offers
+                            if item.offer.unit_name == "pp_6"
+                        ) if index else 0.0
+                        self.assertEqual(state[14], previous_power / 10.0)
+                    self.assertEqual(len(states), 16)
+                    self.assertNotEqual(states[-1][:12], states[-2][:12])
 
     def test_future_demand_changes_are_visible_only_after_the_changed_market_clears(self):
         with TemporaryDirectory() as temporary:

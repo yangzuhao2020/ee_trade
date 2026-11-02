@@ -111,6 +111,9 @@ def _project_storage_energies(
     返回以储能名称为键、预计储能量（MWh）为值的字典。
     """
 
+    if not storages:
+        return {}
+
     first_delivery = opening.products[0][0]
     pending_before_delivery = sorted(
         (

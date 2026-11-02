@@ -1,5 +1,6 @@
 """第五版 MATD3 训练、恢复训练、验证选模及多运行清单编排。"""
 
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -19,14 +20,14 @@ from .agent import (
 )
 from ..config import load_market_settings
 from ..errors import InputValidationError
-from .learning_metrics import _EpisodeMetrics, _metrics, _write_metrics, _write_run_summary
+from .learning_metrics import _EpisodeMetrics, _metrics, _write_metrics, _write_run_summary, _write_records
 from ..models import LearningConfig, MarketSettings, SimulationResult
 from ..reporting import write_results
 from ..simulation import LearningEpisodeRunner, learning_period_settings, market_openings
 from .test import _evaluate_actor_and_baseline
 from .data_coverage import validate_learning_data_coverage
 
-_DEFAULT_INDEPENDENT_RUNS = 3
+_DEFAULT_INDEPENDENT_RUNS = 1
 
 
 def _training_progress(first_episode: int, total: int, run: int):
@@ -142,7 +143,7 @@ def _resume_run_number(
         )
         if not resolved.is_file():
             return None
-    payload = _read_checkpoint_payload(resolved, "cpu")
+    payload = _read_checkpoint_payload(resolved, "cpu", algorithm=config.algorithm)
     run = payload.get("run")
     if isinstance(run, int) and not isinstance(run, bool):
         return run
@@ -159,17 +160,36 @@ def _train_single_run(
     seed: int,
     checkpoint_path: str | Path | None = None,
     training_episodes: int | None = None,
-) -> tuple[SimulationResult, list[_EpisodeMetrics], Path, Path, float, int | None]:
+    training_steps: int | None = None,
+) -> tuple[SimulationResult, list[_EpisodeMetrics], Path | None, Path, float, int | None]:
     """完成一次统计上独立的 MATD3 训练：只用训练时段更新，只用验证时段选模型。"""
 
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
     config = _learning_config(settings)
+    steps_per_episode = _steps_per_episode(settings, "train")
+    if training_episodes is not None and (
+        training_steps is not None or config.training_steps or config.algorithm == "grpo"
+    ):
+        raise InputValidationError("GRPO 使用 training_steps；training_episodes 不能与步数预算同时指定。")
+    if config.algorithm == "grpo":
+        from .grpo_training import train_single_run
+        return train_single_run(
+            input_path, output_path, checkpoint_root, scenario, config=config,
+            run=run, seed=seed, steps_per_episode=steps_per_episode,
+            training_steps=training_steps,
+        )
     episode_count = (
         config.training_episodes if training_episodes is None else training_episodes
     )
     if episode_count <= 0:
         raise InputValidationError("Training episodes must be positive.")
-    steps_per_episode = _steps_per_episode(settings, "train")
+    budget = config.training_steps if training_steps is None else training_steps
+    if budget:
+        if budget <= 0 or budget % steps_per_episode:
+            raise InputValidationError(f"MATD3 training_steps 必须是 {steps_per_episode} 的正整数倍。")
+        episode_count = budget // steps_per_episode
+    elif training_steps is not None:
+        raise InputValidationError("training_steps 必须为正整数。")
     regular_episode_count = max(0, episode_count - config.initial_experience_episodes)
     initial_transition_count = (
         min(episode_count, config.initial_experience_episodes) * steps_per_episode
@@ -231,6 +251,9 @@ def _train_single_run(
         # an unrelated earlier training so it cannot pass as this run's best.
         best_path.unlink(missing_ok=True)
 
+    progress = []
+    started = monotonic()
+    validation_seconds = 0.0
     for episode in _training_progress(first_episode, episode_count, run):
         initial_experience = episode <= config.initial_experience_episodes
         training_result = train_runner.run_episode(
@@ -254,7 +277,9 @@ def _train_single_run(
         is_last_episode = episode == episode_count
         should_validate = is_validation_due or is_last_episode
         if should_validate:
+            validation_started = monotonic()
             validation_result = validation_runner.run_episode(agent.deterministic_action)
+            validation_seconds += monotonic() - validation_started
             validation_metrics = _metrics(
                 validation_result,
                 run=run,
@@ -263,6 +288,11 @@ def _train_single_run(
                 gamma=config.gamma,
             )
             metrics.append(validation_metrics)
+            progress.append({
+                "episode": episode, "interaction_steps": episode * steps_per_episode,
+                "elapsed_seconds": monotonic() - started, "validation_seconds": validation_seconds,
+                "total_reward": validation_metrics.total_reward,
+            })
             # 按验证时段总奖励选模型；打平时保留更早的检查点。
             if (
                 not initial_experience
@@ -302,6 +332,7 @@ def _train_single_run(
     )
     metrics.extend(comparison)
     _write_metrics(output_path / "learning_metrics.csv", metrics)
+    _write_records(output_path / "learning_progress.csv", progress, append=restored is not None)
     return (
         validation_result,
         metrics,
@@ -320,6 +351,7 @@ def train_learning_scenario(
     checkpoint_path: str | Path | None = None,
     training_episodes: int | None = None,
     independent_runs: int | None = None,
+    training_steps: int | None = None,
 ) -> SimulationResult:
     """训练多次独立的 MATD3 运行，按验证时段总奖励选模型；不运行测试时段。
     恢复单个检查点时沿用其运行编号，写回对应的 run_XX 目录并把记录合并进
@@ -332,6 +364,8 @@ def train_learning_scenario(
     output_path = Path(output_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
     config = _learning_config(settings)
+    if config.algorithm == "grpo" and (checkpoint_path is not None or config.continue_learning):
+        raise InputValidationError("GRPO 仅支持从头训练；--checkpoint 用于评估或测试。")
     if independent_runs is None:
         run_count = (
             1
@@ -357,6 +391,10 @@ def train_learning_scenario(
     resuming = run_count == 1 and (
         checkpoint_path is not None or config.continue_learning
     )
+    if not resuming and manifest_path.is_file():
+        algorithm = json.loads(manifest_path.read_text(encoding="utf-8")).get("algorithm", "matd3")
+        if algorithm != config.algorithm:
+            raise InputValidationError("Run manifest algorithm differs from config; use a separate output directory.")
     resume_run = (
         _resume_run_number(config, checkpoint_root, checkpoint_path)
         if resuming
@@ -365,8 +403,7 @@ def train_learning_scenario(
     # 恢复运行沿用检查点里的运行编号，并把记录合并进现有运行清单。
     existing_runs = (
         _read_run_manifest(manifest_path, config)["runs"]
-        if resuming and manifest_path.is_file()
-        else []
+        if resuming and manifest_path.is_file() else []
     )
     use_run_dirs = run_count > 1 or (
         resuming
@@ -423,6 +460,7 @@ def train_learning_scenario(
             seed=_independent_run_seed(settings.seed, run),
             checkpoint_path=checkpoint_path,
             training_episodes=training_episodes,
+            training_steps=training_steps,
         )
         results[run] = result
         produced_runs.append(run)
@@ -437,7 +475,7 @@ def train_learning_scenario(
             run_records[record_index[run]] = record
         else:
             run_records.append(record)
-        if use_run_dirs:
+        if use_run_dirs and latest_path is not None:
             _copy_if_distinct(latest_path, checkpoint_root / "latest.pt")
 
     assert produced_runs

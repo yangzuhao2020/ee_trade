@@ -75,7 +75,7 @@ def _initialize_linear(module: nn.Module) -> None:
         nn.init.zeros_(module.bias)
 
 
-def _read_checkpoint_payload(path: Path, device: torch.device | str) -> dict[str, Any]:
+def _read_checkpoint_payload(path: Path, device: torch.device | str, *, algorithm="matd3") -> dict[str, Any]:
     if not path.is_file():
         raise InputValidationError(f"Learning checkpoint does not exist: {path}")
     try:
@@ -89,7 +89,8 @@ def _read_checkpoint_payload(path: Path, device: torch.device | str) -> dict[str
             f"Learning checkpoint {path} is incompatible with Version 5."
         )
     if (
-        payload.get("checkpoint_version") != _CHECKPOINT_VERSION
+        payload.get("checkpoint_version") != (3 if algorithm == "grpo" else _CHECKPOINT_VERSION)
+        or payload.get("algorithm", "matd3") != algorithm
         or payload.get("state_version") != _STATE_VERSION
         or payload.get("observation_size") != OBSERVATION_SIZE
         or payload.get("action_size") != ACTION_SIZE
@@ -97,6 +98,8 @@ def _read_checkpoint_payload(path: Path, device: torch.device | str) -> dict[str
         raise InputValidationError(
             f"Learning checkpoint {path} is incompatible with Version 5."
         )
+    if algorithm == "grpo" and payload.get("distribution") != "softsign-normal-v1":
+        raise InputValidationError(f"Incompatible GRPO checkpoint: {path}")
     return payload
 
 
@@ -352,7 +355,7 @@ class MATD3Agent:
         torch.save(payload, temporary_path)
         temporary_path.replace(path)
 
-    def load_checkpoint(self, path: Path, *, load_optimizers: bool) -> dict[str, Any]:
+    def load_checkpoint(self, path: Path, *, load_optimizers: bool = False) -> dict[str, Any]:
         payload = _read_checkpoint_payload(path, self.device)
         if payload.get("max_bid_price") != self.config.max_bid_price:
             raise InputValidationError(
@@ -437,7 +440,8 @@ def _write_run_manifest(
     """记录每个独立运行的最佳检查点，供独立的测试命令读取。"""
     checkpoint_root.mkdir(parents=True, exist_ok=True)
     payload = {
-        "checkpoint_version": _CHECKPOINT_VERSION,
+        "checkpoint_version": 3 if config.algorithm == "grpo" else _CHECKPOINT_VERSION,
+        "algorithm": config.algorithm,
         "periods": _periods_payload(config),
         "selected_run": selected_run,
         "runs": runs,
@@ -470,6 +474,8 @@ def _read_run_manifest(path: Path, config: LearningConfig) -> dict[str, Any]:
         raise InputValidationError(f"Learning run manifest {path} is invalid.") from exc
     if not runs:
         raise InputValidationError(f"Learning run manifest {path} lists no runs.")
+    if payload.get("algorithm", "matd3") != config.algorithm:
+        raise InputValidationError("Run manifest algorithm differs from config; use a separate output directory.")
     if payload.get("periods") != _periods_payload(config):
         raise InputValidationError(
             f"Learning run manifest {path} 的训练、验证、测试时段与当前 "
@@ -482,3 +488,10 @@ def _default_checkpoint_root(config: LearningConfig, output_path: Path) -> Path:
     if config.trained_policies_save_path is not None:
         return Path(config.trained_policies_save_path)
     return output_path / "checkpoints"
+
+
+def create_agent(config: LearningConfig, **kwargs):
+    if config.algorithm == "grpo":
+        from .grpo_agent import GRPOAgent
+        return GRPOAgent(config, **kwargs)
+    return MATD3Agent(config, total_regular_steps=1, **kwargs)
