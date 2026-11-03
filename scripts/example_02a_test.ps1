@@ -1,7 +1,5 @@
 param([string]$Scenario = "base")
 
-$ErrorActionPreference = "Stop"
-
 $projectDir = Split-Path $PSScriptRoot -Parent
 
 (& conda.exe shell.powershell hook) | Out-String | Invoke-Expression

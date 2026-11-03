@@ -1,8 +1,6 @@
 # Run one or all scenarios from examples/input/example_01c.
 # PowerShell port of example_01c.sh.
 
-$ErrorActionPreference = "Stop"
-
 function Show-Usage {
     @"
 Usage:

@@ -63,7 +63,9 @@ def train_single_run(input_path, output_path, checkpoint_root, scenario, *,
             for parameters in agent.optimizer.param_groups:
                 parameters["lr"] = config.learning_rate * lr_ratio
             diagnostics.append({"group": group, **agent.update(batch)})
-            # 每个完整组后验证，只保存验证奖励最高的策略。
+            # 按组间隔验证，最后一组始终验证；只保存验证奖励最高的策略。
+            if group % config.validation_interval != 0 and group != groups:
+                continue
             validation_start = monotonic()
             result = validation.run_episode(agent.deterministic_action)
             validation_seconds += monotonic() - validation_start

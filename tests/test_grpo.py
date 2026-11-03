@@ -69,6 +69,7 @@ class GRPOTests(unittest.TestCase):
             path = make_grpo_scenario(Path(temporary))
             cfg = load_market_settings(path / "config.yaml").learning_config
             self.assertEqual(cfg.group_size, 12)
+            self.assertEqual(cfg.validation_interval, 5)
             agent = GRPOAgent(cfg, seed=7)
             before = {name: value.clone() for name, value in agent.actor.state_dict().items()}
             batch, results = collect_group(agent, LearningEpisodeRunner(path, period="train"))
@@ -229,7 +230,7 @@ class GRPOTests(unittest.TestCase):
                                      for file in (output / "checkpoints").iterdir()})
             self.assertEqual(len(read_rows(output / "grpo_diagnostics.csv")), 2)
             self.assertEqual([int(row["interaction_steps"])
-                              for row in read_rows(output / "learning_progress.csv")], [36, 72])
+                              for row in read_rows(output / "learning_progress.csv")], [72])
             cfg = load_market_settings(path / "config.yaml").learning_config
             with self.assertRaises(InputValidationError):
                 MATD3Agent(cfg, total_regular_steps=1).load_checkpoint(best)
@@ -335,7 +336,36 @@ class GRPOTests(unittest.TestCase):
             diagnostics = read_rows(output / "grpo_diagnostics.csv")
             self.assertEqual([int(row["interaction_steps"]) for row in diagnostics], [18, 36, 54])
             payload = torch.load(output / "checkpoints" / "best.pt", weights_only=True)
-            self.assertIn(payload["episode"], (6, 12, 18))
+            self.assertEqual(payload["episode"], 18)
+
+    def test_validation_group_interval_and_final_group_select_best_checkpoint(self):
+        for interval, groups, expected in (
+            (1, 3, [1, 2, 3]), (2, 4, [2, 4]),
+            (5, 12, [5, 10, 12]), (5, 2, [2]),
+        ):
+            with self.subTest(interval=interval, groups=groups), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                path = make_grpo_scenario(root / "input")
+                config_path = path / "config.yaml"
+                scene = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                scene["base"]["learning_config"].update(
+                    group_size=2, update_epochs=1, validation_groups_interval=interval,
+                )
+                config_path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+                output = root / "output"
+                train_learning_scenario(path, output, independent_runs=1, training_steps=groups * 6)
+                metrics = read_rows(output / "learning_metrics.csv")
+                validation = [row for row in metrics if row["phase"] == "validation"]
+                expected_episodes = [group * 2 for group in expected]
+                self.assertEqual([int(row["episode"]) for row in validation], expected_episodes)
+                progress = read_rows(output / "learning_progress.csv")
+                self.assertEqual([int(row["episode"]) for row in progress], expected_episodes)
+                self.assertEqual(len([row for row in metrics if row["phase"] == "train"]), groups * 2)
+                self.assertEqual(len(read_rows(output / "grpo_diagnostics.csv")), groups)
+                best = max(validation, key=lambda row: float(row["total_reward"]))
+                payload = torch.load(output / "checkpoints" / "best.pt", weights_only=True)
+                self.assertEqual(payload["episode"], int(best["episode"]))
+                self.assertAlmostEqual(payload["validation_total_reward"], float(best["total_reward"]))
 
     def test_matd3_step_budget_counts_warmup_interactions(self):
         with TemporaryDirectory() as temporary:
@@ -355,6 +385,8 @@ class GRPOTests(unittest.TestCase):
             config_path = path / "config.yaml"
             scene = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             for name, value in (("group_size", 1), ("sampling_workers", 0),
+                                ("validation_groups_interval", 0), ("validation_groups_interval", -1),
+                                ("validation_groups_interval", 1.5), ("validation_groups_interval", True),
                                 ("initial_std", 2), ("advantage_threshold", 0),
                                 ("max_grad_norm", 0), ("weight_decay", -0.01), ("min_lr_ratio", 1.1)):
                 invalid = yaml.safe_load(yaml.safe_dump(scene))

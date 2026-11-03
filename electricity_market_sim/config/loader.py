@@ -25,6 +25,7 @@ _LEARNING_PARAMETER_FIELDS = frozenset({
     "policy_delay", "target_policy_noise", "target_noise_clip",
 })
 _GRPO_PARAMETER_FIELDS = frozenset({
+    "validation_groups_interval",
     "training_steps", "group_size", "sampling_workers", "update_epochs", "minibatch_size",
     "clip_epsilon", "target_kl", "initial_std", "min_std", "max_std", "advantage_threshold",
     "max_grad_norm", "weight_decay", "min_lr_ratio",
@@ -228,10 +229,13 @@ def _load_learning_config(
         grpo = required("algorithm") == "grpo"
         # GRPO 不读取 TD3 专属字段；旧配置仍保持原必填校验。
         if grpo:
+            validation_interval = required("validation_groups_interval")
+            if type(validation_interval) is not int or validation_interval <= 0:
+                raise InputValidationError("learning_config.validation_groups_interval 必须是正整数。")
             config = LearningConfig(
                 learning_mode=learning_mode, algorithm="grpo",
                 learning_rate=float(required("learning_rate")), gamma=float(required("gamma")),
-                validation_interval=1,
+                validation_interval=validation_interval,
                 actor_architecture=str(optional("actor_architecture", "mlp")),
                 device=str(optional("device", "cpu")), continue_learning=continue_learning,
                 trained_policies_save_path=optional_path("trained_policies_save_path"),

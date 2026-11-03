@@ -194,7 +194,7 @@ $$
 | `deep_learning/learning.py` 与市场模块 | 复用观测、报价、出清和奖励语义 |
 | [grpo_agent.py](../electricity_market_sim/deep_learning/grpo_agent.py) | 随机 Actor、组采样缓存、回报/优势计算、裁剪更新 |
 | [grpo_sampling.py](../electricity_market_sim/deep_learning/grpo_sampling.py) | CPU 并行采样、随机流分配和按轨迹编号合并 |
-| [grpo_training.py](../electricity_market_sim/deep_learning/grpo_training.py) | 从头按完整组训练，每组后验证选模 |
+| [grpo_training.py](../electricity_market_sim/deep_learning/grpo_training.py) | 从头按完整组训练，按配置的组间隔验证选模 |
 | 学习配置与入口 | 支持 `matd3` / `grpo` 分支，按算法校验参数，不能仅修改算法名字就共用原训练循环 |
 | 评估及指标模块 | 复用确定性策略评估、边际成本基线和经济指标；GRPO 诊断另存 |
 | 检查点与输出目录 | 保存策略权重、算法名、分布和优势版本、数据时段；按算法隔离 |
@@ -232,6 +232,8 @@ python -m electricity_market_sim.main --input-dir examples/input/example_02a --s
 `--training-rounds` 表示每次独立运行的 GRPO 组数，也可直接传给 Python 入口；不传轮数或步数时，Python 入口沿用上表中的场景预算。`--training-steps` 表示每次独立运行的目标总交互数；GRPO 必须为完整组交互数的正整数倍。GRPO 不接受 `--training-episodes`。MATD3 可使用步数或轮数预算，不能同时指定。当前入口默认 1 次独立运行；正式对比建议显式设置 `--training-runs 5`。
 
 等预算对比可分别对 `base`、`grpo_base` 设置 `--training-steps 2099520 --training-runs 5`，输出目录分开。不能直接把默认 30 轮的 MATD3 与默认 360 条轨迹的 GRPO 当作等预算实验。
+
+`electricity_market_sim/config/grpo.yaml` 中的 `validation_groups_interval` 控制每隔多少个 GRPO 组（训练轮次）验证一次，必须为正整数，默认值为 5；场景的 `learning_config` 可覆盖。最后一组始终验证，设为 1 即每组验证。训练结束后仍使用最佳模型进行验证期策略与基线对比。
 
 GRPO 输出学习指标、`best.pt` 和 `runs.json`，以及：
 

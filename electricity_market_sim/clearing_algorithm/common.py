@@ -35,7 +35,6 @@ def validate_demand_prices(
     demand_bids: list[DemandBid], settings: MarketSettings
 ) -> None:
     """检查每笔需求买单的报价是否在市场配置的最低报价与最高报价之间（含边界值）。
-
     遇到越界报价时抛出 InputValidationError，并提示订单标识和报价；全部通过时返回 None。
     """
 
@@ -71,7 +70,6 @@ def _single_product(
 
 def _demand_totals(cleared_demands: tuple[ClearedDemandBid, ...]) -> dict[str, float]:
     """计算各出清算法共用的结果字段：申报需求总量、未满足的刚性负荷和未完成的出口量；成交电量仍由各算法自行汇总。"""
-
     return {
         "requested_demand_mwh": sum_cleared_demand(cleared_demands, "bid.volume_mwh"),
         "unserved_load_mwh": sum_cleared_demand(
