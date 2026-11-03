@@ -277,11 +277,14 @@ class LearningEpisodeSession:
     ) -> None:
         """在请求当前动作之前，先完成上一步的状态转移。"""
 
-        pending_starts = sorted(self._pending.keys() - self._emitted_starts)
-        if not pending_starts:
+        if not self._pending:
+            return
+        # 每次加入新记录前都会发布上一条，未发布的只可能是最后加入的一条。
+        pending_start = next(reversed(self._pending))
+        if pending_start in self._emitted_starts:
             return
         previous_start = delivery_start - timedelta(hours=1)
-        if pending_starts != [previous_start]:
+        if pending_start != previous_start:
             raise InputValidationError(
                 "Learning delivery products must form a continuous hourly episode."
             )

@@ -1,6 +1,6 @@
 param(
     [string]$Scenario = "grpo_base",
-    [int]$Rounds = 60
+    [int]$Rounds = 200
 )
 
 $ErrorActionPreference = "Stop"

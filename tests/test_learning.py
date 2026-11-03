@@ -23,7 +23,9 @@ import yaml
 
 from electricity_market_sim.config import load_market_settings
 from electricity_market_sim.deep_learning.agent import MATD3Agent, _periods_payload
-from electricity_market_sim.deep_learning.learning import build_learning_observation
+from electricity_market_sim.deep_learning.learning import (
+    LearningEpisodeSession, build_learning_observation,
+)
 from electricity_market_sim.deep_learning.learning_metrics import _metrics
 from electricity_market_sim.deep_learning.test import (
     evaluate_learning_scenario, run_learning_test,
@@ -351,6 +353,42 @@ class LearningCoverageContracts(unittest.TestCase):
 
 class LearningMarketContracts(unittest.TestCase):
     collect_states = staticmethod(collect_states)
+
+    def test_transitions_precede_next_action_and_finalization_does_not_repeat_them(self):
+        events = []
+        finalize = LearningEpisodeSession.finalize
+
+        def action(state):
+            events.append("action")
+            return (0.75, 0.75)
+
+        def transition(value):
+            events.append("terminal" if value.done else "transition")
+
+        def finalize_twice(session):
+            result = finalize(session)
+            self.assertEqual(finalize(session), result)
+            return result
+
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary))
+            with patch.object(LearningEpisodeSession, "finalize", autospec=True,
+                              side_effect=finalize_twice):
+                simulate_learning_episode(path, action, transition_consumer=transition,
+                                          period="train")
+        self.assertEqual(events, [
+            "action", "transition", "action", "transition", "action", "terminal",
+        ])
+
+    def test_nonconsecutive_learning_hours_are_rejected(self):
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary))
+            config_path = path / "config.yaml"
+            scene = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            scene["base"]["markets_config"]["EOM"]["opening_frequency"] = "2h"
+            config_path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+            with self.assertRaisesRegex(InputValidationError, "continuous hourly"):
+                self.collect_states(path)
 
     def test_learning_runs_without_price_prediction_and_receives_only_past_prices(self):
         with TemporaryDirectory() as temporary:

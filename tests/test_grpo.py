@@ -35,7 +35,7 @@ def make_grpo_scenario(path):
     periods = scene["base"]["learning_config"]["periods"]
     scene["base"]["learning_config"] = {
         "learning_mode": True, "algorithm": "grpo", "periods": periods,
-        "training_steps": 72, "update_epochs": 2, "sampling_workers": 1,
+        "training_steps": 72, "group_size": 12, "update_epochs": 2, "sampling_workers": 1,
     }
     config_path.write_text(yaml.safe_dump(scene), encoding="utf-8")
     return path
