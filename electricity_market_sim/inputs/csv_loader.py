@@ -377,17 +377,20 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
                 f"{path.name}: building {name!r} non-zero heat-pump "
                 "min_operating_time is not supported in version three."
             )
+        if _group_field(rows, "objective", path, "building") != "min_variable_cost":
+            raise InputValidationError(
+                f"{path.name}: building {name!r} objective must be min_variable_cost."
+            )
+        if _group_field(rows, "flexibility_measure", path, "building") != "cost_based_load_shift":
+            raise InputValidationError(
+                f"{path.name}: building {name!r} flexibility_measure must be "
+                "cost_based_load_shift."
+            )
 
         household = HouseholdUnit(
             name=name,
             operator=_group_field(rows, "unit_operator", path, "building"),
-            bidding_strategy=strategy,
-            objective=_group_field(rows, "objective", path, "building"),
-            flexibility_measure=_group_field(
-                rows, "flexibility_measure", path, "building"
-            ),
             cost_tolerance_percent=cost_tolerance,
-            is_prosumer=False,
             fixed_power_mw=0.0,
             heat_pump_max_power_mw=_float(
                 heat, "max_power", path, heat_number
@@ -432,15 +435,6 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
                 battery, "storage_loss_rate", 0.0, path, battery_number
             ),
         )
-        if household.objective != "min_variable_cost":
-            raise InputValidationError(
-                f"{path.name}: building {name!r} objective must be min_variable_cost."
-            )
-        if household.flexibility_measure != "cost_based_load_shift":
-            raise InputValidationError(
-                f"{path.name}: building {name!r} flexibility_measure must be "
-                "cost_based_load_shift."
-            )
         households.append(household)
     return tuple(households)
 

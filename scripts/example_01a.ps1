@@ -25,11 +25,6 @@ $datasetName = "example_01a"
 $inputDir = Join-Path $projectDir "examples/input/$datasetName"
 $configFile = Join-Path $inputDir "config.yaml"
 
-if (-not (Test-Path $configFile)) {
-    Write-Error "Dataset has no config.yaml: $inputDir"
-    exit 2
-}
-
 $remaining = [System.Collections.Generic.List[string]]::new()
 $remaining.AddRange([string[]]$args)
 $scenarioSelector = "base"
@@ -38,10 +33,6 @@ if ($remaining.Count -gt 0 -and -not $remaining[0].StartsWith("-")) {
     $remaining.RemoveAt(0)
 }
 
-if (-not (Get-Command conda.exe -ErrorAction SilentlyContinue)) {
-    Write-Error "Cannot find conda in PATH."
-    exit 1
-}
 (& conda.exe shell.powershell hook) | Out-String | Invoke-Expression
 conda activate ee_trade
 $env:PYTHONPATH = "$projectDir$(if ($env:PYTHONPATH) { ";$env:PYTHONPATH" })"
@@ -53,8 +44,6 @@ import sys
 import yaml
 
 config = yaml.safe_load(Path(r'''$configFile''').read_text(encoding="utf-8"))
-if not isinstance(config, dict) or not config:
-    raise SystemExit("No scenarios found in $configFile")
 for name in config:
     print(name)
 "@

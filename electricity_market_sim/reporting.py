@@ -8,7 +8,6 @@ from operator import attrgetter
 from pathlib import Path
 from typing import Any
 from .errors import InputValidationError
-from .deep_learning.learning import PRICE_SCALE_EUR_PER_MWH
 from .models import SimulationResult
 from .utils import format_timestamp, hours_between
 
@@ -108,13 +107,16 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         opening_time = market_result.opening_time or market_result.delivery_start
         opening_id = opening_time.isoformat()
         duration_hours = market_result.duration_hours
+        product_columns = {
+            "opening_id": opening_id,
+            "opening_time": format_timestamp(opening_time),
+            "delivery_start": format_timestamp(market_result.delivery_start),
+            "delivery_end": format_timestamp(market_result.delivery_end),
+        }
         market_rows.append(
             {
                 "market_id": simulation_result.settings.market_id,
-                "opening_id": opening_id,
-                "opening_time": format_timestamp(opening_time),
-                "delivery_start": format_timestamp(market_result.delivery_start),
-                "delivery_end": format_timestamp(market_result.delivery_end),
+                **product_columns,
                 "duration_hours": _number(duration_hours),
                 "requested_demand_energy_mwh": _number(
                     market_result.requested_demand_mwh
@@ -163,16 +165,13 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         for cleared in market_result.demand_bids:
             demand_rows.append(
                 {
-                    "opening_id": opening_id,
-                    "opening_time": format_timestamp(opening_time),
-                    "delivery_start": format_timestamp(cleared.bid.delivery_start),
-                    "delivery_end": format_timestamp(cleared.bid.delivery_end),
+                    **product_columns,
                     "unit_name": cleared.bid.unit_name,
                     "unit_operator": cleared.bid.operator,
                     "bid_id": cleared.bid.identifier,
                     "side": cleared.bid.side,
                     "bid_type": cleared.bid.bid_type,
-                    "demand_type": cleared.bid.demand_type or "",
+                    "demand_type": cleared.bid.demand_type,
                     "bid_price_eur_per_mwh": _number(
                         cleared.bid.price_eur_per_mwh
                     ),
@@ -193,10 +192,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             offers_by_unit[offer.unit_name].append(cleared)
             offer_rows.append(
                 {
-                    "opening_id": opening_id,
-                    "opening_time": format_timestamp(opening_time),
-                    "delivery_start": format_timestamp(offer.delivery_start),
-                    "delivery_end": format_timestamp(offer.delivery_end),
+                    **product_columns,
                     "unit_name": offer.unit_name,
                     "unit_operator": offer.operator,
                     "technology": offer.technology,
@@ -205,7 +201,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     "bid_id": offer.complex_identifier,
                     "bid_type": offer.bid_type,
                     "min_acceptance_ratio": _number(offer.min_acceptance_ratio),
-                    "parent_bid_id": offer.parent_bid_id or "",
+                    "parent_bid_id": offer.parent_bid_id,
                     "offer_segment": offer.offer_segment,
                     "marginal_cost_eur_per_mwh": _number(
                         offer.marginal_cost_eur_per_mwh
@@ -230,7 +226,6 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             if len(cleared_offers) > 1 or any(
                 cleared.offer.bid_type != "SB"
                 or cleared.offer.parent_bid_id
-                or cleared.offer.min_acceptance_ratio != 0.0
                 for cleared in cleared_offers
             ):
                 detailed_unit_openings.add((opening_id, unit_name))
@@ -265,10 +260,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             profit_eur = revenue_eur - total_cost_eur
             unit_rows.append(
                 {
-                    "opening_id": opening_id,
-                    "opening_time": format_timestamp(opening_time),
-                    "delivery_start": format_timestamp(market_result.delivery_start),
-                    "delivery_end": format_timestamp(market_result.delivery_end),
+                    **product_columns,
                     "unit_name": unit_name,
                     "unit_operator": first_offer.operator,
                     "technology": first_offer.technology,
@@ -324,10 +316,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             export_payment_eur = market_result.export_payment_eur
             exchange_rows.append(
                 {
-                    "opening_id": opening_id,
-                    "opening_time": format_timestamp(opening_time),
-                    "delivery_start": format_timestamp(market_result.delivery_start),
-                    "delivery_end": format_timestamp(market_result.delivery_end),
+                    **product_columns,
                     "duration_hours": _number(duration_hours),
                     "settlement_method": "pay_as_clear",
                     "exchange_name": import_offer.offer.unit_name,
@@ -375,10 +364,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "soc_after": _number(storage_result.soc_after),
                 "offered_charge_mwh": _number(storage_result.offered_charge_mwh),
                 "accepted_charge_mwh": _number(storage_result.accepted_charge_mwh),
-                "charge_bid_price_eur_per_mwh": (
-                    ""
-                    if storage_result.charge_bid_price_eur_per_mwh is None
-                    else _number(storage_result.charge_bid_price_eur_per_mwh)
+                "charge_bid_price_eur_per_mwh": _optional_number(
+                    storage_result.charge_bid_price_eur_per_mwh
                 ),
                 "offered_discharge_mwh": _number(
                     storage_result.offered_discharge_mwh
@@ -386,10 +373,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 "accepted_discharge_mwh": _number(
                     storage_result.accepted_discharge_mwh
                 ),
-                "discharge_bid_price_eur_per_mwh": (
-                    ""
-                    if storage_result.discharge_bid_price_eur_per_mwh is None
-                    else _number(storage_result.discharge_bid_price_eur_per_mwh)
+                "discharge_bid_price_eur_per_mwh": _optional_number(
+                    storage_result.discharge_bid_price_eur_per_mwh
                 ),
                 "clearing_price_eur_per_mwh": _number(
                     storage_result.clearing_price_eur_per_mwh
@@ -435,21 +420,14 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
     }
 
     def household_cost_columns(key: tuple) -> dict[str, str]:
-        # 节省指标与不使用电池的基准方案对比；没有基准结果时留空。
-        cost = cost_by_key.get(key)
-        if cost is None:
-            return {field: "" for field in _HOUSEHOLD_COST_FIELDS}
+        cost = cost_by_key[key]
         return {
-            "accepted_grid_energy_mwh": _number(cost.accepted_grid_energy_mwh),
-            "actual_price_eur_per_mwh": _optional_number(cost.actual_price_eur_per_mwh),
-            "payment_eur": _number(cost.payment_eur),
-            "baseline_grid_energy_mwh": _number(cost.baseline_grid_energy_mwh),
-            "baseline_payment_eur": _number(cost.baseline_payment_eur),
-            "actual_saving_eur": _number(cost.actual_saving_eur),
-            "forecast_saving_eur": _number(cost.forecast_saving_eur),
-            "baseline_unmet_electricity_mwh": _number(cost.baseline_unmet_electricity_mwh),
-            "baseline_unmet_heat_mwh_th": _number(cost.baseline_unmet_heat_mwh_th),
-            "baseline_soc_after": _number(cost.baseline_soc_after),
+            field: (
+                _optional_number(getattr(cost, field))
+                if field == "actual_price_eur_per_mwh"
+                else _number(getattr(cost, field))
+            )
+            for field in _HOUSEHOLD_COST_FIELDS
         }
 
     household_rows = [
@@ -548,21 +526,16 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         for result in simulation_result.industry_optimization_windows
     ]
     learning_config = simulation_result.settings.learning_config
-    bid_price_scale = (
-        learning_config.max_bid_price
-        if learning_config is not None
-        else PRICE_SCALE_EUR_PER_MWH
-    )
     learning_rows = [
         {
             "delivery_start": format_timestamp(result.delivery_start),
             "action_1": _number(result.action[0]),
             "action_2": _number(result.action[1]),
             "minimum_segment_bid_eur_per_mwh": _number(
-                min(result.action) * bid_price_scale
+                min(result.action) * learning_config.max_bid_price
             ),
             "flexible_segment_bid_eur_per_mwh": _number(
-                max(result.action) * bid_price_scale
+                max(result.action) * learning_config.max_bid_price
             ),
             "available_power_mw": _number(result.available_power_mw),
             "accepted_power_mw": _number(result.accepted_power_mw),
@@ -673,77 +646,24 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             for operator, totals in sorted(operator_totals.items())
         ),
     )
-    if exchange_rows:
-        _write_rows(
-            output_dir / "exchange_results.csv",
-            [
-                "opening_id",
-                "opening_time",
-                "delivery_start",
-                "delivery_end",
-                "duration_hours",
-                "settlement_method",
-                "exchange_name",
-                "exchange_operator",
-                "offered_import_power_mw",
-                "cleared_import_power_mw",
-                "requested_export_power_mw",
-                "cleared_export_power_mw",
-                "unfulfilled_export_mwh",
-                "net_exchange_mwh",
-                "import_revenue_eur",
-                "export_payment_eur",
-                "exchange_market_cash_flow_eur",
-            ],
-            exchange_rows,
-        )
-    else:
-        # Optional tables must not survive from an earlier run in the same directory.
-        (output_dir / "exchange_results.csv").unlink(missing_ok=True)
-    if storage_rows:
-        _write_rows(
-            output_dir / "storage_results.csv",
-            [
-                "opening_id",
-                "opening_time",
-                "delivery_start",
-                "delivery_end",
-                "duration_hours",
-                "unit_name",
-                "unit_operator",
-                "technology",
-                "energy_before_mwh",
-                "energy_after_mwh",
-                "soc_before",
-                "soc_after",
-                "offered_charge_mwh",
-                "accepted_charge_mwh",
-                "charge_bid_price_eur_per_mwh",
-                "offered_discharge_mwh",
-                "accepted_discharge_mwh",
-                "discharge_bid_price_eur_per_mwh",
-                "clearing_price_eur_per_mwh",
-                "charge_payment_eur",
-                "discharge_revenue_eur",
-                "additional_charge_cost_eur",
-                "additional_discharge_cost_eur",
-                "net_cash_flow_eur",
-            ],
-            storage_rows,
-        )
-    else:
-        (output_dir / "storage_results.csv").unlink(missing_ok=True)
     # Retain every product of an opening once a unit needs offer detail.
     offer_rows = [
         row
         for row in offer_rows
         if (row["opening_id"], row["unit_name"]) in detailed_unit_openings
     ]
-    offer_path = output_dir / "offer_results.csv"
-    if offer_rows:
-        _write_rows(offer_path, list(offer_rows[0]), offer_rows)
-    else:
-        offer_path.unlink(missing_ok=True)
+    for name, rows in (
+        ("exchange", exchange_rows),
+        ("storage", storage_rows),
+        ("offer", offer_rows),
+        ("learning", learning_rows),
+    ):
+        path = output_dir / f"{name}_results.csv"
+        if rows:
+            _write_rows(path, list(rows[0]), rows)
+        else:
+            # Optional tables must not survive from an earlier run in the same directory.
+            path.unlink(missing_ok=True)
     if simulation_result.settings.market_mechanism == "pay_as_bid" or household_rows:
         _write_rows(
             output_dir / "household_results.csv",
@@ -768,36 +688,15 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             ],
             household_rows,
         )
-        (output_dir / "household_flexibility_results.csv").unlink(missing_ok=True)
     else:
-        for name in ("household_results.csv", "household_flexibility_results.csv"):
-            (output_dir / name).unlink(missing_ok=True)
+        (output_dir / "household_results.csv").unlink(missing_ok=True)
+    (output_dir / "household_flexibility_results.csv").unlink(missing_ok=True)
     if industry_rows:
         _write_rows(
             output_dir / "industry_results.csv",
-            [
-                "datetime",
-                "window_id",
-                "unit_name",
-                "electrolyser_power_mw",
-                "hydrogen_output_mwh",
-                "dri_power_mw",
-                "dri_output_t",
-                "eaf_power_mw",
-                "planned_steel_output_t",
-                "planned_grid_power_mw",
-                "planned_energy_mwh",
-                "actual_grid_power_mw",
-                "actual_steel_output_t",
-                "forecast_cost_eur",
-                "minimum_power_mw",
-                "maximum_power_mw",
-                "flex_up_mw",
-                "flex_down_mw",
-            ],
+            list(industry_rows[0]),
             industry_rows,
         )
-        (output_dir / "industry_flexibility_results.csv").unlink(missing_ok=True)
         _write_rows(
             output_dir / "industry_optimization_windows.csv",
             [
@@ -815,27 +714,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
     else:
         for name in (
             "industry_results.csv",
-            "industry_flexibility_results.csv",
             "industry_optimization_windows.csv",
         ):
             (output_dir / name).unlink(missing_ok=True)
-    if learning_rows:
-        _write_rows(
-            output_dir / "learning_results.csv",
-            [
-                "delivery_start",
-                "action_1",
-                "action_2",
-                "minimum_segment_bid_eur_per_mwh",
-                "flexible_segment_bid_eur_per_mwh",
-                "available_power_mw",
-                "accepted_power_mw",
-                "clearing_price_eur_per_mwh",
-                "profit_eur",
-                "regret_eur",
-                "reward",
-            ],
-            learning_rows,
-        )
-    else:
-        (output_dir / "learning_results.csv").unlink(missing_ok=True)
+    (output_dir / "industry_flexibility_results.csv").unlink(missing_ok=True)

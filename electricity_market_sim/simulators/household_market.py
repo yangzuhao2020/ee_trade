@@ -106,7 +106,6 @@ def simulate_household_market(
                 forecasts["price_EOM"],
                 forecasts,
                 household_energy,
-                household_heat_pump_power,
                 household_charge_power,
                 household_discharge_power,
                 evaluate_flexibility=evaluate_flexibility,

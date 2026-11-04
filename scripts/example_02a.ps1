@@ -28,11 +28,6 @@ $datasetName = "example_02a"
 $inputDir = Join-Path $projectDir "examples/input/$datasetName"
 $configFile = Join-Path $inputDir "config.yaml"
 
-if (-not (Test-Path $configFile)) {
-    Write-Error "Dataset has no config.yaml: $inputDir"
-    exit 2
-}
-
 $remaining = [System.Collections.Generic.List[string]]::new()
 $remaining.AddRange([string[]]$args)
 $scenarioSelector = "base"
@@ -41,10 +36,6 @@ if ($remaining.Count -gt 0 -and -not $remaining[0].StartsWith("-")) {
     $remaining.RemoveAt(0)
 }
 
-if (-not (Get-Command conda.exe -ErrorAction SilentlyContinue)) {
-    Write-Error "Cannot find conda in PATH."
-    exit 1
-}
 (& conda.exe shell.powershell hook) | Out-String | Invoke-Expression
 conda activate ee_trade
 $env:PYTHONPATH = "$projectDir$(if ($env:PYTHONPATH) { ";$env:PYTHONPATH" })"
@@ -60,8 +51,6 @@ from electricity_market_sim.errors import InputValidationError
 
 config_path = Path(r'''$configFile''')
 config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-if not isinstance(config, dict) or not config:
-    raise SystemExit(f"No scenarios found in {config_path}")
 for scenario_name in config:
     try:
         load_market_settings(config_path, scenario=scenario_name)

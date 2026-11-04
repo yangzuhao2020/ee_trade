@@ -1,7 +1,6 @@
 """第四版工业需求响应：钢铁生产滚动优化、购电功率灵活性评估及出清后执行记录。
 根据预测价格、参考负荷和生产约束制定计划，并按实际成交电量更新钢产量与设备出力。"""
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
@@ -47,11 +46,9 @@ class _IndustryProblem:
     electrolyser_power_per_tonne: np.ndarray
     dri_power_per_tonne: np.ndarray
     eaf_power_per_tonne: np.ndarray
-    steel: np.ndarray
-    variable_count: int
     objective: np.ndarray
-    A_ub: np.ndarray | None
-    b_ub: np.ndarray | None
+    A_ub: np.ndarray
+    b_ub: np.ndarray
     A_eq: np.ndarray
     b_eq: np.ndarray
     bounds: tuple[tuple[float | None, float | None], ...]
@@ -103,18 +100,12 @@ def _steel_upper_bound(
 ) -> float:
     """约束函数：三台设备的最大功率分别能支撑多少吨钢，并取其中最小值作为整条生产链的产量上限。"""
     # 时段最大用电量（MWh）= 最大功率 × 时长。
-    electrolyser_max_energy_mwh = unit.electrolyser.max_power_mw * duration
-    dri_max_energy_mwh = unit.dri_plant.max_power_mw * duration
-    eaf_max_energy_mwh = unit.eaf.max_power_mw * duration
-
     # 各环节钢产量上限（t）= 最大用电量 ÷ 每吨钢耗电量
-    electrolyser_steel_limit_t = (
-        electrolyser_max_energy_mwh / coefficients.electrolyser_mwh_per_steel_t)
-    dri_steel_limit_t = dri_max_energy_mwh / coefficients.dri_mwh_per_steel_t
-    eaf_steel_limit_t = eaf_max_energy_mwh / coefficients.eaf_mwh_per_steel_t
-
-    limits = (electrolyser_steel_limit_t, dri_steel_limit_t, eaf_steel_limit_t)
-    return min(limits)
+    return min(
+        unit.electrolyser.max_power_mw * duration / coefficients.electrolyser_mwh_per_steel_t,
+        unit.dri_plant.max_power_mw * duration / coefficients.dri_mwh_per_steel_t,
+        unit.eaf.max_power_mw * duration / coefficients.eaf_mwh_per_steel_t,
+    )
 
 
 def _constraint_row(
@@ -130,32 +121,28 @@ def _constraint_row(
 
 def _ramp_constraint_rows(
     devices: tuple[IndustrialDevice, IndustrialDevice, IndustrialDevice],
-    power_coefficients: tuple[Sequence[float], ...],
+    power_coefficients: np.ndarray,
     initial_powers_mw: tuple[float, float, float],
     *,
-    steel: np.ndarray,
     row_width: int,
 ) -> tuple[list[np.ndarray], list[float]]:
     """约束函数：每台设备、每个时段生成两条约束：功率上升不能太快，功率下降也不能太快，并返回给线性规划求解器使用。"""
     rows: list[np.ndarray] = []
     limits: list[float] = []
-    for index in range(len(power_coefficients[0])):
+    for index in range(len(power_coefficients)):
         for device_index, device in enumerate(devices):
-            coefficient = power_coefficients[device_index][index]  # 功率系数（MW/吨钢）
-            increase = {steel[index]: coefficient}  # 上升：本期功率 - 上期功率
-            decrease = {steel[index]: -coefficient}  # 下降：上期功率 - 本期功率
+            coefficient = power_coefficients[index, device_index]  # 功率系数（MW/吨钢）
+            increase = {index: coefficient}  # 上升：本期功率 - 上期功率
             if index:
-                previous = power_coefficients[device_index][index - 1]
-                increase[steel[index - 1]] = -previous
-                decrease[steel[index - 1]] = previous
+                previous = power_coefficients[index - 1, device_index]
+                increase[index - 1] = -previous
                 initial = 0.0  # 上期功率已计入左侧
             else:
                 initial = initial_powers_mw[device_index]  # 首时段使用初始功率
             # 保存约束系数及右侧上限。
-            rows.extend((
-                _constraint_row(increase, row_width),
-                _constraint_row(decrease, row_width),
-            ))
+            row = _constraint_row(increase, row_width)
+            # 下降：上期功率 - 本期功率
+            rows.extend((row, -row))
             limits.extend(
                 (device.ramp_up_mw + initial, device.ramp_down_mw - initial))
     return rows, limits
@@ -192,9 +179,7 @@ def _build_industry_problem(
     # ---- 1. 变量布局：x = [剩余时段钢产量 | 窗口内正偏差 | 窗口内负偏差] ----
     count = len(products)
     remaining_count = len(remaining_products)
-    steel = np.arange(remaining_count)      # 所有剩余时段的钢产量变量索引
-    positive = np.arange(remaining_count, remaining_count + count)   # 正偏差
-    negative = np.arange(remaining_count + count, remaining_count + 2 * count)  # 负偏差
+    # 所有剩余时段的钢产量变量索引为 0 到 remaining_count - 1。
     variable_count = remaining_count + 2 * count
 
     # ---- 2. 数据准备：时长、功率系数、参考功率、可变成本与变量边界 ----
@@ -207,20 +192,15 @@ def _build_industry_problem(
         _power_coefficients(coefficients, duration)
         for duration in remaining_durations])
 
-    prices = np.empty(count)
-    references = np.empty(count)
     variable_costs = np.empty(count)
     for index, (start, _) in enumerate(products):
-        prices[index] = price_forecast[start]
         raw_prices = fuel_price_profiles[start]
-        references[index] = (
-            remaining_load_profile[index] * unit.electrolyser.max_power_mw)
         variable_costs[index] = (
-            coefficients.grid_mwh_per_steel_t * prices[index] # 该时段每生产一吨钢的购电成本
+            coefficients.grid_mwh_per_steel_t * price_forecast[start] # 该时段每生产一吨钢的购电成本
             + coefficients.iron_ore_t_per_steel_t
             * _price(raw_prices, "iron ore", "iron_ore") # 每生产一吨钢所需的铁矿石成本
             + coefficients.lime_t_per_steel_t * _price(raw_prices, "lime")
-            + coefficients.co2_t_per_steel_t * _price(raw_prices, "co2")
+            + coefficients.co2_t_per_steel_t * raw_prices["co2"]
             # 每吨钢的石灰成本和碳排放成本。
         )
 
@@ -245,38 +225,35 @@ def _build_industry_problem(
     grid_power = remaining_power_coefficients[:count, 3]
     equality_rows: list[np.ndarray] = []
     equality_values: list[float] = []
-    inequality_rows: list[np.ndarray] = []  # 不等式左侧系数
-    inequality_values: list[float] = []  # 不等式右侧上限
 
     # 4.1 逐时段建立：计划购电功率 - 正偏差 + 负偏差 = 参考功率。
     for index in range(count):
         row = _constraint_row(
             {
-                steel[index]: grid_power[index],  # 钢产量的功率系数（MW/吨钢）
-                positive[index]: -1.0,
-                negative[index]: 1.0,
+                index: grid_power[index],  # 钢产量的功率系数（MW/吨钢）
+                remaining_count + index: -1.0,  # 正偏差
+                remaining_count + count + index: 1.0,  # 负偏差
             },
             variable_count,
         )
         equality_rows.append(row)
-        equality_values.append(references[index])  # 右侧参考功率（MW）
+        equality_values.append(
+            remaining_load_profile[index] * unit.electrolyser.max_power_mw
+        )  # 右侧参考功率（MW）
 
     # 4.2 各设备功率升降约束：设备功率 = 功率系数 × 该时段钢产量。
     devices = (unit.electrolyser, unit.dri_plant, unit.eaf)
-    device_coefficients = tuple(
-        remaining_power_coefficients[:, index] for index in range(3))
-    ramp_rows, ramp_limits = _ramp_constraint_rows(
+    # 不等式左侧系数
+    # 不等式右侧上限
+    inequality_rows, inequality_values = _ramp_constraint_rows(
         devices,
-        device_coefficients,
+        remaining_power_coefficients[:, :3],
         initial_powers_mw,
-        steel=steel,
         row_width=variable_count,
     )
-    inequality_rows.extend(ramp_rows)
-    inequality_values.extend(ramp_limits)
 
     # 4.3 剩余各时段产量之和 = 剩余需求。
-    row = _constraint_row({variable: 1.0 for variable in steel}, variable_count)
+    row = _constraint_row({variable: 1.0 for variable in range(remaining_count)}, variable_count)
     equality_rows.append(row)
     equality_values.append(demand_to_schedule_t)
 
@@ -295,8 +272,8 @@ def _build_industry_problem(
                                 (1.0, 1.0 + unit.load_profile_deviation)):
             factor = ratio * allowance
             # 后续区间的待安排量还须扣除前面区间的计划产量，保持线性关系。
-            terms = {variable: sign * factor for variable in steel[:commit_start]}
-            terms.update({variable: sign for variable in steel[commit_start:commit_end]})
+            terms = {variable: sign * factor for variable in range(commit_start)}
+            terms.update({variable: sign for variable in range(commit_start, commit_end)})
             inequality_rows.append(_constraint_row(terms, variable_count))
             inequality_values.append(sign * demand_to_schedule_t * factor)
 
@@ -307,7 +284,7 @@ def _build_industry_problem(
 
     # 可选的成本上限行，供限定可变成本时追加到不等式矩阵末尾。
     cost_limit_row = np.zeros(variable_count)
-    cost_limit_row[steel[:count]] = variable_costs
+    cost_limit_row[:count] = variable_costs
 
     # ---- 5. 组装问题 ----
     window_power_coefficients = remaining_power_coefficients[:count]
@@ -319,13 +296,11 @@ def _build_industry_problem(
         electrolyser_power_per_tonne=window_power_coefficients[:, 0],
         dri_power_per_tonne=window_power_coefficients[:, 1],
         eaf_power_per_tonne=window_power_coefficients[:, 2],
-        steel=steel,
-        variable_count=variable_count,
         objective=objective,
         A_eq=np.vstack(equality_rows),
         b_eq=np.array(equality_values),
-        A_ub=(np.vstack(inequality_rows) if inequality_rows else None),
-        b_ub=(np.array(inequality_values) if inequality_values else None),
+        A_ub=np.vstack(inequality_rows),
+        b_ub=np.array(inequality_values),
         bounds=tuple(bounds),
         A_ub_limited=np.vstack([*inequality_rows, cost_limit_row]),
     )
@@ -348,8 +323,8 @@ def _solve(
         A_ub = problem.A_ub_limited
         # 上限加上数值容差，允许微小的浮点误差。
         limit = variable_cost_limit + _TOLERANCE
-        # 原约束为空时创建右端向量，否则在末尾追加成本上限。
-        b_ub = np.array([limit]) if b_ub is None else np.append(b_ub, limit)
+        # 在原约束右端向量末尾追加成本上限。
+        b_ub = np.append(b_ub, limit)
 
     # 求解 min(objective @ x)，同时满足不等式、等式约束和变量上下界。
     result = linprog(
@@ -416,8 +391,8 @@ def _calculate_industry_flexibility(
     """
     flexibility: list[IndustrialFlexibilityResult] = []
     for index, plan in enumerate(committed_plans):
-        minimum_objective = np.zeros(problem.variable_count)
-        minimum_objective[problem.steel[index]] = (
+        minimum_objective = np.zeros(problem.objective.size)
+        minimum_objective[index] = (
             problem.grid_power_per_tonne[index]
         )
         minimum_solution = _solve(
@@ -434,11 +409,11 @@ def _calculate_industry_flexibility(
             variable_cost_limit=variable_cost_limit,
         )
         minimum_power = (
-            minimum_solution[problem.steel[index]]
+            minimum_solution[index]
             * problem.grid_power_per_tonne[index]
         )
         maximum_power = (
-            maximum_solution[problem.steel[index]]
+            maximum_solution[index]
             * problem.grid_power_per_tonne[index]
         )
         if minimum_power > plan.planned_grid_power_mw + _TOLERANCE or (
@@ -483,17 +458,13 @@ def maximum_industry_production(
     bounds = [(_steel_lower_bound(unit, coefficients, duration),
                _steel_upper_bound(unit, coefficients, duration))
         for duration in durations]
-    power_per_tonne = [
-        _power_coefficients(coefficients, duration)[:3] for duration in durations]
-    device_coefficients = tuple(
-        tuple(per_tonne[device_index] for per_tonne in power_per_tonne)
-        for device_index in range(3))
+    power_per_tonne = np.array([
+        _power_coefficients(coefficients, duration)[:3] for duration in durations])
     devices = (unit.electrolyser, unit.dri_plant, unit.eaf)
     rows, limits = _ramp_constraint_rows(
         devices,
-        device_coefficients,
+        power_per_tonne,
         initial_powers_mw,
-        steel=np.arange(len(products)),
         row_width=len(products),
     )
     result = linprog(
@@ -549,7 +520,7 @@ def optimize_industry_window(
     )
     solution = _solve(unit, problem, problem.objective)
     count = len(products)
-    steel = solution[problem.steel[:count]]
+    steel = solution[:count]
     baseline_variable_cost = float(
         np.dot(problem.variable_cost_per_tonne, steel))
     flexible_limit = baseline_variable_cost * (
@@ -576,12 +547,7 @@ def optimize_industry_window(
 def _actual_steel_output(
     plan: IndustrialPlan, accepted_energy_mwh: float
 ) -> float:
-    """按成交电量占申报电量的比例折算实际钢产量；成交电量越界时抛错。"""
-    if accepted_energy_mwh < -_TOLERANCE or (
-        accepted_energy_mwh > plan.planned_energy_mwh + _TOLERANCE
-    ):
-        raise InputValidationError(
-            f"工业单元 {plan.unit_name!r} 的成交电量必须介于零与申报电量之间。")
+    """按成交电量占申报电量的比例折算实际钢产量。"""
     if plan.planned_energy_mwh <= _TOLERANCE:
         return 0.0
     ratio = max(0.0, accepted_energy_mwh) / plan.planned_energy_mwh
@@ -593,7 +559,7 @@ def dispatch_industry(
     accepted_energy_mwh: float,
 ) -> IndustrialDispatchResult:
     """按购电量的成交比例缩放计划生产链的产量。"""
-    # 先校验成交电量范围，再计算功率。
+    # 成交电量范围已由市场出清结果校验，再计算实际产量与功率。
     actual_steel = _actual_steel_output(plan, accepted_energy_mwh)
     duration = hours_between(plan.delivery_start, plan.delivery_end)
     return IndustrialDispatchResult(
@@ -634,16 +600,15 @@ class IndustryRollingCoordinator:
         预测电价用于优化生产成本，maximum_bid_price 用于购电申报。
         """
         self.units = units
-        # 按交付时间去重排序；集合用于筛选本次开市的有效产品。
-        self.all_products = tuple(sorted(set(all_products)))
+        # 上游已完成交付时段的唯一性校验和排序；集合用于筛选本次开市的有效产品。
+        self.all_products = all_products
         self.product_set = frozenset(self.all_products)
         self.price_forecasts = price_forecasts
         self.normalized_load_profiles = normalized_load_profiles
         self.fuel_price_profiles = fuel_price_profiles
         self.maximum_bid_price = maximum_bid_price
-        # 以（用户名称，交付开始时间）关联承诺计划与已完成的交付。
+        # 以（用户名称，交付开始时间）保存未交付的承诺计划。
         self.plans: dict[tuple[str, datetime], IndustrialPlan] = {}
-        self.delivered: set[tuple[str, datetime]] = set()
         # 实际钢产量（吨）和设备功率（MW）作为后续窗口的初始状态。
         self.actual_steel_t = {unit.name: 0.0 for unit in units}
         self.last_actual_powers_mw = {
@@ -671,16 +636,11 @@ class IndustryRollingCoordinator:
 
         for unit in self.units:
             # 首个未承诺产品作为新滚动窗口的起点。
-            missing_product: tuple[datetime, datetime] | None = None
-            for product in eligible_products:
-                delivery_start = product[0]
-                plan_key = (unit.name, delivery_start)
-                has_committed_plan = plan_key in self.plans
-
-                if not has_committed_plan:
-                    missing_product = product
-                    break
-
+            missing_product = next(
+                (product for product in eligible_products
+                 if (unit.name, product[0]) not in self.plans),
+                None,
+            )
             if missing_product is not None:
                 self._plan_window(unit, missing_product, scheduled_results)
             for start, end in eligible_products:
@@ -716,11 +676,6 @@ class IndustryRollingCoordinator:
             if product[0] >= first_product[0]
             and (unit.name, product[0]) not in self.plans
         )
-        if not remaining_products or remaining_products[0] != first_product:
-            raise InputValidationError(
-                f"无法为工业单元 {unit.name!r} 构建从 "
-                f"{first_product[0].isoformat(sep=' ')} 开始的下一个优化窗口。"
-            )
         # 前瞻时长决定优化窗口，承诺时长决定其中需锁定的产品数量。
         optimization_end = first_product[0] + unit.look_ahead
         products = tuple(
@@ -760,8 +715,8 @@ class IndustryRollingCoordinator:
         for unit in self.units:
             key = (unit.name, result.delivery_start)
             plan = self.plans.get(key)
-            # 无计划或已记账的产品直接跳过，避免重复累计产量。
-            if plan is None or key in self.delivered:
+            # 已记账计划会被移除；无待交付计划的产品直接跳过，避免重复累计产量。
+            if plan is None:
                 continue
             accepted = self._cleared_industry_energy(result, unit.name)
             dispatch = dispatch_industry(plan, accepted)
@@ -783,7 +738,7 @@ class IndustryRollingCoordinator:
             self.dispatch_results.append(dispatch)
             self.actual_steel_t[unit.name] += dispatch.actual_steel_output_t
             self.last_actual_powers_mw[unit.name] = actual_powers
-            self.delivered.add(key)
+            del self.plans[key]
 
     def validate_completion(self) -> None:
         """全部交付结束后检查钢需求，产量缺口超过数值容差时抛出异常。"""
@@ -807,8 +762,8 @@ class IndustryRollingCoordinator:
         若末段待交付与新窗口起点相邻，以其成交后功率作为爬坡约束起点。
         """
         pending: list[tuple[IndustrialPlan, float]] = []
-        for (unit_name, start), plan in self.plans.items():
-            if unit_name != unit.name or (unit_name, start) in self.delivered:
+        for (unit_name, _), plan in self.plans.items():
+            if unit_name != unit.name:
                 continue
             if plan.delivery_start >= first_product[0]:
                 continue
@@ -833,21 +788,12 @@ class IndustryRollingCoordinator:
         plan: IndustrialPlan,
         scheduled_results: dict[tuple[datetime, datetime, datetime], MarketClearingResult],
     ) -> MarketClearingResult:
-        """按交付起止时间查找计划对应的出清结果，要求恰好匹配一个。"""
-        matches: list[MarketClearingResult] = []
-        for result in scheduled_results.values():
-            is_start_match = result.delivery_start == plan.delivery_start
-            is_end_match = result.delivery_end == plan.delivery_end
-
-            if is_start_match and is_end_match:
-                matches.append(result)
-
-        if len(matches) != 1:
-            raise InputValidationError(
-                f"待交付的工业产品 {plan.delivery_start.isoformat(sep=' ')} "
-                f"应恰好对应一个市场出清结果，实际找到 {len(matches)} 个。"
-            )
-        return matches[0]
+        """按交付起止时间查找对应的出清结果；入口已保证产品唯一。"""
+        return next(
+            result for result in scheduled_results.values()
+            if result.delivery_start == plan.delivery_start
+            and result.delivery_end == plan.delivery_end
+        )
 
     @staticmethod
     def _cleared_industry_energy(
@@ -856,10 +802,7 @@ class IndustryRollingCoordinator:
         """读取指定工业用户的成交电量（MWh）；未找到对应订单时返回零。"""
         for cleared_bid in result.demand_bids:
             bid = cleared_bid.bid
-            is_target_unit = bid.unit_name == unit_name
-            is_industrial_load = bid.demand_type == "industrial_load"
-
-            if is_target_unit and is_industrial_load:
+            if bid.unit_name == unit_name and bid.demand_type == "industrial_load":
                 return cleared_bid.accepted_energy_mwh
 
         return 0.0
@@ -893,7 +836,7 @@ def missing_industrial_price_names(
     fuel_price_profiles: dict[datetime, dict[str, float]],
 ) -> tuple[str, ...]:
     """返回缺少价格数据、将按文档规定默认取 0 的原料名称。"""
-    columns = set(next(iter(fuel_price_profiles.values()), {}))
+    columns = set(next(iter(fuel_price_profiles.values())))
     missing: list[str] = []
     if not ({"iron ore", "iron_ore"} & columns):
         missing.append("iron ore")

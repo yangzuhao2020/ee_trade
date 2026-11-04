@@ -21,7 +21,6 @@ CHART_NAMES = (
     "learning_validation_comparison",
     "learning_test_comparison",
 )
-PERIODS = ("train", "validation", "test")
 SEGMENTS = ("learning_minimum", "learning_flexible")
 ACCEPTED_TOLERANCE_MW = 1e-7
 COLORS = ("#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2", "#B279A2")
@@ -38,22 +37,15 @@ COMPARISON_FIELDS = (
 # 累计奖励仍用于学习曲线中最佳验证模型的选择。
 METRIC_FIELDS = {name for name, _ in (*CURVE_FIELDS, *COMPARISON_FIELDS)} | {"total_reward"}
 UNIT_FIELDS = {
-    "delivery_start", "available_power_mw", "profit_eur",
+    "delivery_start", "available_power_mw", "accepted_power_mw", "profit_eur",
 }
 OFFER_FIELDS = {
     "delivery_start", "offer_segment", "bid_price_eur_per_mwh",
-    "accepted_power_mw",
 }
 
 
 class LearningChartError(ValueError):
     """学习图数据校验失败时展示给用户的错误。"""
-
-
-def _error_text(exc: Exception) -> str:
-    if isinstance(exc, LearningChartError):
-        return str(exc)
-    return "读取或绘制失败，请检查结果 CSV 的格式和数值。"
 
 
 def _read_csv(path: Path, fields: set[str], *, dates: tuple[str, ...] = ()) -> pd.DataFrame:
@@ -115,10 +107,7 @@ def learning_unit(results: pd.DataFrame, offers: pd.DataFrame) -> go.Figure:
         (SEGMENTS[1], "灵活出力段报价", COLORS[1]),
     ):
         figure.add_trace(_step(times, segments[name]["bid_price_eur_per_mwh"], label, color), row=1, col=1)
-    accepted = {
-        name: segments[name]["accepted_power_mw"].fillna(0.0) for name in SEGMENTS
-    }
-    accepted_power = accepted[SEGMENTS[0]] + accepted[SEGMENTS[1]]
+    accepted_power = results["accepted_power_mw"]
     figure.add_trace(
         _step(times, accepted_power, "总成交功率", COLORS[1],
               fill="tozeroy", fillcolor="rgba(245, 133, 24, 0.45)"), row=2, col=1,
@@ -147,8 +136,6 @@ def learning_curves(metrics: pd.DataFrame) -> go.Figure:
     """绘制初始经验、训练和验证曲线，并标出最佳验证回合。"""
 
     metrics = metrics[metrics["phase"].isin(("initial_experience", "train", "validation"))]
-    if metrics.empty:
-        raise LearningChartError("learning_metrics.csv 没有训练或验证记录。")
     curve_count = len(CURVE_FIELDS)
     figure = make_subplots(rows=curve_count, cols=1, shared_xaxes=True, vertical_spacing=0.09)
     initial_episodes = metrics.loc[metrics["phase"] == "initial_experience", "episode"]
@@ -211,9 +198,7 @@ def learning_comparison(metrics: pd.DataFrame, period: str) -> go.Figure:
 
     phases = ((f"{period}_actor", "学习策略", COLORS[0]),
               (f"{period}_baseline", "边际成本基准", "#9CA3AF"))
-    period_label = {"train": "训练期", "validation": "验证期", "test": "测试期"}.get(period, period)
-    if any(metrics.loc[metrics["phase"] == phase].empty for phase, _, _ in phases):
-        raise LearningChartError(f"{period_label}对比图缺少学习策略或基准策略记录。")
+    period_label = {"train": "训练期", "validation": "验证期", "test": "测试期"}[period]
     figure = make_subplots(
         rows=2, cols=2, subplot_titles=[label for _, label in COMPARISON_FIELDS],
         horizontal_spacing=0.12, vertical_spacing=0.16,
@@ -256,7 +241,7 @@ def learning_comparison(metrics: pd.DataFrame, period: str) -> go.Figure:
 
 
 def build_learning_charts(run_dir: Path) -> tuple[dict[str, go.Figure], dict[str, str]]:
-    """分别构建学习图，使单张图的错误不影响其他图。"""
+    """分别构建学习图，使单张图的数据错误不影响其他图。"""
 
     figures: dict[str, go.Figure] = {}
     errors: dict[str, str] = {}
@@ -264,16 +249,14 @@ def build_learning_charts(run_dir: Path) -> tuple[dict[str, go.Figure], dict[str
     if not results_path.is_file():
         return figures, errors
     offer_path = run_dir / "offer_results.csv"
-    if offer_path.is_file():
-        try:
-            results = _read_csv(results_path, UNIT_FIELDS, dates=("delivery_start",))
-            offers = _read_csv(offer_path, OFFER_FIELDS, dates=("delivery_start",))
-            figures["learning_unit"] = learning_unit(results, offers)
-        except Exception as exc:
-            errors["learning_unit"] = _error_text(exc)
+    try:
+        results = _read_csv(results_path, UNIT_FIELDS, dates=("delivery_start",))
+        offers = _read_csv(offer_path, OFFER_FIELDS, dates=("delivery_start",))
+        figures["learning_unit"] = learning_unit(results, offers)
+    except LearningChartError as exc:
+        errors["learning_unit"] = str(exc)
 
     metric_tables: dict[str, pd.DataFrame] = {}
-    metric_errors: dict[str, str] = {}
     for filename in DATA_FILES[1:]:
         path = run_dir / filename
         if not path.is_file():
@@ -282,45 +265,41 @@ def build_learning_charts(run_dir: Path) -> tuple[dict[str, go.Figure], dict[str
             metric_tables[filename] = _read_csv(
                 path, {"run", "phase", "episode", *METRIC_FIELDS}
             )
-        except Exception as exc:
-            metric_errors[filename] = _error_text(exc)
+        except LearningChartError as exc:
+            errors[filename] = str(exc)
 
     training = metric_tables.get("learning_metrics.csv")
     if training is not None:
         if training["phase"].isin(("initial_experience", "train", "validation")).any():
-            try:
-                figures["learning_curves"] = learning_curves(training)
-            except Exception as exc:
-                errors["learning_curves"] = _error_text(exc)
-    elif "learning_metrics.csv" in metric_errors:
-        errors["learning_curves"] = metric_errors["learning_metrics.csv"]
-    if "learning_evaluation_metrics.csv" in metric_errors:
-        # 评估文件损坏时无法判断其对应训练期还是验证期，因此单独报告文件错误。
-        errors["learning_evaluation_metrics.csv"] = metric_errors["learning_evaluation_metrics.csv"]
+            figures["learning_curves"] = learning_curves(training)
 
-    for period in PERIODS:
+    for period, filenames in (
+        ("train", ("learning_evaluation_metrics.csv",)),
+        ("validation", ("learning_metrics.csv", "learning_evaluation_metrics.csv")),
+        ("test", ("learning_test_metrics.csv",)),
+    ):
         name = f"learning_{period}_comparison"
+        phases = {f"{period}_actor", f"{period}_baseline"}
         candidates = [
-            (run_dir / filename, table)
-            for filename, table in metric_tables.items()
-            if {f"{period}_actor", f"{period}_baseline"}.issubset(set(table["phase"]))
+            run_dir / filename
+            for filename in filenames
+            if filename in errors or (
+                filename in metric_tables
+                and phases.intersection(metric_tables[filename]["phase"])
+            )
         ]
         if candidates:
-            path, table = max(candidates, key=lambda item: (item[0].stat().st_mtime_ns, item[0].name))
-            try:
-                figure = learning_comparison(table, period)
-                figure.update_layout(title=f"{figure.layout.title.text}<br><sup>数据来源：{path.name}</sup>")
-                figures[name] = figure
-            except Exception as exc:
-                errors[name] = _error_text(exc)
-        else:
-            likely_file = {
-                "train": "learning_evaluation_metrics.csv",
-                "validation": "learning_metrics.csv",
-                "test": "learning_test_metrics.csv",
-            }[period]
-            if likely_file in metric_errors:
-                errors[name] = metric_errors[likely_file]
+            path = max(candidates, key=lambda path: (path.stat().st_mtime_ns, path.name))
+            if path.name in errors:
+                continue
+            table = metric_tables[path.name]
+            missing = phases - set(table["phase"])
+            if missing:
+                errors[name] = f"{path.name} 缺少对比阶段：{', '.join(sorted(missing))}。"
+                continue
+            figure = learning_comparison(table, period)
+            figure.update_layout(title=f"{figure.layout.title.text}<br><sup>数据来源：{path.name}</sup>")
+            figures[name] = figure
     return figures, errors
 
 
@@ -330,6 +309,7 @@ def learning_items(
     """为每个学习主题选择交互图、错误提示或当前 PNG。"""
 
     current = (run_dir / "learning_results.csv").is_file()
+    metric_error = any(filename in errors for filename in DATA_FILES[1:])
     newest_result = max(
         (path.stat().st_mtime_ns for path in
          (run_dir / name for name in ("market_results.csv", "demand_results.csv", "unit_results.csv", "operator_results.csv"))
@@ -339,10 +319,12 @@ def learning_items(
     items = []
     for name in CHART_NAMES:
         png = run_dir / "plots" / f"{name}.png"
-        if current and name in figures:
+        if name in figures:
             items.append(("figure", name, figures[name]))
-        elif current and name in errors:
+        elif name in errors:
             items.append(("error", name, errors[name]))
-        elif png.is_file() and (current or png.stat().st_mtime_ns >= newest_result):
+        elif (name == "learning_unit" or not metric_error) and png.is_file() and (
+            current or png.stat().st_mtime_ns >= newest_result
+        ):
             items.append(("image", name, png))
     return items

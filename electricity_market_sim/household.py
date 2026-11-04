@@ -68,12 +68,10 @@ def _build_household_problem(
     price_forecast: dict[datetime, float],
     heat_forecast: dict[datetime, float],
     initial_energy_mwh: float,
-    initial_heat_pump_power_mw: float,
     initial_battery_charge_power_mw: float,
     initial_battery_discharge_power_mw: float,
 ) -> _HouseholdProblem:
-    """依次校验初始状态、准备预测并组装变量与约束。"""
-    _validate_household_initial_state(household, initial_heat_pump_power_mw)
+    """准备预测并组装变量与约束。"""
     forecasts = _prepare_household_forecasts(
         household,
         products,
@@ -107,21 +105,6 @@ def _build_household_problem(
     )
 
 
-def _validate_household_initial_state(
-    household: HouseholdUnit,
-    initial_heat_pump_power_mw: float,
-) -> None:
-    """检查上一时段的热泵功率。"""
-    if not np.isfinite(initial_heat_pump_power_mw) or initial_heat_pump_power_mw < 0:
-        raise InputValidationError(
-            f"家庭用户 {household.name!r} 的初始热泵功率必须为非负有限值。"
-        )
-    if initial_heat_pump_power_mw > household.heat_pump_max_power_mw + _TOLERANCE:
-        raise InputValidationError(
-            f"家庭用户 {household.name!r} 的初始热泵功率超出功率上限。"
-        )
-
-
 def _prepare_household_forecasts(
     household: HouseholdUnit,
     products: tuple[tuple[datetime, datetime], ...],
@@ -129,16 +112,14 @@ def _prepare_household_forecasts(
     heat_forecast: dict[datetime, float],
 ) -> _HouseholdForecasts:
     """出清前，整理各交付时段的预测电价、热需求和时长，并计算热泵所需电功率。"""
-    count = len(products)
     durations = np.array([hours_between(*product) for product in products])
-    prices = np.empty(count)
-    heat_demands = np.empty(count)
-    heat_powers = np.empty(count)
-
-    for index, (start, _) in enumerate(products):
-        prices[index] = price_forecast[start]
-        heat_demands[index] = heat_forecast[start]
-        heat_powers[index] = heat_demands[index] / household.cop  #! 计算热泵功率
+    prices = np.array([price_forecast[start] for start, _ in products], dtype=float)
+    heat_demands = np.array([heat_forecast[start] for start, _ in products], dtype=float)
+    heat_powers = heat_demands / household.cop
+    if np.any(heat_powers > household.heat_pump_max_power_mw + _TOLERANCE):
+        raise InputValidationError(
+            f"家庭用户 {household.name!r} 的热需求所需热泵功率超出功率上限。"
+        )
 
     return _HouseholdForecasts(
         durations=durations,
@@ -345,11 +326,7 @@ def _solve_household_problem(
         )
     # result.x 按变量索引保存各时段的购电、充放电功率、储能量和模式。
     # 将数值计算产生的接近零的小数归零，其他变量取值保持原值。
-    solution = np.where(np.abs(result.x) < _TOLERANCE, 0.0, result.x)
-    """
-    [各时段购电功率, 各时段充电功率, 各时段放电功率, 各时段电池能量, 各时段充放电模式]
-    """
-    return solution
+    return np.where(np.abs(result.x) < _TOLERANCE, 0.0, result.x)
 
 
 def _baseline_objective(problem: _HouseholdProblem) -> np.ndarray:
@@ -366,24 +343,22 @@ def _household_plans(
     solution: np.ndarray, # 求解器计算出的各个优化变量的值
 ) -> tuple[HouseholdPlan, ...]:
     # 把优化求解器输出的数值数组，按交付时段整理成家庭运行计划。
-    plans: list[HouseholdPlan] = []
-    for index, (start, end) in enumerate(problem.products):
-        plans.append(
-            HouseholdPlan(
-                delivery_start=start,
-                delivery_end=end,
-                unit_name=household.name,
-                forecast_price_eur_per_mwh=problem.prices[index],
-                heat_demand_mw_th=problem.heat_demands[index],
-                fixed_power_mw=household.fixed_power_mw,
-                planned_grid_power_mw=solution[problem.grid[index]],
-                planned_heat_pump_power_mw=problem.heat_powers[index],
-                planned_battery_discharge_power_mw=solution[
-                    problem.discharge[index]
-                ],
-            )
+    return tuple(
+        HouseholdPlan(
+            delivery_start=start,
+            delivery_end=end,
+            unit_name=household.name,
+            forecast_price_eur_per_mwh=problem.prices[index],
+            heat_demand_mw_th=problem.heat_demands[index],
+            fixed_power_mw=household.fixed_power_mw,
+            planned_grid_power_mw=solution[problem.grid[index]],
+            planned_heat_pump_power_mw=problem.heat_powers[index],
+            planned_battery_discharge_power_mw=solution[
+                problem.discharge[index]
+            ],
         )
-    return tuple(plans)
+        for index, (start, end) in enumerate(problem.products)
+    )
 
 
 def _flexibility_bounds(
@@ -395,15 +370,11 @@ def _flexibility_bounds(
     基准费用加上成本容忍度允许增量的条件下，
     计算各时段购电功率的最小值和最大值。
     """
-    count = len(problem.products)
-    baseline_cost = 0.0
-    for index in range(count): # 计算基准计划的总购电成本
-        price_eur_per_mwh = problem.prices[index]
-        grid_power_mw = baseline_plans[index].planned_grid_power_mw
-        duration_hours = problem.durations[index]
-        period_cost = price_eur_per_mwh * grid_power_mw * duration_hours
-        baseline_cost += period_cost
-        
+    baseline_cost = sum(
+        problem.prices[index] * plan.planned_grid_power_mw * problem.durations[index]
+        for index, plan in enumerate(baseline_plans)
+    )
+
     cost_limit = baseline_cost + abs(baseline_cost) * (
         household.cost_tolerance_percent / 100)
     cost_row = np.zeros(problem.variable_count)
@@ -449,7 +420,6 @@ def plan_household_opening(
     price_forecast: dict[datetime, float],
     forecasts: dict[str, dict[datetime, float]],
     initial_energy_mwh: dict[str, float],
-    initial_heat_pump_power_mw: dict[str, float],
     initial_battery_charge_power_mw: dict[str, float],
     initial_battery_discharge_power_mw: dict[str, float],
     *,
@@ -477,7 +447,6 @@ def plan_household_opening(
             price_forecast,
             forecasts[f"{household.name}_heat_demand"],
             initial_energy_mwh[household.name],
-            initial_heat_pump_power_mw[household.name],
             initial_battery_charge_power_mw[household.name],
             initial_battery_discharge_power_mw[household.name],
         ) # 准备模型数据
@@ -561,6 +530,7 @@ def dispatch_household(
         remaining_for_heat = available_power - served_fixed # 计算可供热泵使用的剩余功率
         heat_pump_power = min(
             plan.planned_heat_pump_power_mw,
+            household.heat_pump_max_power_mw,
             remaining_for_heat,
             previous_heat_pump + household.heat_pump_ramp_up_mw,
         ) # 确定热泵实际用电功率

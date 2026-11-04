@@ -120,6 +120,23 @@ class CsvContracts(unittest.TestCase):
 
 
 class ClearingContracts(unittest.TestCase):
+    def test_small_trades_keep_their_energy_price_and_payment(self):
+        for quantity in (5e-8, 1e-7, 2e-7):
+            for clear, marginal_unit in (
+                (clear_pay_as_clear, "plant"),
+                (clear_pay_as_bid, None),
+            ):
+                with self.subTest(quantity=quantity, algorithm=clear.__name__):
+                    result = clear([bid(volume=quantity)],
+                                   [offer(volume=quantity, price=50.0)])
+                    self.assertEqual(result.cleared_energy_mwh, quantity)
+                    self.assertEqual(result.marginal_unit_name, marginal_unit)
+                    self.assertEqual(len(result.trades), 1)
+                    self.assertEqual(result.trades[0].trade_energy_mwh, quantity)
+                    self.assertEqual(result.trades[0].trade_price_eur_per_mwh, 50.0)
+                    self.assertEqual(result.offers[0].revenue_eur, quantity * 50.0)
+                    self.assertEqual(result.demand_bids[0].payment_eur, quantity * 50.0)
+
     def test_duplicate_demand_ids_are_rejected(self):
         for clear in (clear_pay_as_clear, clear_pay_as_bid):
             with self.subTest(algorithm=clear.__name__):
@@ -186,6 +203,44 @@ class ClearingContracts(unittest.TestCase):
         self.assertEqual([trade.trade_price_eur_per_mwh for trade in discriminatory.trades],
                          [10, 20])
 
+    def test_trade_records_preserve_partial_matches_and_settlement(self):
+        bids = [bid("high", volume=2), bid("low", volume=2, price=30)]
+        offers = [offer("cheap", volume=1, price=-10),
+                  offer("dear", volume=2, price=20), offer("unused", price=200)]
+        for clear, prices, payments, revenues in (
+            (clear_pay_as_clear, [20, 20, 20], [40, 20], [20, 40, 0]),
+            (clear_pay_as_bid, [-10, 20, 20], [10, 20], [-10, 40, 0]),
+        ):
+            with self.subTest(algorithm=clear.__name__):
+                result = clear(bids, offers)
+                self.assertEqual(result.cleared_energy_mwh, 3)
+                self.assertEqual(
+                    [(t.buyer_bid_id, t.seller_offer_id, t.trade_energy_mwh)
+                     for t in result.trades],
+                    [("high", "cheap", 1), ("high", "dear", 1), ("low", "dear", 1)],
+                )
+                self.assertEqual({(t.delivery_start, t.delivery_end) for t in result.trades},
+                                 {(START, START + HOUR)})
+                self.assertEqual([t.trade_price_eur_per_mwh for t in result.trades], prices)
+                self.assertEqual([d.accepted_energy_mwh for d in result.demand_bids], [2, 1])
+                self.assertEqual([s.accepted_energy_mwh for s in result.offers], [1, 2, 0])
+                self.assertEqual([d.payment_eur for d in result.demand_bids], payments)
+                self.assertEqual([s.revenue_eur for s in result.offers], revenues)
+
+    def test_unmatched_orders_generate_no_trade_records(self):
+        for demand, supply in (
+            (bid(volume=0), offer()),
+            (bid(), offer(volume=0)),
+            (bid(price=5), offer(price=10)),
+        ):
+            for clear in (clear_pay_as_clear, clear_pay_as_bid):
+                with self.subTest(algorithm=clear.__name__, demand=demand, supply=supply):
+                    result = clear([demand], [supply])
+                    self.assertEqual(result.trades, ())
+                    self.assertEqual(result.cleared_energy_mwh, 0)
+                    self.assertEqual(result.demand_bids[0].payment_eur, 0)
+                    self.assertEqual(result.offers[0].revenue_eur, 0)
+
     def test_complex_still_clears_multiple_products(self):
         bids = [bid()]
         offers = [offer()]
@@ -195,6 +250,10 @@ class ClearingContracts(unittest.TestCase):
         results = clear_complex_opening(bids, offers)
         self.assertEqual([result.delivery_start for result in results], [START, START + HOUR])
         self.assertEqual([result.unserved_load_mwh for result in results], [1.0, 1.0])
+        for result in results:
+            self.assertEqual(result.clearing_price_eur_per_mwh, 100)
+            self.assertEqual([c.clearing_price_eur_per_mwh
+                              for c in (*result.offers, *result.demand_bids)], [100, 100])
 
 
 if __name__ == "__main__":

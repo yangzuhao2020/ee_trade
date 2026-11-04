@@ -106,8 +106,8 @@ def storage_heuristic_orders(
     products: tuple[tuple[datetime, datetime], ...],
     price_forecast: dict[datetime, float],
     *,
-    forecast_start: datetime | None = None,
-    forecast_end: datetime | None = None,
+    forecast_start: datetime,
+    forecast_end: datetime,
 ) -> tuple[list[DemandBid], list[SupplyOffer]]:
     """构建每小时互斥的充电或放电订单。
 
@@ -120,8 +120,6 @@ def storage_heuristic_orders(
     charge_bids: list[DemandBid] = []
     discharge_offers: list[SupplyOffer] = []
     reference_energy = initial_energy_mwh
-    available_start = forecast_start or min(price_forecast)
-    available_end = forecast_end or max(price_forecast)
     for delivery_start, delivery_end in products:
         duration_hours = hours_between(delivery_start, delivery_end)
         reference_energy = min(
@@ -131,9 +129,9 @@ def storage_heuristic_orders(
         window_times = [
             delivery_start + timedelta(hours=offset)
             for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1)
-            if available_start
+            if forecast_start
             <= delivery_start + timedelta(hours=offset)
-            <= available_end
+            <= forecast_end
         ]
         window = [
             price_forecast[time] for time in window_times if time in price_forecast
@@ -143,7 +141,7 @@ def storage_heuristic_orders(
         timestamp = delivery_start.isoformat()
 
         if current_price < average_price:
-            headroom_mwh = max(0.0, storage.max_energy_mwh - reference_energy)
+            headroom_mwh = storage.max_energy_mwh - reference_energy
             charge_energy_mwh = min(
                 storage.max_power_charge_mw * duration_hours,
                 headroom_mwh / storage.efficiency_charge,
@@ -162,7 +160,6 @@ def storage_heuristic_orders(
                         price_eur_per_mwh=bid_price,
                         bid_type="storage_charge",
                         bid_id=f"{storage.name}::charge::{timestamp}",
-                        demand_type="storage_charge",
                     )
                 )
                 reference_energy += (
@@ -334,8 +331,7 @@ def heuristic_flexible_offers(
     segment_specs = []
     if inflexible_power > _POWER_TOLERANCE_MW:
         segment_specs.append(("inflexible", inflexible_power, inflexible_price))
-    if flexible_power > _POWER_TOLERANCE_MW:
-        segment_specs.append(("flexible", flexible_power, marginal_cost))
+    segment_specs.append(("flexible", flexible_power, marginal_cost))
     return segment_supply_offers(
         plant, delivery_start, delivery_end, segment_specs, marginal_cost
     )
@@ -392,7 +388,6 @@ def heuristic_block_offers(
                 bid_id=parent_bid_id,
                 bid_type="BB",
                 min_acceptance_ratio=1.0,
-                parent_bid_id=None,
                 bid_price_eur_per_mwh=block_price,
                 offer_segment="block_inflexible",
             )

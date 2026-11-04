@@ -447,6 +447,46 @@ def _write_household_scenario(directory, battery_power_mw, *, min_soc=0, initial
 
 
 class HouseholdSavingContracts(unittest.TestCase):
+    def test_heat_pump_planning_rejects_demand_above_rated_power(self):
+        from electricity_market_sim.household import plan_household_opening
+        from electricity_market_sim.inputs import load_household_units
+
+        with TemporaryDirectory() as directory:
+            path = _write_household_scenario(directory, 0.5)
+            (household,) = load_household_units(path / "residential_dsm_units.csv")
+        arguments = dict(
+            households=(household,), products=((START, START + HOUR),),
+            price_forecast={START: 10.0},
+            initial_energy_mwh={household.name: household.initial_energy_mwh},
+            initial_battery_charge_power_mw={household.name: 0.0},
+            initial_battery_discharge_power_mw={household.name: 0.0},
+            evaluate_flexibility=False,
+        )
+        plans, _ = plan_household_opening(
+            **arguments, forecasts={f"{household.name}_heat_demand": {START: 10.0}})
+        self.assertAlmostEqual(plans[household.name][0].planned_heat_pump_power_mw, 5.0)
+        with self.assertRaisesRegex(InputValidationError, "热泵功率超出功率上限"):
+            plan_household_opening(
+                **arguments, forecasts={f"{household.name}_heat_demand": {START: 12.0}})
+
+    def test_heat_pump_dispatch_respects_rated_power(self):
+        from electricity_market_sim.household import dispatch_household
+        from electricity_market_sim.inputs import load_household_units
+        from electricity_market_sim.models import HouseholdPlan
+
+        with TemporaryDirectory() as directory:
+            path = _write_household_scenario(directory, 0.5)
+            (household,) = load_household_units(path / "residential_dsm_units.csv")
+        plan = HouseholdPlan(START, START + HOUR, household.name, 10.0, 12.0,
+                             0.0, 6.0, 6.0, 0.0)
+        (result,) = dispatch_household(
+            household, (plan,), {START: 5.5}, household.initial_energy_mwh,
+            initial_heat_pump_power_mw=5.0,
+        )
+        self.assertAlmostEqual(result.heat_pump_power_mw, 5.0)
+        self.assertAlmostEqual(result.battery_charge_power_mw, 0.5)
+        self.assertAlmostEqual(result.unmet_heat_mwh_th, 2.0)
+
     def test_positive_solar_quote_is_used_in_optimized_and_baseline_payments(self):
         from electricity_market_sim.simulation import simulate
 
@@ -509,7 +549,6 @@ class HouseholdSavingContracts(unittest.TestCase):
         summary = self.summary(result)
         self.assertTrue(summary.comparable)
         self.assertAlmostEqual(summary.actual_saving_eur, saving)
-        self.assertIn("对照可比", summary.describe())
         self.assertAlmostEqual(sum(cost.forecast_saving_eur for cost in costs), 50.0, places=6)
         demand_payment = sum(
             cleared.payment_eur
@@ -533,6 +572,28 @@ class HouseholdSavingContracts(unittest.TestCase):
                                    cost.baseline_grid_energy_mwh)
             self.assertAlmostEqual(cost.actual_saving_eur, 0.0)
             self.assertAlmostEqual(cost.forecast_saving_eur, 0.0)
+
+    def test_household_cost_requires_non_optional_numbers(self):
+        result = self.simulate(0.5)
+        costs = result.household_cost_results
+        for field in ("baseline_grid_energy_mwh", "forecast_saving_eur", "baseline_soc_after"):
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                cost = replace(costs[0], **{field: None})
+                invalid = replace(result, household_cost_results=(cost, *costs[1:]))
+                with self.assertRaises(TypeError):
+                    write_results(Path(directory), invalid)
+
+    def test_household_cost_leaves_untraded_actual_price_empty(self):
+        result = self.simulate(0.5)
+        costs = result.household_cost_results
+        cost = replace(costs[0], accepted_grid_energy_mwh=0.0, payment_eur=0.0)
+        result = replace(result, household_cost_results=(cost, *costs[1:]))
+        with TemporaryDirectory() as directory:
+            write_results(Path(directory), result)
+            with (Path(directory) / "household_results.csv").open(encoding="utf-8") as file:
+                row = next(csv.DictReader(file))
+        self.assertEqual(row["actual_price_eur_per_mwh"], "")
+        self.assertEqual(row["accepted_grid_energy_mwh"], "0.000000")
 
     def test_household_results_csv_and_plots_include_savings(self):
         from electricity_market_sim.plotting import generate_plots
@@ -642,7 +703,6 @@ class HouseholdComparabilityContracts(unittest.TestCase):
         self.assertAlmostEqual(summary.actual_saving_eur, 6.25)
         self.assertAlmostEqual(summary.unmet_heat_difference_mwh_th, 0.25)
         self.assertFalse(summary.comparable)
-        self.assertIn("对照不可比", summary.describe())
 
     def test_consuming_initial_battery_energy_is_not_a_comparable_saving(self):
         summary = self.summary(*self.pair(payment=12.5, soc=(1.0, 0.875)))

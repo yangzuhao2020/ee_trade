@@ -56,7 +56,7 @@ UNACCEPTED_LINES = (
 DEMAND_TYPES = [*(demand_type for demand_type, _, _ in ACCEPTED_LAYERS), "storage_charge"]
 # 较早版本的 household_results.csv 缺少部分或全部成本对照列，相应内容不绘制。
 HOUSEHOLD_SAVING_COLUMNS = (
-    "payment_eur", "baseline_payment_eur", "actual_saving_eur",
+    "baseline_payment_eur", "actual_saving_eur",
     "unmet_electricity_mwh", "baseline_unmet_electricity_mwh",
     "unmet_heat_mwh_th", "baseline_unmet_heat_mwh_th", "soc_after", "baseline_soc_after",
 )
@@ -70,18 +70,16 @@ def has_results(run_dir: Path) -> bool:
 def load_run(run_dir: Path) -> dict[str, pd.DataFrame]:
     """读取一次运行目录下的各个 CSV 表，并解析时间列。
 
-    缺失或没有数据行的可选表会被略过，依赖这些表的图表也随之跳过。
+    缺失或仅含表头的可选表会被略过，依赖这些表的图表也随之跳过。
+    必需表缺失或 CSV 没有表头时直接抛错。
     """
 
     tables = {}
     for key, filename in TABLES.items():
         path = run_dir / filename
-        if not path.is_file():
+        if key not in REQUIRED_TABLES and not path.is_file():
             continue
-        try:
-            table = pd.read_csv(path)
-        except pd.errors.EmptyDataError:
-            table = pd.DataFrame()
+        table = pd.read_csv(path)
         if table.empty and key not in REQUIRED_TABLES:
             continue
         for column in TIME_COLUMNS:
@@ -136,7 +134,7 @@ def market_overview(tables: dict[str, pd.DataFrame]) -> go.Figure:
 
     figure = make_subplots(
         rows=row_count, cols=1, shared_xaxes=True,
-        vertical_spacing=min(0.04, 0.25 / (row_count - 1)),
+        vertical_spacing=0.04,
         row_heights=[1, *([1.2, 1.2] if household_mode else [1.45]), *([0.8] * len(unaccepted_panels))],
         subplot_titles=[
             price_label, *demand_titles,
@@ -192,7 +190,6 @@ def market_overview(tables: dict[str, pd.DataFrame]) -> go.Figure:
         figure.update_yaxes(rangemode="tozero", row=2, col=1)
         figure.update_yaxes(title_text="电量（MWh）", rangemode="tozero", row=3, col=1)
     figure.update_xaxes(title_text="交付开始时间", row=row_count, col=1)
-    figure.update_layout(font={"family": "Microsoft YaHei, SimHei, Noto Sans CJK SC, sans-serif"})
     title = "电力市场概览"
     if household_mode:
         title += f"<br><sup>未满足的刚性负荷合计：{unaccepted['inelastic_load'].sum():,.6f} MWh</sup>"
@@ -218,7 +215,6 @@ def market_summary(tables: dict[str, pd.DataFrame]) -> go.Figure:
     )
     figure.update_yaxes(title_text="成交功率（GW）")
     figure.update_xaxes(title_text="交付开始时间", tickformat="%m-%d\n%H:%M")
-    figure.update_layout(font={"family": "Microsoft YaHei, SimHei, Noto Sans CJK SC, sans-serif"})
     return _finish(figure, "电能量市场出清汇总", 540)
 
 
@@ -226,7 +222,7 @@ def dispatch_by_unit(tables: dict[str, pd.DataFrame]) -> go.Figure:
     market = tables["market"]
     times = market["delivery_start"]
     supply = _accepted_supply(tables)
-    energy = supply.groupby("unit_name")["energy_mwh"].sum().sort_index()
+    energy = supply.groupby("unit_name")["energy_mwh"].sum()
     ranked = energy[energy > ENERGY_TOLERANCE_MWH].sort_values(ascending=False, kind="stable").index
     power = (
         supply.pivot_table(index="delivery_start", columns="unit_name", values="power_mw", aggfunc="sum")
@@ -234,18 +230,18 @@ def dispatch_by_unit(tables: dict[str, pd.DataFrame]) -> go.Figure:
         .fillna(0.0)
         .reset_index(drop=True)
     )
-    series = {name: power[name] for name in ranked[:MAX_DISPATCH_UNITS]}
-    others = ranked[MAX_DISPATCH_UNITS:]
+    selected = ranked[:MAX_DISPATCH_UNITS]
+    omitted_count = len(ranked) - len(selected)
 
     figure = go.Figure()
-    for index, (name, values) in enumerate(series.items()):
+    for index, name in enumerate(selected):
         color = UNIT_COLORS[index % len(UNIT_COLORS)]
-        figure.add_trace(_line(times, values, name, color, width=1.25))
-    if not series:
+        figure.add_trace(_line(times, power[name], name, color, width=1.25))
+    if selected.empty:
         _annotate_empty(figure, "暂无供给报价")
     title = f"成交电量最多的 {MAX_DISPATCH_UNITS} 个供给单元"
-    if len(others):
-        title += f"（其余 {len(others)} 个未展示）"
+    if omitted_count:
+        title += f"（其余 {omitted_count} 个未展示）"
     figure.update_yaxes(title_text="功率（MW）", rangemode="tozero")
     figure.update_xaxes(title_text="交付开始时间")
     return _finish(figure, title, 560)
@@ -279,7 +275,7 @@ def operator_profit(tables: dict[str, pd.DataFrame]) -> go.Figure:
     return _finish(
         figure,
         title,
-        max(360, 30 * len(operators) + 140),
+        360,
         hovermode="closest",
     )
 
@@ -430,15 +426,14 @@ def industry_dispatch(tables: dict[str, pd.DataFrame]) -> go.Figure:
 def household_dispatch(tables: dict[str, pd.DataFrame]) -> go.Figure:
     """各居民的电价、电池充放电功率及 SOC。"""
 
-    household = tables["household"].sort_values(["unit_name", "delivery_start"], kind="stable")
+    household = tables["household"].sort_values("delivery_start", kind="stable")
     figure = make_subplots(
         rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=(1.2, 0.9, 0.8),
         subplot_titles=["居民购电价格", "电池充放电功率（充电为正、放电为负）", "电池 SOC"],
     )
-    names = sorted(household["unit_name"].unique())
-    for name in names:
-        rows = household[household["unit_name"] == name]
-        prefix = f"{name} " if len(names) > 1 else ""
+    grouped = household.groupby("unit_name", sort=True)
+    for name, rows in grouped:
+        prefix = f"{name} " if len(grouped) > 1 else ""
         step_x = [*rows["delivery_start"], rows["delivery_end"].iloc[-1]]
         step = {"shape": "hv", "legendgroup": name}
         figure.add_trace(
@@ -492,14 +487,13 @@ def household_savings(tables: dict[str, pd.DataFrame]) -> go.Figure:
         figure.update_yaxes(visible=False)
         return _finish(figure, title, 320)
 
-    household = tables["household"].sort_values(["unit_name", "delivery_start"], kind="stable")
+    household = tables["household"].sort_values("delivery_start", kind="stable")
     figure = go.Figure()
-    names = sorted(household["unit_name"].unique())
+    grouped = household.groupby("unit_name", sort=True)
     notes = []
     all_comparable = True
-    for index, name in enumerate(names):
-        rows = household[household["unit_name"] == name]
-        prefix = f"{name} " if len(names) > 1 else ""
+    for name, rows in grouped:
+        prefix = f"{name} " if len(grouped) > 1 else ""
         cumulative_x = [rows["delivery_start"].iloc[0], *rows["delivery_end"]]
         figure.add_trace(
             _line(cumulative_x, [0.0, *rows["actual_saving_eur"].cumsum()], f"{prefix}实际节省（按实际成交价）",
@@ -565,7 +559,9 @@ def _accepted_supply(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
     columns = ["delivery_start", "unit_name", "power_mw", "energy_mwh"]
     unit = tables["unit"]
-    parts = [unit.assign(power_mw=unit["accepted_power_mw"], energy_mwh=unit["accepted_energy_mwh"])[columns]]
+    parts = [unit.rename(columns={
+        "accepted_power_mw": "power_mw", "accepted_energy_mwh": "energy_mwh",
+    })[columns]]
     if "storage" in tables:
         storage = tables["storage"]
         parts.append(

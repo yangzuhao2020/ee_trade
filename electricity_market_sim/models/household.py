@@ -10,11 +10,7 @@ class HouseholdUnit:
     """配备热泵和内部电池的单个建筑参与者。"""
     name: str
     operator: str
-    bidding_strategy: str
-    objective: str
-    flexibility_measure: str
     cost_tolerance_percent: float
-    is_prosumer: bool
     fixed_power_mw: float
     heat_pump_max_power_mw: float
     heat_pump_min_power_mw: float
@@ -128,7 +124,6 @@ class HouseholdSavingSummary:
     unit_name: str
     baseline_payment_eur: float
     payment_eur: float
-    forecast_saving_eur: float
     unmet_electricity_difference_mwh: float
     unmet_heat_difference_mwh_th: float
     unmet_electricity_mismatch_mwh: float
@@ -154,7 +149,7 @@ class HouseholdSavingSummary:
         )
 
     def difference_lines(self) -> tuple[str, ...]:
-        """三项对照差异的中文说明，供命令行和图表使用。"""
+        """三项对照差异的中文说明，供图表使用。"""
         return (
             f"缺电量逐时段不一致 {self.unmet_electricity_mismatch_mwh:.6f} MWh"
             f"（净差 {self.unmet_electricity_difference_mwh:+.6f}）",
@@ -163,19 +158,12 @@ class HouseholdSavingSummary:
             f"期末 SOC 差 {self.final_soc_difference * 100:+.2f} 个百分点",
         )
 
-    def describe(self) -> str:
-        """中文的对照有效性说明，供命令行使用。"""
-        differences = "，".join(self.difference_lines())
-        if self.comparable:
-            return f"对照可比（{differences}）"
-        return f"对照不可比（{differences}），实际节省不构成同等服务下的节省"
-
 
 def summarize_household_savings(
     dispatch_results: tuple[HouseholdDispatchResult, ...],
     cost_results: tuple[HouseholdCostResult, ...],
 ) -> tuple[HouseholdSavingSummary, ...]:
-    """按居民汇总支付、计划节省，以及缺供量和期末 SOC 与基准方案的差异。"""
+    """按居民汇总支付，以及缺供量和期末 SOC 与基准方案的差异。"""
     dispatch = {
         (result.unit_name, result.delivery_start): result for result in dispatch_results
     }
@@ -199,7 +187,6 @@ def summarize_household_savings(
                 unit_name=unit_name,
                 baseline_payment_eur=sum(cost.baseline_payment_eur for cost in costs),
                 payment_eur=sum(cost.payment_eur for cost in costs),
-                forecast_saving_eur=sum(cost.forecast_saving_eur for cost in costs),
                 unmet_electricity_difference_mwh=sum(electricity),
                 unmet_heat_difference_mwh_th=sum(heat),
                 unmet_electricity_mismatch_mwh=sum(abs(value) for value in electricity),
