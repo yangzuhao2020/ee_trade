@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--checkpoint",
         type=Path,
         help=(
-            "Checkpoint to resume MATD3 training or load for evaluation (defaults to "
+            "Checkpoint to load for evaluation (defaults to "
             "OUTPUT_DIR/checkpoints/best.pt). For test, the runs.json manifest or "
             "its directory (defaults to OUTPUT_DIR/checkpoints/runs.json)."
         ),
@@ -79,8 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--training-runs",
         type=int,
         help=(
-            "Number of independent learning runs. Defaults to 3; use 1 only for "
-            "resume or quick diagnostic runs."
+            "Number of independent learning runs. Defaults to 1."
         ),
     )
     return parser
@@ -135,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             if learning_mode == "train":
+                if arguments.checkpoint is not None:
+                    raise SimulationError("--checkpoint 仅用于评估或测试。")
                 training_steps = arguments.training_steps
                 if arguments.training_rounds is not None:
                     if settings.learning_config.algorithm != "grpo":
@@ -145,7 +146,6 @@ def main(argv: list[str] | None = None) -> int:
                     input_dir=arguments.input_dir,
                     output_dir=arguments.output_dir,
                     scenario=arguments.scenario,
-                    checkpoint_path=arguments.checkpoint,
                     training_episodes=arguments.training_episodes,
                     independent_runs=arguments.training_runs,
                     training_steps=training_steps,

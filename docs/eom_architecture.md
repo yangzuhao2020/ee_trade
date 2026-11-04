@@ -98,7 +98,7 @@ python -B tests/eom_regression.py compare outputs/eom_baseline
 基准脚本遍历六个示例数据集的 YAML 场景，保存完整内存结果、警告、回调序列
 和 CSV。比较包括文件集合、CSV 字节、完整结果以及动作/经验回调顺序。
 原有失败场景也记录异常类型和消息，并要求重构后保持一致。
-`example_02a/base`、`tiny` 在接入公共 `learning.yaml` 之前因缺少学习参数而加载失败，
+`example_02a/base`、`tiny` 在接入公共 `matd3.yaml` 之前因缺少学习参数而加载失败，
 之后按训练时段正常运行；跨越这一变更的旧基线会对这两个普通场景报告不一致，
 应从包含该变更的版本重新生成基线后再比较。两个 `*_deterministic_fixture` 的学习参数
 完整固定，与旧基线保持一致，无需迁移。
@@ -106,7 +106,7 @@ python -B tests/eom_regression.py compare outputs/eom_baseline
 第四版独立事件时序、待交付产量、部分成交补产及最终缺口由
 `test_industry_market.py` 使用内存输入验证，不依赖示例 CSV。
 
-`example_02a` 的 `base`、`tiny` 通过合并公共 `learning.yaml` 和场景配置正常加载，
+`example_02a` 的 `base`、`tiny` 通过合并公共 `matd3.yaml` 和场景配置正常加载，
 脚本按各自的训练时段运行。另创建仅存在于内存的 `base_deterministic_fixture` 和
 `tiny_deterministic_fixture`，覆盖时段以保留历史交付范围；学习参数（含 `device: cpu`、
 `replay_buffer_size: 10000`）在脚本中完整固定，不受公共配置和场景配置调整的影响，

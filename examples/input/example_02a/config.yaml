@@ -12,7 +12,6 @@ base: &base
 
   learning_config: &base_learning
     learning_mode: true
-    continue_learning: false
     trained_policies_save_path: null
     trained_policies_load_path: null
     periods:
@@ -47,7 +46,6 @@ tiny: &tiny
 
   learning_config:
     learning_mode: true
-    continue_learning: false
     trained_policies_save_path: null
     trained_policies_load_path: null
     training_episodes: 10

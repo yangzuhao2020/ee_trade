@@ -2,7 +2,7 @@
 # 参数取自 docs/version5.md，example_02a/base 直接使用；经验池容量作为初始设置。
 # 场景 learning_mode 为 true 时由 loader.py 自动读取；场景参数覆盖公共参数。
 # 命令行支持的覆盖参数优先级最高；未知参数会发出警告并被忽略。
-# 场景配置负责 learning_mode、periods，以及恢复训练和检查点路径设置。
+# 场景配置负责 learning_mode、periods，以及模型保存和加载路径设置。
 # periods 必须包含按交付时间定义的 train、validation、test 三个区间。
 
 learning_config:

@@ -28,11 +28,11 @@
 ### demand_results.csv
 增加 A360 的买单、成交量和实际支付。市场成交量不得与其他结果重复累加。
 ### 成交结算
-取消 `trade_results.csv` 的独立导出。内部逐笔成交记录继续用于结算和市场均价计算，成交电量使用正值：$$
+买单的成交汇总和实际支付写入 `demand_results.csv`，市场出清价格及成交均价写入 `market_results.csv`。内部逐笔成交记录用于结算和市场均价计算，成交电量使用正值：$$
 \mathrm{payment} = \mathrm{trade\_energy} \times \mathrm{trade\_price}$$
 `demand_results.csv` 直接读取出清结果中每张买单的成交电量和实际支付，导出时不再重新汇总内部逐笔交易。完全未成交的买单仍记录申报量、未成交量和零支付。
 ### household_results.csv
-记录 A360 的计划、购电功率灵活性上下界及实际设备运行，按 `(unit_name, delivery_start, delivery_end)` 合并为一行，不再单独导出 `household_flexibility_results.csv`：
+记录 A360 的计划、购电功率灵活性上下界及实际设备运行，按 `(unit_name, delivery_start, delivery_end)` 合并为一行：
 ```
 delivery_start
 delivery_end
@@ -51,7 +51,7 @@ soc_after
 unmet_electricity_mwh
 unmet_heat_mwh_th
 ```
-其中，`planned_grid_power_mw` 为基准计划购电功率；热泵功率、电池充放电功率和 SOC 均为成交后的实际运行结果。买单、报价及逐笔成交统一记录在 `demand_results.csv`；为直接对比节省效果，本表末尾附带下述购电成本列。
+其中，`planned_grid_power_mw` 为基准计划购电功率；热泵功率、电池充放电功率和 SOC 均为成交后的实际运行结果。买单申报量、报价、成交量及实际支付按买单记录在 `demand_results.csv`；为直接对比节省效果，本表末尾附带下述购电成本列。
 
 `minimum_grid_power_mw` 和 `maximum_grid_power_mw` 为出清前按预测电价评估的最低、最高可行购电功率：在相同初始状态、供热及设备约束和整个优化窗口的成本容忍度限制下，对每个时段分别最小化、最大化购电功率。各上下界可能来自不同的完整运行方案，不对应同一行的实际设备运行及 SOC，也不能将整列上下界直接拼接为一套可执行计划。灵活性分析结果不直接用于 EOM 买单。
 ### 购电成本与节省（对比不使用电池的基准方案）
@@ -219,6 +219,6 @@ $$
 8. 市场订单的 `volume_mwh` 统一使用非负 MWh，并通过 `side` 区分买卖方向。15 分钟产品中，`demand_EOM=100 MW` 对应 `side=buy`、`volume_mwh=25 MWh` 的买单；发电机报价功率为 `P MW` 时，对应 `side=sell`、`volume_mwh=P×0.25 MWh` 的卖单。进入供需平衡计算时买单转换为 `-25 MWh`，订单和输出文件仍保存 `25 MWh`。
 9. 在单个 15 分钟产品中，当总需求低于 NEURATH F 的 `min_power=560 MW` 时，其普通卖单仍可部分成交；成交功率等于市场实际匹配的需求功率，不因 `min_power` 导致出清不可行。
 10. 使用至少包含一个低价时段和一个后续高价时段的短预测序列，验证电池在功率、效率、SOC 和窗口末端 SOC 约束内低价充电、高价放电；不得使用未来实际出清价作出决策。
-11. 不生成 `trade_results.csv`；按同一次开市和买单编号汇总内部交易的成交电量及支付，必须与 `demand_results.csv` 中对应买单的成交电量及实际支付一致。
+11. 按同一次开市和买单编号汇总内部交易的成交电量及支付，必须与 `demand_results.csv` 中对应买单的成交电量及实际支付一致。
 
 运行入口沿用 `PYTHONPATH=. python -m electricity_market_sim.main`（包已移至项目根），指定 `--input-dir examples/input/example_01h --scenario eom` 和独立输出目录。

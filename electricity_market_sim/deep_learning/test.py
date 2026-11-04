@@ -4,9 +4,7 @@ from pathlib import Path
 from .agent import (
     create_agent,
     _RUN_MANIFEST,
-    _checkpoint_from_setting,
     _default_checkpoint_root,
-    _learning_config,
     _read_run_manifest,
 )
 from ..config import load_market_settings
@@ -27,11 +25,8 @@ _EVALUATION_PERIODS = ("train", "validation")
 
 def _default_evaluation_checkpoint(config: LearningConfig, output_path: Path) -> Path:
     if config.trained_policies_load_path is not None:
-        return _checkpoint_from_setting(
-            config.trained_policies_load_path,
-            output_path / "checkpoints",
-            "best.pt",
-        )
+        configured = Path(config.trained_policies_load_path)
+        return configured if configured.suffix == ".pt" else configured / "best.pt"
     if config.trained_policies_save_path is not None:
         return Path(config.trained_policies_save_path) / "best.pt"
     return output_path / "checkpoints" / "best.pt"
@@ -95,7 +90,7 @@ def evaluate_learning_scenario(
     input_path = Path(input_dir)
     output_path = Path(output_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
-    config = _learning_config(settings)
+    config = settings.learning_config
     agent = create_agent(config)
     checkpoint = (
         Path(checkpoint_path)
@@ -139,7 +134,7 @@ def run_learning_test(
     input_path = Path(input_dir)
     output_path = Path(output_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
-    config = _learning_config(settings)
+    config = settings.learning_config
     if manifest_path is None:
         manifest_file = _default_checkpoint_root(config, output_path) / _RUN_MANIFEST
     else:

@@ -289,18 +289,19 @@ class GRPOTests(unittest.TestCase):
             with self.assertRaisesRegex(InputValidationError, "Incompatible GRPO checkpoint"):
                 restored.load_checkpoint(checkpoint)
 
-    def test_training_rejects_resume_options(self):
+    def test_training_cli_does_not_accept_an_evaluation_checkpoint(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = make_grpo_scenario(root / "input")
-            with self.assertRaisesRegex(InputValidationError, "从头训练"):
-                train_learning_scenario(path, root / "output", checkpoint_path=root / "old.pt")
-            config_path = path / "config.yaml"
-            scene = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            scene["base"]["learning_config"]["continue_learning"] = True
-            config_path.write_text(yaml.safe_dump(scene), encoding="utf-8")
-            with self.assertRaisesRegex(InputValidationError, "从头训练"):
-                train_learning_scenario(path, root / "output")
+            with patch("builtins.print") as printed:
+                code = main([
+                    "--input-dir", str(path), "--output-dir", str(root / "output"),
+                    "--learning-mode", "train", "--checkpoint", str(root / "old.pt"),
+                    "--no-plots",
+                ])
+            self.assertEqual(code, 2)
+            self.assertTrue(any("--checkpoint 仅用于评估或测试" in str(call) for call in printed.call_args_list))
+            self.assertFalse((root / "output").exists())
 
     def test_cli_steps_and_incomplete_group_budget(self):
         with TemporaryDirectory() as temporary:
@@ -372,13 +373,16 @@ class GRPOTests(unittest.TestCase):
             root = Path(temporary)
             path = make_scenario(root / "input")
             train_learning_scenario(path, root / "output", training_steps=36, independent_runs=1)
-            payload = torch.load(root / "output" / "checkpoints" / "latest.pt", weights_only=True)
-            self.assertEqual(payload["episode"], 12)
-            self.assertEqual(len(payload["replay"]["states"]), 36)
+            episodes = [
+                row for row in read_rows(root / "output" / "learning_metrics.csv")
+                if row["phase"] in {"initial_experience", "train"}
+            ]
+            self.assertEqual([int(row["episode"]) for row in episodes], list(range(1, 13)))
+            self.assertEqual([row["phase"] for row in episodes[:2]], ["initial_experience", "train"])
             progress = read_rows(root / "output" / "learning_progress.csv")
             self.assertEqual(int(progress[-1]["interaction_steps"]), 36)
 
-    def test_config_rejects_invalid_grpo_parameters_and_cross_algorithm_output(self):
+    def test_config_rejects_invalid_grpo_parameters_and_allows_cross_algorithm_retraining(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = make_grpo_scenario(root / "input")
@@ -388,18 +392,23 @@ class GRPOTests(unittest.TestCase):
                                 ("validation_groups_interval", 0), ("validation_groups_interval", -1),
                                 ("validation_groups_interval", 1.5), ("validation_groups_interval", True),
                                 ("initial_std", 2), ("advantage_threshold", 0),
-                                ("max_grad_norm", 0), ("weight_decay", -0.01), ("min_lr_ratio", 1.1)):
+                                ("max_grad_norm", 0)):
                 invalid = yaml.safe_load(yaml.safe_dump(scene))
                 invalid["base"]["learning_config"][name] = value
                 config_path.write_text(yaml.safe_dump(invalid), encoding="utf-8")
                 with self.assertRaises(InputValidationError):
                     load_market_settings(config_path)
-            config_path.write_text(yaml.safe_dump(scene), encoding="utf-8")
-            train_learning_scenario(path, root / "output", training_steps=36, independent_runs=1)
-            scene["base"]["learning_config"]["algorithm"] = "matd3"
-            config_path.write_text(yaml.safe_dump(scene), encoding="utf-8")
-            with self.assertRaisesRegex(InputValidationError, "algorithm"):
-                train_learning_scenario(path, root / "output", independent_runs=1)
+            for algorithm in ("grpo", "matd3", "grpo"):
+                with self.subTest(algorithm=algorithm):
+                    scene["base"]["learning_config"]["algorithm"] = algorithm
+                    config_path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+                    train_learning_scenario(path, root / "output", training_steps=36, independent_runs=1)
+                    checkpoint_root = root / "output" / "checkpoints"
+                    manifest = json.loads((checkpoint_root / "runs.json").read_text(encoding="utf-8"))
+                    payload = torch.load(checkpoint_root / "best.pt", map_location="cpu", weights_only=True)
+                    self.assertEqual(manifest["algorithm"], algorithm)
+                    self.assertEqual(payload["algorithm"], algorithm)
+            run_learning_test(path, root / "output")
 
 
 if __name__ == "__main__":

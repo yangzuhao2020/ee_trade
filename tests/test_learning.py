@@ -4,10 +4,6 @@ from contextlib import redirect_stderr, redirect_stdout
 import csv
 import json
 import os
-import subprocess
-import sys
-import textwrap
-import warnings
 from dataclasses import replace
 from io import StringIO
 from datetime import datetime, timedelta
@@ -21,18 +17,15 @@ from unittest.mock import patch
 import torch
 import yaml
 
-from electricity_market_sim.config import load_market_settings
+from electricity_market_sim.config import load_market_settings, parse_duration
 from electricity_market_sim.deep_learning.agent import MATD3Agent, _periods_payload
 from electricity_market_sim.deep_learning.learning import (
     LearningEpisodeSession, build_learning_observation,
 )
-from electricity_market_sim.deep_learning.learning_metrics import _metrics
 from electricity_market_sim.deep_learning.test import (
     evaluate_learning_scenario, run_learning_test,
 )
-from electricity_market_sim.deep_learning.training import (
-    _restore_best_checkpoint, train_learning_scenario,
-)
+from electricity_market_sim.deep_learning.training import train_learning_scenario
 from electricity_market_sim.errors import InputValidationError
 from electricity_market_sim.main import main
 from electricity_market_sim.plotting import generate_learning_plots
@@ -184,6 +177,48 @@ def collect_states(path, period="train"):
 
 
 class LearningConfigurationContracts(unittest.TestCase):
+    def test_duration_parser_preserves_units_and_rejects_zero_after_rounding(self):
+        for value, expected in (("15m", timedelta(minutes=15)),
+                                ("15min", timedelta(minutes=15)),
+                                ("0.5h", timedelta(minutes=30)),
+                                ("1d", timedelta(days=1))):
+            with self.subTest(value=value):
+                self.assertEqual(parse_duration(value, "duration"), expected)
+        for unit in ("m", "min", "h", "d"):
+            for magnitude in ("0", "0.000000000001"):
+                with self.subTest(unit=unit, magnitude=magnitude):
+                    with self.assertRaisesRegex(InputValidationError, "duration"):
+                        parse_duration(magnitude + unit, "duration")
+
+    def test_market_opening_durations_reject_zero_after_rounding(self):
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary)) / "config.yaml"
+            scene = yaml.safe_load(path.read_text(encoding="utf-8"))
+            eom = scene["base"]["markets_config"]["EOM"]
+            for field in ("opening_frequency", "opening_duration"):
+                with self.subTest(field=field):
+                    eom[field] = "0.000000000001h"
+                    path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+                    with self.assertRaisesRegex(InputValidationError, field):
+                        load_market_settings(path)
+                    eom[field] = "1h"
+
+    def test_seed_accepts_null_and_nonnegative_integers(self):
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary)) / "config.yaml"
+            scene = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for value in (None, 0, 7):
+                with self.subTest(value=value):
+                    scene["base"]["seed"] = value
+                    path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+                    self.assertEqual(load_market_settings(path).seed, value)
+            for value in (-1, True, False, 1.5, "7"):
+                with self.subTest(value=value):
+                    scene["base"]["seed"] = value
+                    path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+                    with self.assertRaisesRegex(InputValidationError, "seed"):
+                        load_market_settings(path)
+
     def test_shared_defaults_are_loaded_relative_to_loader_and_scene_overrides_them(self):
         with TemporaryDirectory() as temporary:
             path = make_scenario(Path(temporary)).resolve()
@@ -230,14 +265,14 @@ class LearningConfigurationContracts(unittest.TestCase):
             root = Path(temporary)
             path = make_scenario(root / "input") / "config.yaml"
             shared = root / "shared.yaml"
-            with patch("electricity_market_sim.config.loader._LEARNING_DEFAULTS_PATH", shared):
+            with patch("electricity_market_sim.config.loader._MATD3_DEFAULTS_PATH", shared):
                 with self.assertRaisesRegex(InputValidationError, "shared.yaml"):
                     load_market_settings(path)
-                for content in ("learning_config: [", "[]", "learning_config: []"):
+                for content in ("learning_config: [", "[]"):
                     shared.write_text(content, encoding="utf-8")
                     with self.subTest(content=content), self.assertRaisesRegex(InputValidationError, "shared.yaml"):
                         load_market_settings(path)
-                for field in ("learning_mode", "periods", "continue_learning",
+                for field in ("learning_mode", "periods",
                               "trained_policies_load_path", "trained_policies_save_path"):
                     shared.write_text(yaml.safe_dump({"learning_config": {field: None}}), encoding="utf-8")
                     with self.subTest(field=field), self.assertRaisesRegex(InputValidationError, "场景专属字段"):
@@ -261,14 +296,21 @@ class LearningConfigurationContracts(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = make_scenario(root / "input") / "config.yaml"
-            shared = root / "shared.yaml"
-            defaults = yaml.safe_load(loader._LEARNING_DEFAULTS_PATH.read_text(encoding="utf-8"))
-            defaults["learning_config"]["extra_option"] = 1
-            shared.write_text(yaml.safe_dump(defaults), encoding="utf-8")
-            with patch.object(loader, "_LEARNING_DEFAULTS_PATH", shared), \
-                    self.assertWarnsRegex(UserWarning, "shared.yaml.*extra_option") as caught:
-                load_market_settings(path)
-            self.assertEqual(Path(caught.filename).resolve(), Path(__file__).resolve())
+            scene = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for algorithm, path_name in (("matd3", "_MATD3_DEFAULTS_PATH"),
+                                         ("grpo", "_GRPO_DEFAULTS_PATH")):
+                with self.subTest(algorithm=algorithm):
+                    scene["base"]["learning_config"].update(algorithm=algorithm, training_steps=72)
+                    path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+                    shared = root / f"{algorithm}.yaml"
+                    defaults = yaml.safe_load(getattr(loader, path_name).read_text(encoding="utf-8"))
+                    defaults["learning_config"]["extra_option"] = 1
+                    shared.write_text(yaml.safe_dump(defaults), encoding="utf-8")
+                    with patch.object(loader, path_name, shared), \
+                            self.assertWarnsRegex(UserWarning, "extra_option") as caught:
+                        load_market_settings(path)
+                    self.assertIn(str(shared), str(caught.warning))
+                    self.assertEqual(Path(caught.filename).resolve(), Path(__file__).resolve())
 
     def test_null_parameters_are_rejected_instead_of_overriding_defaults(self):
         with TemporaryDirectory() as temporary:
@@ -280,11 +322,71 @@ class LearningConfigurationContracts(unittest.TestCase):
             with self.assertRaisesRegex(InputValidationError, "null.*device, max_bid_price, tau"):
                 load_market_settings(path)
 
+    def test_integer_learning_parameters_reject_coercion_and_out_of_range_values(self):
+        fields = {
+            "matd3": {
+                "training_episodes": 1, "episodes_collecting_initial_experience": 0,
+                "replay_buffer_size": 1, "batch_size": 1, "gradient_steps": 1,
+                "validation_episodes_interval": 1, "policy_delay": 1, "training_steps": 0,
+            },
+            "grpo": {
+                "training_steps": 1, "group_size": 2, "sampling_workers": 1,
+                "update_epochs": 1, "minibatch_size": 1, "validation_groups_interval": 1,
+            },
+        }
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary)) / "config.yaml"
+            scene = yaml.safe_load(path.read_text(encoding="utf-8"))
+            original = scene["base"]["learning_config"].copy()
+            for algorithm, minima in fields.items():
+                for field, minimum in minima.items():
+                    for value in (2.9, 2.0, True, False, "2", minimum - 1):
+                        with self.subTest(algorithm=algorithm, field=field, value=value):
+                            scene["base"]["learning_config"] = {
+                                **original, "algorithm": algorithm, "training_steps": 72,
+                                field: value,
+                            }
+                            path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+                            with self.assertRaisesRegex(InputValidationError, field):
+                                load_market_settings(path)
+
+    def test_integer_learning_parameters_accept_zero_and_minimum_group_size(self):
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary)) / "config.yaml"
+            scene = yaml.safe_load(path.read_text(encoding="utf-8"))
+            scene["base"]["learning_config"].update(
+                episodes_collecting_initial_experience=0, training_steps=0,
+            )
+            path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+            config = load_market_settings(path).learning_config
+            self.assertEqual(config.initial_experience_episodes, 0)
+            self.assertEqual(config.training_steps, 0)
+            scene["base"]["learning_config"].update(
+                algorithm="grpo", training_steps=1, group_size=2, sampling_workers=1,
+                update_epochs=1, minibatch_size=1, validation_groups_interval=1,
+            )
+            path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+            config = load_market_settings(path).learning_config
+            self.assertEqual(config.group_size, 2)
+            self.assertEqual(config.training_steps, 1)
+            self.assertEqual(config.validation_interval, 1)
+
+    def test_product_count_requires_a_positive_integer(self):
+        with TemporaryDirectory() as temporary:
+            path = make_scenario(Path(temporary)) / "config.yaml"
+            scene = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for value in (1.9, 1.0, True, False, "1", 0, -1):
+                with self.subTest(value=value):
+                    scene["base"]["markets_config"]["EOM"]["products"][0]["count"] = value
+                    path.write_text(yaml.safe_dump(scene), encoding="utf-8")
+                    with self.assertRaisesRegex(InputValidationError, "count"):
+                        load_market_settings(path)
+
     def test_field_registry_matches_shared_defaults(self):
         from electricity_market_sim.config import loader
-        defaults = yaml.safe_load(loader._LEARNING_DEFAULTS_PATH.read_text(encoding="utf-8"))
+        defaults = yaml.safe_load(loader._MATD3_DEFAULTS_PATH.read_text(encoding="utf-8"))
         self.assertEqual(set(defaults["learning_config"]), loader._LEARNING_PARAMETER_FIELDS)
-        grpo_defaults = loader._load_learning_defaults("grpo")
+        grpo_defaults = loader._load_learning_defaults(loader._GRPO_DEFAULTS_PATH)
         self.assertLessEqual(grpo_defaults.keys(), loader._LEARNING_FIELDS)
 
 
@@ -698,39 +800,33 @@ class LearningTrainingContracts(unittest.TestCase):
         ]
         self.assertEqual(prices, [40.0] * 6)
 
-    def test_train_save_resume_and_evaluate_without_external_forecasts(self):
+    def test_train_save_and_evaluate_without_external_forecasts(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = make_scenario(root / "input")
             output = root / "output"
             with patch(PRICE_PREDICTOR, side_effect=AssertionError("Unexpected price forecast")):
                 result = train_learning_scenario(path, output, independent_runs=1)
-                latest = output / "checkpoints" / "latest.pt"
                 best = output / "checkpoints" / "best.pt"
-                payload = torch.load(latest, map_location="cpu", weights_only=True)
+                payload = torch.load(best, map_location="cpu", weights_only=True)
                 config = load_market_settings(path / "config.yaml").learning_config
+                self.assertEqual(set(payload), {
+                    "checkpoint_version", "algorithm", "state_version", "observation_size", "action_size",
+                    "episode", "validation_total_reward", "periods", "max_bid_price",
+                    "seed", "run", "actor",
+                })
                 self.assertEqual(payload["checkpoint_version"], 2)
+                self.assertEqual(payload["algorithm"], "matd3")
                 self.assertEqual(payload["state_version"], "v5-observation-16")
                 self.assertEqual(payload["observation_size"], 16)
                 self.assertEqual(payload["periods"], _periods_payload(config))
                 self.assertEqual(payload["actor"]["fc1.weight"].shape[1], 16)
-                self.assertEqual(payload["critics"]["q1.0.weight"].shape[1], 18)
-                # 经验池只含训练时段：3 个回合 × 3 个训练交付小时。
-                self.assertEqual(payload["replay"]["states"].shape, (9, 16))
-                self.assertEqual(payload["replay"]["next_states"].shape, (9, 16))
-                self.assertNotIn("load_base_mw", payload)
-                self.assertNotIn("validation_discounted_reward", payload)
-                self.assertGreater(payload["gradient_updates"], 0)
-                self.assertTrue(payload["actor_optimizer"]["state"])
+                self.assertEqual(list((output / "checkpoints").glob("*.pt")), [best])
                 self.assertEqual(
                     [step.delivery_start for step in result.learning_steps],
                     [START + hour * HOUR for hour in PERIOD_HOURS["validation"]],
                 )
                 self.assertFalse((output / "test").exists())
-                restored = MATD3Agent(config, total_regular_steps=6)
-                restored.load_checkpoint(latest, load_optimizers=True)
-                self.assertEqual(restored.replay.size, 9)
-                self.assertEqual(restored.gradient_updates, payload["gradient_updates"])
                 before = best.read_bytes()
                 evaluated = evaluate_learning_scenario(path, root / "evaluation", checkpoint_path=best)
                 self.assertEqual(evaluated.learning_steps, result.learning_steps)
@@ -742,26 +838,8 @@ class LearningTrainingContracts(unittest.TestCase):
                     [START + hour * HOUR for hour in PERIOD_HOURS["train"]],
                 )
                 self.assertEqual(best.read_bytes(), before)
-                resumed_output = root / "resumed"
-                resumed = train_learning_scenario(
-                    path, resumed_output, checkpoint_path=latest,
-                    training_episodes=4, independent_runs=1,
-                )
-                resumed_payload = torch.load(
-                    resumed_output / "checkpoints" / "latest.pt",
-                    map_location="cpu", weights_only=True,
-                )
-                self.assertEqual(resumed_payload["episode"], 4)
-                self.assertEqual(resumed_payload["replay"]["states"].shape, (12, 16))
-                self.assertGreater(resumed_payload["gradient_updates"], payload["gradient_updates"])
-                reevaluated = evaluate_learning_scenario(
-                    path, root / "reevaluation",
-                    checkpoint_path=resumed_output / "checkpoints" / "best.pt",
-                )
-                self.assertEqual(reevaluated.learning_steps, resumed.learning_steps)
-                self.assertEqual(best.read_bytes(), before)
             with self.assertRaisesRegex(InputValidationError, "--learning-mode test"):
-                evaluate_learning_scenario(path, root / "peek", checkpoint_path=best, period="test")
+                evaluate_learning_scenario(path, output, checkpoint_path=best, period="test")
 
     def test_best_checkpoint_is_selected_by_validation_total_reward(self):
         with TemporaryDirectory() as temporary:
@@ -828,32 +906,15 @@ class LearningTrainingContracts(unittest.TestCase):
                     "--training-episodes", "4", "--training-runs", "1", "--no-plots",
                 ])
             self.assertEqual(code, 0)
-            payload = torch.load(output / "checkpoints/latest.pt", map_location="cpu", weights_only=True)
-            self.assertEqual(payload["episode"], 4)
+            episodes = [
+                int(row["episode"]) for row in read_rows(output / "learning_metrics.csv")
+                if row["phase"] in {"initial_experience", "train"}
+            ]
+            self.assertEqual(episodes, [1, 2, 3, 4])
+            self.assertTrue((output / "checkpoints" / "best.pt").is_file())
             self.assertIn("cpu", stdout.getvalue())
             for period in DEFAULT_PERIODS:
                 self.assertIn(period + ": [", stdout.getvalue())
-
-    def test_optional_cuda_state_keeps_cpu_checkpoints_compatible_and_warns_on_transfer(self):
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            path = make_scenario(root / "input")
-            config = load_market_settings(path / "config.yaml").learning_config
-            checkpoint = root / "checkpoint.pt"
-            agent = MATD3Agent(config, total_regular_steps=6, seed=7)
-            agent.save_checkpoint(checkpoint, episode=0, validation_total_reward=None)
-            payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
-            self.assertEqual(payload["checkpoint_version"], 2)
-            self.assertNotIn("cuda_rng_state", payload)
-            restored = MATD3Agent(config, total_regular_steps=6)
-            restored.load_checkpoint(checkpoint, load_optimizers=True)
-            payload["cuda_rng_state"] = torch.zeros(16, dtype=torch.uint8)
-            torch.save(payload, checkpoint)
-            with self.assertWarnsRegex(UserWarning, "CPU.*GPU"):
-                restored.load_checkpoint(checkpoint, load_optimizers=True)
-            with warnings.catch_warnings(record=True) as recorded:
-                restored.load_checkpoint(checkpoint, load_optimizers=False)
-            self.assertEqual(recorded, [])
 
     def test_independent_test_command_evaluates_every_run_without_changing_models(self):
         with TemporaryDirectory() as temporary:
@@ -911,184 +972,40 @@ class LearningTrainingContracts(unittest.TestCase):
                  "learning_validation_comparison.png"],
             )
 
-    def test_resumed_run_keeps_its_number_and_updates_the_manifest(self):
-        """恢复 run_02/latest.pt 沿用编号 2，清单合并更新，其余运行保持不变。"""
+    def test_retraining_replaces_run_records_and_training_progress(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = make_scenario(root / "input")
             output = root / "output"
-            train_learning_scenario(path, output, independent_runs=3)
-            manifest_before = json.loads(
-                (output / "checkpoints" / "runs.json").read_text(encoding="utf-8")
-            )
-            checkpoints_before = checkpoint_bytes(output / "checkpoints")
-
-            train_learning_scenario(
-                path, output,
-                checkpoint_path=output / "checkpoints" / "run_02" / "latest.pt",
-                training_episodes=4, independent_runs=1,
-            )
-
-            manifest_after = json.loads(
-                (output / "checkpoints" / "runs.json").read_text(encoding="utf-8")
-            )
-            entries = {entry["run"]: entry for entry in manifest_after["runs"]}
-            self.assertEqual(sorted(entries), [1, 2, 3])
-            self.assertEqual(entries[1], manifest_before["runs"][0])
-            self.assertEqual(entries[3], manifest_before["runs"][2])
-            self.assertEqual(entries[2]["seed"], manifest_before["runs"][1]["seed"])
-            self.assertEqual(entries[2]["best_checkpoint"], "run_02/best.pt")
-            self.assertGreaterEqual(
-                entries[2]["validation_total_reward"],
-                manifest_before["runs"][1]["validation_total_reward"],
-            )
-            payload = torch.load(
-                output / "checkpoints" / "run_02" / "latest.pt",
-                map_location="cpu", weights_only=True,
-            )
-            self.assertEqual(payload["episode"], 4)
-            self.assertEqual(payload["run"], 2)
-            # 未恢复运行的检查点不受影响；根目录 best.pt 与入选运行一致。
-            checkpoints_after = checkpoint_bytes(output / "checkpoints")
-            for file_path, data in checkpoints_before.items():
-                if file_path.parent.name in {"run_01", "run_03"}:
-                    self.assertEqual(checkpoints_after[file_path], data)
-            selected = manifest_after["selected_run"]
+            train_learning_scenario(path, output, independent_runs=3, training_episodes=4)
+            train_learning_scenario(path, output, independent_runs=1, training_episodes=3)
+            manifest = json.loads((output / "checkpoints" / "runs.json").read_text(encoding="utf-8"))
+            self.assertEqual([entry["run"] for entry in manifest["runs"]], [1])
+            self.assertEqual(manifest["runs"][0]["best_checkpoint"], "best.pt")
             self.assertEqual(
-                (output / "checkpoints" / "best.pt").read_bytes(),
-                (output / "checkpoints" / entries[selected]["best_checkpoint"]).read_bytes(),
+                [int(row["episode"]) for row in read_rows(output / "learning_progress.csv")],
+                [1, 2, 3],
             )
-            # 独立测试仍覆盖全部三个运行。
-            run_learning_test(path, output)
-            rows = read_rows(output / "learning_test_metrics.csv")
-            self.assertEqual({int(row["run"]) for row in rows}, {1, 2, 3})
+            episodes = [
+                int(row["episode"]) for row in read_rows(output / "learning_metrics.csv")
+                if row["phase"] in {"initial_experience", "train"}
+            ]
+            self.assertEqual(episodes, [1, 2, 3])
 
-    def test_appended_resumed_run_wins_a_tie_with_a_higher_run_number(self):
-        """清单 [1, 3] 追加恢复运行 2 后，2、3 奖励并列最高时应选 2。"""
-        def controlled_metrics(result, *, run, phase, episode, gamma):
-            metrics = _metrics(
-                result, run=run, phase=phase, episode=episode, gamma=gamma
-            )
-            if phase == "validation":
-                return replace(metrics, total_reward=1.0 if run == 1 else 2.0)
-            return metrics
-
+    def test_training_cli_does_not_accept_an_evaluation_checkpoint(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = make_scenario(root / "input")
-            output = root / "output"
-            with patch(
-                "electricity_market_sim.deep_learning.training._metrics",
-                side_effect=controlled_metrics,
-            ):
-                train_learning_scenario(path, output, independent_runs=3)
-                manifest_path = output / "checkpoints" / "runs.json"
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                manifest["runs"] = [entry for entry in manifest["runs"] if entry["run"] != 2]
-                manifest["selected_run"] = 3
-                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-                train_learning_scenario(
-                    path, output,
-                    checkpoint_path=output / "checkpoints" / "run_02" / "latest.pt",
-                    training_episodes=4, independent_runs=1,
-                )
-
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            self.assertEqual([entry["run"] for entry in manifest["runs"]], [1, 2, 3])
-            self.assertEqual(
-                [entry["validation_total_reward"] for entry in manifest["runs"]],
-                [1.0, 2.0, 2.0],
-            )
-            self.assertEqual(manifest["selected_run"], 2)
-            self.assertEqual(
-                (output / "checkpoints" / "best.pt").read_bytes(),
-                (output / "checkpoints" / "run_02" / "best.pt").read_bytes(),
-            )
-
-    def test_resumed_run_into_a_fresh_directory_preserves_its_number(self):
-        """把 run_02/latest.pt 恢复到全新目录，运行编号仍保留为 2。"""
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            path = make_scenario(root / "input")
-            output = root / "output"
-            train_learning_scenario(path, output, independent_runs=3)
-            resumed = root / "resumed"
-            train_learning_scenario(
-                path, resumed,
-                checkpoint_path=output / "checkpoints" / "run_02" / "latest.pt",
-                training_episodes=4, independent_runs=1,
-            )
-            manifest = json.loads(
-                (resumed / "checkpoints" / "runs.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(len(manifest["runs"]), 1)
-            entry = manifest["runs"][0]
-            self.assertEqual(entry["run"], 2)
-            self.assertEqual(entry["best_checkpoint"], "run_02/best.pt")
-            self.assertEqual(manifest["selected_run"], 2)
-            payload = torch.load(
-                resumed / "checkpoints" / "run_02" / "latest.pt",
-                map_location="cpu", weights_only=True,
-            )
-            self.assertEqual(payload["episode"], 4)
-            self.assertEqual(payload["run"], 2)
-            self.assertEqual(
-                (resumed / "checkpoints" / "best.pt").read_bytes(),
-                (resumed / "checkpoints" / "run_02" / "best.pt").read_bytes(),
-            )
-
-    def test_single_run_layout_converts_to_multi_run_on_resume(self):
-        """单运行清单指向根 best.pt；恢复 run 2 时原模型先迁移到 run_01/。"""
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            path = make_scenario(root / "input")
-            output = root / "output"
-            train_learning_scenario(path, output, independent_runs=1)
-            manifest_before = json.loads(
-                (output / "checkpoints" / "runs.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(manifest_before["runs"][0]["best_checkpoint"], "best.pt")
-            first_best = (output / "checkpoints" / "best.pt").read_bytes()
-            first_latest = (output / "checkpoints" / "latest.pt").read_bytes()
-
-            other = root / "other"
-            train_learning_scenario(path, other, independent_runs=3)
-            train_learning_scenario(
-                path, output,
-                checkpoint_path=other / "checkpoints" / "run_02" / "latest.pt",
-                training_episodes=4, independent_runs=1,
-            )
-
-            manifest = json.loads(
-                (output / "checkpoints" / "runs.json").read_text(encoding="utf-8")
-            )
-            entries = {entry["run"]: entry for entry in manifest["runs"]}
-            self.assertEqual(sorted(entries), [1, 2])
-            self.assertEqual(entries[1]["best_checkpoint"], "run_01/best.pt")
-            self.assertEqual(entries[2]["best_checkpoint"], "run_02/best.pt")
-            # 原模型迁入 run_01/ 且内容不变，两个条目指向不同的模型文件。
-            self.assertEqual(
-                (output / "checkpoints" / "run_01" / "best.pt").read_bytes(),
-                first_best,
-            )
-            self.assertEqual(
-                (output / "checkpoints" / "run_01" / "latest.pt").read_bytes(),
-                first_latest,
-            )
-            self.assertNotEqual(
-                (output / "checkpoints" / "run_01" / "best.pt").read_bytes(),
-                (output / "checkpoints" / "run_02" / "best.pt").read_bytes(),
-            )
-            # 根 best.pt 只保存入选运行检查点的副本。
-            selected = manifest["selected_run"]
-            self.assertEqual(
-                (output / "checkpoints" / "best.pt").read_bytes(),
-                (output / "checkpoints" / entries[selected]["best_checkpoint"]).read_bytes(),
-            )
-            run_learning_test(path, output)
-            rows = read_rows(output / "learning_test_metrics.csv")
-            self.assertEqual({int(row["run"]) for row in rows}, {1, 2})
+            stderr = StringIO()
+            with redirect_stdout(StringIO()), redirect_stderr(stderr):
+                code = main([
+                    "--input-dir", str(path), "--output-dir", str(root / "output"),
+                    "--learning-mode", "train", "--checkpoint", str(root / "old.pt"),
+                    "--no-plots",
+                ])
+            self.assertEqual(code, 2)
+            self.assertIn("--checkpoint 仅用于评估或测试", stderr.getvalue())
+            self.assertFalse((root / "output").exists())
 
     def test_command_line_trains_then_tests_separately(self):
         with TemporaryDirectory() as temporary:
@@ -1117,7 +1034,7 @@ class LearningTrainingContracts(unittest.TestCase):
             config = load_market_settings(path / "config.yaml").learning_config
             agent = MATD3Agent(config, total_regular_steps=1)
             with self.assertRaisesRegex(InputValidationError, "时段与当前"):
-                agent.load_checkpoint(output / "checkpoints" / "best.pt", load_optimizers=False)
+                agent.load_checkpoint(output / "checkpoints" / "best.pt")
             with self.assertRaisesRegex(InputValidationError, "时段与当前"):
                 run_learning_test(path, output)
 
@@ -1129,7 +1046,7 @@ class LearningTrainingContracts(unittest.TestCase):
             agent = MATD3Agent(config, total_regular_steps=1, seed=7)
             checkpoint = Path(temporary) / "incompatible.pt"
             metadata = {
-                "checkpoint_version": 2, "state_version": "v5-observation-16",
+                "checkpoint_version": 2, "algorithm": "matd3", "state_version": "v5-observation-16",
                 "observation_size": 16, "action_size": 2,
             }
             for payload in (
@@ -1139,7 +1056,7 @@ class LearningTrainingContracts(unittest.TestCase):
                 {**metadata, "observation_size": 26},
                 {**metadata, "observation_size": 14},
                 {**metadata, "checkpoint_version": 1},
-                [], {},
+                {},
                 {**metadata, "state_version": "unknown"},
                 {**metadata, "observation_size": None},
                 {**metadata, "observation_size": "26"},
@@ -1149,116 +1066,7 @@ class LearningTrainingContracts(unittest.TestCase):
                     with self.assertRaisesRegex(
                         InputValidationError, "incompatible with Version 5"
                     ):
-                        agent.load_checkpoint(checkpoint, load_optimizers=False)
-
-    def test_best_checkpoint_restore_requires_matching_price_scale_and_periods(self):
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            config = load_market_settings(
-                make_scenario(root / "input") / "config.yaml"
-            ).learning_config
-            periods = _periods_payload(config)
-            companion = root / "best.pt"
-            destination = root / "resumed" / "best.pt"
-            destination.parent.mkdir()
-            metadata = {
-                "checkpoint_version": 2, "state_version": "v5-observation-16",
-                "observation_size": 16, "action_size": 2,
-                "validation_total_reward": 1.0, "seed": 7, "max_bid_price": 200.0,
-                "periods": periods,
-            }
-            torch.save(metadata, companion)
-            torch.save({**metadata, "max_bid_price": 100.0}, destination)
-            arguments = dict(
-                restored_path=root / "latest.pt", destination=destination,
-                expected_reward=1.0, expected_seed=7, expected_max_bid_price=200.0,
-                expected_periods=periods,
-            )
-            _restore_best_checkpoint(**arguments)
-            self.assertEqual(destination.read_bytes(), companion.read_bytes())
-            for changed in (
-                {"max_bid_price": 100.0},
-                {"periods": {**periods, "test": periods["validation"]}},
-            ):
-                with self.subTest(changed=list(changed)):
-                    for checkpoint in (companion, destination):
-                        torch.save({**metadata, **changed}, checkpoint)
-                    with self.assertRaisesRegex(InputValidationError, "no matching best.pt"):
-                        _restore_best_checkpoint(**arguments)
-
-
-@unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
-class LearningCudaContracts(unittest.TestCase):
-    def test_cuda_resume_restores_noise_and_next_update_in_isolated_process(self):
-        script = textwrap.dedent('''
-            from pathlib import Path
-            from tempfile import TemporaryDirectory
-            from dataclasses import replace
-            import warnings
-            import torch
-            from test_learning import make_scenario
-            from electricity_market_sim.config import load_market_settings
-            from electricity_market_sim.deep_learning.agent import MATD3Agent
-            from electricity_market_sim.simulation import simulate_learning_episode
-
-            torch.use_deterministic_algorithms(True)
-            with TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                path = make_scenario(root / "input")
-                cpu_config = load_market_settings(path / "config.yaml").learning_config
-                config = replace(cpu_config, device="cuda:0")
-                original = MATD3Agent(config, total_regular_steps=6, seed=7)
-                simulate_learning_episode(
-                    path, lambda state: original.exploration_action(state, initial_experience=False),
-                    transition_consumer=lambda transition: original.observe(transition, train=True),
-                    period="train",
-                )
-                checkpoint = root / "cuda.pt"
-                original.save_checkpoint(checkpoint, episode=1, validation_total_reward=None)
-                saved_state = torch.cuda.get_rng_state().clone()
-                payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
-                assert payload["checkpoint_version"] == 2
-                assert torch.equal(payload["cuda_rng_state"], saved_state)
-                original._gradient_step()
-                expected = {name: tensor.detach().cpu().clone()
-                            for name, tensor in original.critics.state_dict().items()}
-                restored = MATD3Agent(config, total_regular_steps=6, seed=99)
-                restored.load_checkpoint(checkpoint, load_optimizers=True)
-                assert torch.equal(torch.cuda.get_rng_state(), saved_state)
-                restored._gradient_step()
-                for name, tensor in restored.critics.state_dict().items():
-                    torch.testing.assert_close(tensor.detach().cpu(), expected[name], rtol=0, atol=0)
-
-                # 旧检查点、CPU -> GPU、GPU -> CPU 的兼容性。
-                payload.pop("cuda_rng_state")
-                torch.save(payload, checkpoint)
-                with warnings.catch_warnings(record=True) as recorded:
-                    warnings.simplefilter("always")
-                    restored.load_checkpoint(checkpoint, load_optimizers=True)
-                assert any("CUDA" in str(item.message) for item in recorded)
-                cpu = MATD3Agent(cpu_config, total_regular_steps=6, seed=7)
-                cpu.save_checkpoint(checkpoint, episode=0, validation_total_reward=None)
-                with warnings.catch_warnings(record=True) as recorded:
-                    warnings.simplefilter("always")
-                    restored.load_checkpoint(checkpoint, load_optimizers=True)
-                assert any("CUDA" in str(item.message) for item in recorded)
-                original.save_checkpoint(checkpoint, episode=1, validation_total_reward=None)
-                with warnings.catch_warnings(record=True) as recorded:
-                    warnings.simplefilter("always")
-                    cpu.load_checkpoint(checkpoint, load_optimizers=True)
-                assert any("CPU" in str(item.message) and "GPU" in str(item.message) for item in recorded)
-            print("CUDA resume checks passed")
-        ''')
-        env = {**os.environ, "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "PYTHONUTF8": "1"}
-        project = Path(__file__).resolve().parents[1]
-        env["PYTHONPATH"] = os.pathsep.join((str(project), str(project / "tests")))
-        result = subprocess.run(
-            [sys.executable, "-B", "-c", script], cwd=project, env=env,
-            capture_output=True, text=True, encoding="utf-8", timeout=90,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("CUDA resume checks passed", result.stdout)
-
+                        agent.load_checkpoint(checkpoint)
 
 if __name__ == "__main__":
     unittest.main()

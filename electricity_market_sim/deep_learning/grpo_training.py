@@ -41,7 +41,7 @@ def train_single_run(input_path, output_path, checkpoint_root, scenario, *,
     pool = (ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn"))
             if workers > 1 else nullcontext(None))
     with pool as executor:
-        for group in _training_progress(1, groups, run):
+        for group in _training_progress(groups, run):
             episode = (group - 1) * config.group_size
 
             def record(result):
@@ -90,4 +90,4 @@ def train_single_run(input_path, output_path, checkpoint_root, scenario, *,
     _write_metrics(output_path / "learning_metrics.csv", metrics)
     _write_records(output_path / "grpo_diagnostics.csv", diagnostics)
     _write_records(output_path / "learning_progress.csv", progress)
-    return result, metrics, None, best, best_reward, agent.seed
+    return result, metrics, best, best_reward, agent.seed

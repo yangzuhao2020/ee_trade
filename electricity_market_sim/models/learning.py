@@ -39,7 +39,6 @@ class LearningConfig:
     target_noise_clip: float = 0.5
     actor_architecture: str = "mlp"
     device: str = "cpu"
-    continue_learning: bool = False
     trained_policies_save_path: str | None = None
     trained_policies_load_path: str | None = None
     max_bid_price: float = 100.0

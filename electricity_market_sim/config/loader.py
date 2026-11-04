@@ -11,9 +11,10 @@ from ..errors import InputValidationError
 from ..models import LEARNING_PERIOD_NAMES, LearningConfig, LearningPeriod, MarketSettings
 
 _DURATION_PATTERN = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>min|m|h|d)$")
-_LEARNING_DEFAULTS_PATH = Path(__file__).with_name("learning.yaml")
+_MATD3_DEFAULTS_PATH = Path(__file__).with_name("matd3.yaml")
+_GRPO_DEFAULTS_PATH = Path(__file__).with_name("grpo.yaml")
 _LEARNING_SCENE_FIELDS = frozenset({
-    "learning_mode", "periods", "continue_learning",
+    "learning_mode", "periods",
     "trained_policies_save_path", "trained_policies_load_path",
 })
 _LEARNING_PARAMETER_FIELDS = frozenset({
@@ -45,10 +46,8 @@ def _warn_unknown_learning_fields(raw: dict[str, Any], source: str) -> None:
         )
 
 
-def _load_learning_defaults(algorithm="matd3") -> dict[str, Any]:
+def _load_learning_defaults(path: Path) -> dict[str, Any]:
     """读取与加载器同目录的公共训练参数；场景专属设置不能作为默认值。"""
-    path = (_LEARNING_DEFAULTS_PATH if algorithm == "matd3"
-            else Path(__file__).with_name("grpo.yaml"))
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
@@ -56,8 +55,6 @@ def _load_learning_defaults(algorithm="matd3") -> dict[str, Any]:
     if not isinstance(loaded, dict) or set(loaded) != {"learning_config"}:
         raise InputValidationError(f"{path} 必须只包含 learning_config 映射。")
     raw = loaded["learning_config"]
-    if not isinstance(raw, dict):
-        raise InputValidationError(f"{path} 中的 learning_config 必须是 YAML 映射。")
     forbidden = raw.keys() & _LEARNING_SCENE_FIELDS
     if forbidden:
         raise InputValidationError(
@@ -69,9 +66,6 @@ def _load_learning_defaults(algorithm="matd3") -> dict[str, Any]:
 def parse_duration(value: Any, field_name: str) -> timedelta:
     """解析 YAML 文件中使用的简写时长（如 '1h'、'15m'）。"""
 
-    if not isinstance(value, str):
-        raise InputValidationError(f"{field_name} 必须是时长字符串，例如 '1h'。")
-
     match = _DURATION_PATTERN.fullmatch(value.strip())
     if not match:
         raise InputValidationError(
@@ -80,18 +74,24 @@ def parse_duration(value: Any, field_name: str) -> timedelta:
 
     magnitude = float(match.group("value"))
     unit = match.group("unit")
-    if magnitude <= 0:
-        raise InputValidationError(f"{field_name} 必须大于 0。")
     if unit in {"m", "min"}:
-        return timedelta(minutes=magnitude)
-    if unit == "h":
-        return timedelta(hours=magnitude)
-    return timedelta(days=magnitude)
+        duration = timedelta(minutes=magnitude)
+    elif unit == "h":
+        duration = timedelta(hours=magnitude)
+    else:
+        duration = timedelta(days=magnitude)
+    if duration <= timedelta(0):
+        raise InputValidationError(f"{field_name} 必须大于 0。")
+    return duration
+
+
+def _parse_integer(value: Any, field_name: str, *, minimum: int = 1) -> int:
+    if type(value) is not int or value < minimum:
+        raise InputValidationError(f"{field_name} 必须是不小于 {minimum} 的整数。")
+    return value
 
 
 def _parse_datetime(value: Any, field_name: str) -> datetime:
-    if not isinstance(value, (str, datetime)):
-        raise InputValidationError(f"{field_name} 必须是 ISO 格式的日期时间。")
     if isinstance(value, datetime):
         return value
     try:
@@ -104,7 +104,6 @@ def _parse_datetime(value: Any, field_name: str) -> datetime:
 
 def _parse_additional_fields(eom: dict[str, Any]) -> frozenset[str]:
     """读取订单元数据字段（additional_fields），不会静默丢弃这些字段。"""
-
     raw_fields = eom.get("additional_fields", [])
     if not isinstance(raw_fields, list) or any(
         not isinstance(value, str) or not value.strip() for value in raw_fields
@@ -119,7 +118,6 @@ def _load_learning_periods(
     raw: Any, *, required: bool
 ) -> tuple[tuple[str, LearningPeriod], ...] | None:
     """读取按交付时间定义的训练、验证、测试时段，并检查顺序与重叠。"""
-
     if raw is None:
         if required:
             raise InputValidationError(
@@ -158,7 +156,6 @@ def _load_learning_periods(
 
 def _validate_learning_period_alignment(settings: MarketSettings) -> None:
     """检查各时段边界都落在交付产品的整数倍时刻上。"""
-
     for name, period in settings.learning_config.periods:
         for label, moment in (("start", period.start), ("end", period.end)):
             since_midnight = moment - moment.replace(
@@ -177,15 +174,15 @@ def _load_learning_config(
     raw = data.get("learning_config")
     if raw is None:
         return None
-    if not isinstance(raw, dict):
-        raise InputValidationError("learning_config 必须是 YAML 映射。")
     if raw.get("algorithm", "matd3") not in {"matd3", "grpo"}:
         raise InputValidationError("learning_config.algorithm 仅支持 matd3 或 grpo。")
 
     _warn_unknown_learning_fields(raw, f"{source} 的 learning_config")
     if raw.get("learning_mode") is True:
-        defaults = _load_learning_defaults(raw.get("algorithm", "matd3"))
-        _warn_unknown_learning_fields(defaults, str(_LEARNING_DEFAULTS_PATH))
+        defaults_path = (_MATD3_DEFAULTS_PATH if raw.get("algorithm", "matd3") == "matd3"
+                         else _GRPO_DEFAULTS_PATH)
+        defaults = _load_learning_defaults(defaults_path)
+        _warn_unknown_learning_fields(defaults, str(defaults_path))
         raw = {**defaults, **raw}
     nulls = sorted(
         name for name in _LEARNING_PARAMETER_FIELDS | _GRPO_PARAMETER_FIELDS
@@ -194,8 +191,7 @@ def _load_learning_config(
     if nulls:
         raise InputValidationError(
             f"{source} 的 learning_config 参数不能为 null（需要公共默认值时请省略该字段）："
-            + ", ".join(nulls)
-        )
+            + ", ".join(nulls))
 
     def required(name: str) -> Any:
         if name not in raw:
@@ -204,11 +200,8 @@ def _load_learning_config(
             )
         return raw[name]
 
-    def optional(name: str, default: Any) -> Any:
-        return raw.get(name, default)
-
     def optional_path(name: str) -> str | None:
-        value = optional(name, None)
+        value = raw.get(name)
         if value is None:
             return None
         if not isinstance(value, str) or not value.strip():
@@ -221,29 +214,24 @@ def _load_learning_config(
         learning_mode = required("learning_mode")
         if not isinstance(learning_mode, bool):
             raise InputValidationError("learning_config.learning_mode 必须是布尔值。")
-        continue_learning = optional("continue_learning", False)
-        if not isinstance(continue_learning, bool):
-            raise InputValidationError(
-                "learning_config.continue_learning 必须是布尔值。"
-            )
         grpo = required("algorithm") == "grpo"
         # GRPO 不读取 TD3 专属字段；旧配置仍保持原必填校验。
         if grpo:
-            validation_interval = required("validation_groups_interval")
-            if type(validation_interval) is not int or validation_interval <= 0:
-                raise InputValidationError("learning_config.validation_groups_interval 必须是正整数。")
             config = LearningConfig(
                 learning_mode=learning_mode, algorithm="grpo",
                 learning_rate=float(required("learning_rate")), gamma=float(required("gamma")),
-                validation_interval=validation_interval,
-                actor_architecture=str(optional("actor_architecture", "mlp")),
-                device=str(optional("device", "cpu")), continue_learning=continue_learning,
+                validation_interval=_parse_integer(
+                    required("validation_groups_interval"), "learning_config.validation_groups_interval"
+                ),
+                actor_architecture=str(raw.get("actor_architecture", "mlp")),
+                device=str(raw.get("device", "cpu")),
                 trained_policies_save_path=optional_path("trained_policies_save_path"),
                 trained_policies_load_path=optional_path("trained_policies_load_path"),
-                max_bid_price=float(optional("max_bid_price", 100.0)),
-                periods=_load_learning_periods(optional("periods", None), required=learning_mode),
-                **{name: int(required(name)) for name in (
-                    "training_steps", "group_size", "sampling_workers", "update_epochs", "minibatch_size"
+                max_bid_price=float(raw.get("max_bid_price", 100.0)),
+                periods=_load_learning_periods(raw.get("periods"), required=learning_mode),
+                group_size=_parse_integer(required("group_size"), "learning_config.group_size", minimum=2),
+                **{name: _parse_integer(required(name), f"learning_config.{name}") for name in (
+                    "training_steps", "sampling_workers", "update_epochs", "minibatch_size"
                 )},
                 **{name: float(required(name)) for name in (
                     "clip_epsilon", "target_kl", "initial_std", "min_std", "max_std",
@@ -257,7 +245,7 @@ def _load_learning_config(
             required("train_freq"), "learning_config.train_freq"
         )
         frequency_ratio = train_frequency / time_step
-        if not float(frequency_ratio).is_integer():
+        if not frequency_ratio.is_integer():
             raise InputValidationError(
                 "learning_config.train_freq 必须是 time_step 的整数倍。"
             )
@@ -265,45 +253,41 @@ def _load_learning_config(
             learning_mode=learning_mode,
             algorithm=str(required("algorithm")),
             learning_rate=float(required("learning_rate")),
-            training_episodes=int(required("training_episodes")),
-            initial_experience_episodes=int(
-                required("episodes_collecting_initial_experience")
+            training_episodes=_parse_integer(required("training_episodes"), "learning_config.training_episodes"),
+            initial_experience_episodes=_parse_integer(
+                required("episodes_collecting_initial_experience"),
+                "learning_config.episodes_collecting_initial_experience", minimum=0,
             ),
-            replay_buffer_size=int(required("replay_buffer_size")),
-            batch_size=int(required("batch_size")),
+            replay_buffer_size=_parse_integer(required("replay_buffer_size"), "learning_config.replay_buffer_size"),
+            batch_size=_parse_integer(required("batch_size"), "learning_config.batch_size"),
             gamma=float(required("gamma")),
             train_frequency_steps=int(frequency_ratio),
-            gradient_steps=int(required("gradient_steps")),
-            validation_interval=int(required("validation_episodes_interval")),
+            gradient_steps=_parse_integer(required("gradient_steps"), "learning_config.gradient_steps"),
+            validation_interval=_parse_integer(
+                required("validation_episodes_interval"), "learning_config.validation_episodes_interval"
+            ),
             exploration_noise_std=float(required("exploration_noise_std")),
             noise_sigma=float(required("noise_sigma")),
             noise_scale=float(required("noise_scale")),
             noise_dt=float(required("noise_dt")),
             action_noise_schedule=str(required("action_noise_schedule")),
             tau=float(required("tau")),
-            policy_delay=int(required("policy_delay")),
+            policy_delay=_parse_integer(required("policy_delay"), "learning_config.policy_delay"),
             target_policy_noise=float(required("target_policy_noise")),
             target_noise_clip=float(required("target_noise_clip")),
-            actor_architecture=str(optional("actor_architecture", "mlp")),
-            device=str(optional("device", "cpu")),
-            continue_learning=continue_learning,
+            actor_architecture=str(raw.get("actor_architecture", "mlp")),
+            device=str(raw.get("device", "cpu")),
             trained_policies_save_path=optional_path("trained_policies_save_path"),
             trained_policies_load_path=optional_path("trained_policies_load_path"),
-            max_bid_price=float(optional("max_bid_price", 100.0)),
-            training_steps=int(optional("training_steps", 0)),
+            max_bid_price=float(raw.get("max_bid_price", 100.0)),
+            training_steps=_parse_integer(raw.get("training_steps", 0), "learning_config.training_steps", minimum=0),
             periods=_load_learning_periods(
-                optional("periods", None), required=learning_mode
+                raw.get("periods"), required=learning_mode
             ),
         )
-    except InputValidationError:
-        raise
     except (TypeError, ValueError) as exc:
         raise InputValidationError(f"learning_config 无效：{exc}") from exc
 
-    if config.algorithm != "matd3":
-        raise InputValidationError(
-            "第五版要求 learning_config.algorithm: matd3。"
-        )
     if config.actor_architecture != "mlp":
         raise InputValidationError(
             "第五版仅支持 learning_config.actor_architecture: mlp。"
@@ -314,27 +298,12 @@ def _load_learning_config(
         )
     positive = {
         "learning_rate": config.learning_rate,
-        "training_episodes": config.training_episodes,
-        "replay_buffer_size": config.replay_buffer_size,
-        "batch_size": config.batch_size,
-        "train_freq": config.train_frequency_steps,
-        "gradient_steps": config.gradient_steps,
-        "validation_episodes_interval": config.validation_interval,
         "noise_dt": config.noise_dt,
-        "policy_delay": config.policy_delay,
     }
     invalid = [name for name, value in positive.items() if value <= 0]
     if invalid:
         raise InputValidationError(
             "以下 learning_config 字段必须为正数：" + ", ".join(invalid)
-        )
-    if config.initial_experience_episodes < 0:
-        raise InputValidationError(
-            "learning_config.episodes_collecting_initial_experience 不能为负数。"
-        )
-    if not isfinite(config.max_bid_price) or config.max_bid_price <= 0:
-        raise InputValidationError(
-            "learning_config.max_bid_price 必须是有限的正数。"
         )
     if config.replay_buffer_size < config.batch_size:
         raise InputValidationError(
@@ -361,18 +330,14 @@ def _load_learning_config(
 
 def _validate_grpo_config(config):
     positive = (
-        "learning_rate", "training_steps", "group_size", "sampling_workers", "update_epochs", "minibatch_size",
+        "learning_rate",
         "target_kl", "initial_std", "min_std", "max_std", "advantage_threshold", "max_bid_price",
         "max_grad_norm",
     )
     if any(not isfinite(getattr(config, name)) or getattr(config, name) <= 0 for name in positive):
-        raise InputValidationError("GRPO 的步数、批大小、学习率、标准差和阈值必须为有限正数。")
-    if config.group_size < 2 or not 0 < config.clip_epsilon < 1:
-        raise InputValidationError("GRPO group_size 至少为 2，clip_epsilon 必须在 (0, 1) 内。")
+        raise InputValidationError("GRPO 的学习率、标准差、报价上限和阈值必须为有限正数。")
     if not config.min_std <= config.initial_std <= config.max_std:
         raise InputValidationError("GRPO 必须满足 min_std <= initial_std <= max_std。")
-    if not isfinite(config.weight_decay) or config.weight_decay < 0 or not 0 <= config.min_lr_ratio <= 1:
-        raise InputValidationError("GRPO weight_decay 必须为有限非负数，min_lr_ratio 必须在 [0, 1] 内。")
     if not 0 <= config.gamma <= 1 or config.actor_architecture != "mlp":
         raise InputValidationError("GRPO 要求 gamma 在 [0, 1] 内，actor_architecture 为 mlp。")
 
@@ -382,53 +347,30 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
     if not config_path.is_file():
         raise InputValidationError(f"缺少配置文件：{config_path}")
 
-    try:
-        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        raise InputValidationError(
-            f"无法解析 YAML 文件 {config_path}：{exc}"
-        ) from exc
+    loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
     if not isinstance(loaded, dict) or scenario not in loaded:
         raise InputValidationError(
             f"{config_path} 中缺少场景 {scenario!r}。"
         )
     data = loaded[scenario]
-    if not isinstance(data, dict):
-        raise InputValidationError(f"场景 {scenario!r} 必须是 YAML 映射。")
 
     seed = data.get("seed")
-    if seed is not None and (
-        not isinstance(seed, int) or isinstance(seed, bool) or seed < 0
-    ):
-        raise InputValidationError("seed 必须为 null 或非负整数。")
+    if seed is not None:
+        seed = _parse_integer(seed, "seed", minimum=0)
 
-    raw_exchange_units = data.get("exchange_units")
-    if raw_exchange_units is None:
-        exchange_units_file = None
-    elif isinstance(raw_exchange_units, str) and raw_exchange_units.strip():
-        exchange_units_file = raw_exchange_units.strip()
-    else:
-        raise InputValidationError(
-            "exchange_units 必须为 null 或非空的 CSV 文件名。"
-        )
+    exchange_units_file = data.get("exchange_units")
+    if exchange_units_file is not None:
+        exchange_units_file = exchange_units_file.strip()
 
-    raw_industrial_units = data.get("industrial_dsm_units")
-    if raw_industrial_units is None:
-        industrial_dsm_units_file = None
-    elif isinstance(raw_industrial_units, str) and raw_industrial_units.strip():
-        industrial_dsm_units_file = raw_industrial_units.strip()
-    else:
-        raise InputValidationError(
-            "industrial_dsm_units 必须为 null 或非空的 CSV 文件名。"
-        )
+    industrial_dsm_units_file = data.get("industrial_dsm_units")
+    if industrial_dsm_units_file is not None:
+        industrial_dsm_units_file = industrial_dsm_units_file.strip()
 
     markets = data.get("markets_config")
     if not isinstance(markets, dict) or "EOM" not in markets:
         raise InputValidationError("场景必须定义 markets_config.EOM。")
     eom = markets["EOM"]
-    if not isinstance(eom, dict):
-        raise InputValidationError("markets_config.EOM 必须是映射。")
     additional_fields = _parse_additional_fields(eom)
     if "start_date" in eom:
         market_start = _parse_datetime(
@@ -438,14 +380,9 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
         market_start = _parse_datetime(data["start_date"], "start_date")
 
     products = eom.get("products")
-    if (
-        not isinstance(products, list)
-        or len(products) != 1
-        or not isinstance(products[0], dict)
-    ):
+    if len(products) != 1:
         raise InputValidationError(
-            "第一版要求恰好定义一个 EOM 产品。"
-        )
+            "第一版要求恰好定义一个 EOM 产品。")
     product = products[0]
 
     try:
@@ -463,7 +400,7 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
             product_duration=parse_duration(
                 product["duration"], "markets_config.EOM.products[0].duration"
             ),
-            product_count=int(product["count"]),
+            product_count=_parse_integer(product["count"], "markets_config.EOM.products[0].count"),
             first_delivery=parse_duration(
                 product["first_delivery"],
                 "markets_config.EOM.products[0].first_delivery",
@@ -495,18 +432,12 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
     is_pay_as_bid = settings.market_mechanism == "pay_as_bid"
     if not is_pay_as_bid and settings.time_step != timedelta(hours=1):
         raise InputValidationError("第一版和第二版仅支持 time_step: 1h。")
-    if settings.opening_frequency <= timedelta(0):
-        raise InputValidationError("EOM opening_frequency 必须大于 0。")
-    if settings.opening_duration <= timedelta(0):
-        raise InputValidationError("EOM opening_duration 必须大于 0。")
     if not is_pay_as_bid and settings.product_duration != timedelta(hours=1):
         raise InputValidationError("第二版仅支持 1 小时的 EOM 产品。")
     if is_pay_as_bid and settings.product_duration != settings.time_step:
         raise InputValidationError(
             "pay_as_bid 要求产品时长等于场景的 time_step。"
         )
-    if settings.product_count <= 0:
-        raise InputValidationError("EOM 产品的 count 必须为正数。")
     if is_pay_as_bid:
         if settings.time_step != timedelta(minutes=15):
             raise InputValidationError(
@@ -537,13 +468,5 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
         raise InputValidationError("minimum_bid_price 不能大于 maximum_bid_price。")
     if settings.learning_config is not None and settings.learning_config.periods:
         _validate_learning_period_alignment(settings)
-    if scenario == "base" and settings.exchange_units_file is not None:
-        raise InputValidationError(
-            "'base' 场景不能配置 exchange_units。"
-        )
-    if scenario == "base_with_exchanges" and settings.exchange_units_file is None:
-        raise InputValidationError(
-            "'base_with_exchanges' 场景必须配置 exchange_units CSV 文件。"
-        )
 
     return settings

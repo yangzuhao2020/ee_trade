@@ -11,7 +11,6 @@ base_case_2019:
 
   learning_config:
     learning_mode: true
-    continue_learning: false
     trained_policies_save_path: null
     max_bid_price: 100
     algorithm: matd3

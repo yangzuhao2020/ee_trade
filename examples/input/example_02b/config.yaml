@@ -11,7 +11,6 @@ base:
 
   learning_config:
     learning_mode: True
-    continue_learning: false
     trained_policies_save_path: null
     trained_policies_load_path: null
     max_bid_price: 100
@@ -56,7 +55,6 @@ base_lstm:
 
   learning_config:
     learning_mode: True
-    continue_learning: False
     trained_policies_save_path: null
     max_bid_price: 100
     algorithm: matd3

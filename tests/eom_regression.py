@@ -32,9 +32,9 @@ DATASETS = (
 )
 
 # Fully pinned learning settings for the deterministic fixtures: tuning the shared
-# learning.yaml or the scenario YAML must not change their snapshots.
+# matd3.yaml or the scenario YAML must not change their snapshots.
 _FIXTURE_LEARNING = {
-    "learning_mode": True, "continue_learning": False,
+    "learning_mode": True,
     "trained_policies_save_path": None, "trained_policies_load_path": None,
     "algorithm": "matd3", "actor_architecture": "mlp", "device": "cpu",
     "learning_rate": 0.001, "replay_buffer_size": 10000, "gamma": 0.99,
