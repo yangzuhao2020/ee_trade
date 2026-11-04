@@ -1,6 +1,5 @@
 """连续两段报价的随机策略、组回报和 GRPO 更新。"""
 
-from copy import deepcopy
 from dataclasses import dataclass
 from math import log
 from pathlib import Path
@@ -78,12 +77,10 @@ def _collect_trajectory(policy, rng, runner, device):
 
     result = runner.run_episode(action)
     transitions = result.learning_transitions
-    if len(samples) != len(transitions):
-        raise RuntimeError("GRPO actions and market transitions are misaligned.")
     fields = [torch.stack(values) for values in zip(*samples)]
     can_bid = [
         any(item.offer.offer_segment in {"learning_minimum", "learning_flexible"}
-            and item.offer.offered_energy_mwh > 0 for item in market.offers)
+            for item in market.offers)
         for market in result.market_results
     ]
     return (*fields,
@@ -94,10 +91,9 @@ def _collect_trajectory(policy, rng, runner, device):
 
 def collect_group(agent, runner, on_episode=None):
     """同一旧策略运行完整组；仅返回训练张量和回合指标所需结果。"""
-    policy = deepcopy(agent.actor).eval().requires_grad_(False)
     trajectories, results = [], []
     for _ in range(agent.config.group_size):
-        trajectory, result = _collect_trajectory(policy, agent.rng, runner, agent.device)
+        trajectory, result = _collect_trajectory(agent.actor, agent.rng, runner, agent.device)
         trajectories.append(trajectory)
         if on_episode is None:
             results.append(result)

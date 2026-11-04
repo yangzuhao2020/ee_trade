@@ -34,14 +34,7 @@ def clear_pay_as_clear(
 
     if not demand_bids and not supply_offers:
         raise ValueError("Cannot clear an empty market.")
-    _validate_order_ids(
-        demand_bids,
-        supply_offers,
-        supply_error=(
-            "Supply offer identifiers must be unique within a product; "
-            "unit names must be unique when no offer_id is supplied."
-        ),
-    )
+    _validate_order_ids(demand_bids, supply_offers)
     delivery_start, delivery_end = _single_product(demand_bids, supply_offers)
 
     # 需求按价格从高到低排序；同价时再按名称和原始顺序稳定打破平局。

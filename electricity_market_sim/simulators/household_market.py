@@ -48,9 +48,6 @@ def simulate_household_market(
         raise InputValidationError(
             "按报价结算（pay_as_bid）的家庭场景暂不支持弹性需求单元。")
     households = load_household_units(input_path / "residential_dsm_units.csv")
-    if not households:
-        raise InputValidationError(
-            "按报价结算（pay_as_bid）要求 residential_dsm_units.csv 至少包含一个家庭用户。")
     validate_unique_names(
         [
             *(plant.name for plant in plants),

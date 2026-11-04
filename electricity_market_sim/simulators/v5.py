@@ -3,7 +3,7 @@
 from collections import deque
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from ..errors import InputValidationError
 from ..deep_learning.learning import (
@@ -24,7 +24,7 @@ from .eom import EomExtensionInputs, ScheduledProductKey, simulate_eom_market
 
 def _learning_plant(
     settings: MarketSettings, plants: tuple[PowerPlant, ...]
-) -> PowerPlant | None:
+) -> PowerPlant:
     """校验并返回第五版唯一的学习型参与者。"""
 
     learning_plants = tuple(
@@ -32,30 +32,17 @@ def _learning_plant(
         for plant in plants
         if plant.bidding_strategy == "powerplant_energy_learning"
     )
-    if not learning_plants:
-        if (
-            settings.learning_config is not None
-            and settings.learning_config.learning_mode
-        ):
-            raise InputValidationError(
-                "learning_mode requires exactly one powerplant_energy_learning unit."
-            )
-        return None
     if len(learning_plants) != 1:
         raise InputValidationError(
-            "Version 5 requires exactly one powerplant_energy_learning unit."
+            "第五版要求恰好配置一台使用 powerplant_energy_learning 策略的机组。"
         )
-    if settings.learning_config is None or not settings.learning_config.learning_mode:
+    if settings.product_count != 1:
         raise InputValidationError(
-            "powerplant_energy_learning requires learning_config.learning_mode: true."
-        )
-    if settings.product_count != 1 or settings.product_duration != timedelta(hours=1):
-        raise InputValidationError(
-            "Version 5 requires one 1-hour product per EOM opening."
+            "第五版要求每次 EOM 开市仅提供一个产品。"
         )
     if settings.market_mechanism != "pay_as_clear":
         raise InputValidationError(
-            "Version 5 requires EOM market_mechanism: pay_as_clear."
+            "第五版要求 EOM 的 market_mechanism 设置为 pay_as_clear。"
         )
     max_bid_price = settings.learning_config.max_bid_price
     if (
@@ -63,8 +50,8 @@ def _learning_plant(
         or settings.maximum_bid_price < max_bid_price
     ):
         raise InputValidationError(
-            "The EOM price limits must contain the learning action range "
-            f"[-{max_bid_price:g}, {max_bid_price:g}]."
+            "EOM 报价上下限必须覆盖学习动作对应的报价范围 "
+            f"[-{max_bid_price:g}, {max_bid_price:g}]。"
         )
     return learning_plants[0]
 
@@ -74,30 +61,22 @@ class _LearningMarketExtension:
 
     settle_before_opening = True
 
-    def __init__(self, action_provider: ActionProvider | None,
+    def __init__(self, action_provider: ActionProvider,
                  transition_consumer: TransitionConsumer | None = None,
                  enforce_action_bounds: bool = True) -> None:
         self.action_provider = action_provider
         self.transition_consumer = transition_consumer
         self.enforce_action_bounds = enforce_action_bounds
-        self.session: LearningEpisodeSession | None = None
         self._history: deque[MarketClearingResult] = deque(maxlen=PRICE_HISTORY_HOURS)
 
     def prepare(self, market: BaseMarket) -> EomExtensionInputs:
         self.plant = _learning_plant(market.settings, market.plants)
-        if self.plant is not None and self.action_provider is None:
-            raise InputValidationError(
-                "A learning_action_provider is required for a Version 5 market episode."
-            )
         return EomExtensionInputs(
             incomplete_opening_error="Learning opening",
             hard_forecast_horizon=True,
         )
 
     def initialize(self, market: BaseMarket) -> None:
-        assert self.action_provider is not None
-        assert self.plant is not None
-        assert market.settings.learning_config is not None
         self.session = LearningEpisodeSession(
             plant=self.plant,
             action_provider=self.action_provider,
@@ -121,7 +100,6 @@ class _LearningMarketExtension:
     ) -> tuple[SupplyOffer, ...] | None:
         if plant.name != self.plant.name:
             return None
-        assert self.session is not None
         return tuple(
             offer
             for start, end in products
@@ -135,15 +113,10 @@ class _LearningMarketExtension:
         )
 
     def record_delivery_start(self, result: MarketClearingResult) -> None:
-        assert self.session is not None
         self.session.record_result(result)
         self._history.append(result)
 
-    def record_delivery(self, result: MarketClearingResult) -> None:
-        pass
-
     def finalize(self, result: SimulationResult) -> SimulationResult:
-        assert self.session is not None
         steps, transitions = self.session.finalize()
         return replace(
             result, learning_steps=steps, learning_transitions=transitions,
@@ -154,7 +127,7 @@ def simulate_v5_market(
     input_path: Path,
     settings: MarketSettings,
     openings: tuple[MarketOpening, ...],
-    learning_action_provider: ActionProvider | None = None,
+    learning_action_provider: ActionProvider,
     learning_transition_consumer: TransitionConsumer | None = None,
     learning_enforce_action_bounds: bool = True,
 ) -> SimulationResult:

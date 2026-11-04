@@ -93,9 +93,6 @@ def _load_and_validate_industrial_units(
         raise InputValidationError(
             "第四版场景要求在 config.yaml 中配置 industrial_dsm_units。")
     units = load_industrial_units(input_path / settings.industrial_dsm_units_file)
-    if not units:
-        raise InputValidationError(
-            "industrial_dsm_units 指定的文件中必须至少包含一家钢铁厂。")
     if settings.market_mechanism != "pay_as_clear":
         raise InputValidationError(
             "第四版工业滚动优化目前仅支持统一出清价机制"

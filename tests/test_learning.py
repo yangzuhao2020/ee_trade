@@ -1056,6 +1056,7 @@ class LearningTrainingContracts(unittest.TestCase):
                 {**metadata, "observation_size": 26},
                 {**metadata, "observation_size": 14},
                 {**metadata, "checkpoint_version": 1},
+                {key: value for key, value in metadata.items() if key != "algorithm"},
                 {},
                 {**metadata, "state_version": "unknown"},
                 {**metadata, "observation_size": None},

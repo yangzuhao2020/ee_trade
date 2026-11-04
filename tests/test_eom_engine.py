@@ -50,16 +50,12 @@ def orders(start, name="plant", quantity=1.0, segment="single"):
 
 
 class TraceExtension:
-    def __init__(self, before_opening, events):
+    def __init__(self, before_opening):
         self.settle_before_opening = before_opening
-        self.events = events
         self.startup_costs = []
 
     def record_delivery_start(self, result):
         self.startup_costs.append(result.offers[0].startup_cost_eur)
-
-    def record_delivery(self, result):
-        self.events.append(("extension_end", result.delivery_end))
 
     def finalize(self, result):
         return result
@@ -70,7 +66,7 @@ class TraceMarket:
         self.settings = SETTINGS
         self.events = []
         self.extension = (None if before_opening is None else
-                          TraceExtension(before_opening, self.events))
+                          TraceExtension(before_opening))
         self.valid_openings = tuple(
             MarketOpening(START + i * HOUR,
                           ((START + (i + 1) * HOUR, START + (i + 2) * HOUR),))
@@ -103,7 +99,7 @@ class EventContracts(unittest.TestCase):
                 market = TraceMarket(before_opening)
                 result = simulate_eom_market(market)
                 at_two = [kind for kind, time in market.events
-                          if time == START + 2 * HOUR and kind != "extension_end"]
+                          if time == START + 2 * HOUR]
                 self.assertEqual(at_two, ["end", "open", "start"])
                 self.assertEqual(market.observed_costs, [0.0, 17.0])
                 self.assertEqual(len(result.market_results), 3)
@@ -112,7 +108,7 @@ class EventContracts(unittest.TestCase):
         market = TraceMarket(True)
         simulate_eom_market(market)
         at_two = [kind for kind, time in market.events
-                  if time == START + 2 * HOUR and kind != "extension_end"]
+                  if time == START + 2 * HOUR]
         self.assertEqual(at_two, ["end", "start", "open"])
         self.assertEqual(market.observed_costs, [17.0, 17.0])
 

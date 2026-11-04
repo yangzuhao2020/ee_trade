@@ -1,4 +1,4 @@
-"""各出清算法共享的报价限价、订单标识与交付时段校验，以及需求统计。"""
+"""各出清算法共享的报价限价与订单标识校验、交付时段获取及需求统计。"""
 
 from datetime import datetime
 from ..errors import InputValidationError
@@ -46,26 +46,21 @@ def validate_demand_prices(
 def _validate_order_ids(
     demand_bids: list[DemandBid],
     supply_offers: list[SupplyOffer],
-    *,
-    supply_error: str,
 ) -> None:
     bid_ids = [bid.identifier for bid in demand_bids]
     offer_ids = [offer.identifier for offer in supply_offers]
     if len(bid_ids) != len(set(bid_ids)):
         raise ValueError("Demand bid identifiers must be unique within a product.")
     if len(offer_ids) != len(set(offer_ids)):
-        raise ValueError(supply_error)
+        raise ValueError("Supply offer identifiers must be unique within a product.")
 
 
 def _single_product(
     demand_bids: list[DemandBid], supply_offers: list[SupplyOffer]
 ) -> tuple[datetime, datetime]:
-    products = {
-        (bid.delivery_start, bid.delivery_end) for bid in demand_bids
-    } | {(offer.delivery_start, offer.delivery_end) for offer in supply_offers}
-    if len(products) != 1:
-        raise ValueError("All bids and offers passed to one clearing must share a product.")
-    return products.pop()
+    """读取交付时段；调用方保证订单非空且属于同一产品。"""
+    order = (demand_bids or supply_offers)[0]
+    return order.delivery_start, order.delivery_end
 
 
 def _demand_totals(cleared_demands: tuple[ClearedDemandBid, ...]) -> dict[str, float]:

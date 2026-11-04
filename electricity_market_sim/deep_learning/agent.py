@@ -74,7 +74,7 @@ def _read_checkpoint_payload(path: Path, device: torch.device | str, *, algorith
     payload = torch.load(path, map_location=device, weights_only=True)
     if (
         payload.get("checkpoint_version") != (3 if algorithm == "grpo" else _CHECKPOINT_VERSION)
-        or payload["algorithm"] != algorithm
+        or payload.get("algorithm") != algorithm
         or payload.get("state_version") != _STATE_VERSION
         or payload.get("observation_size") != OBSERVATION_SIZE
         or payload.get("action_size") != ACTION_SIZE
@@ -194,7 +194,7 @@ class MATD3Agent:
         self.regular_steps += 1
         if self.regular_steps % self.config.train_frequency_steps != 0:
             return
-        progress = min(1.0, self.regular_steps / self.total_regular_steps)
+        progress = self.regular_steps / self.total_regular_steps
         self.noise_factor = self.config.noise_dt * (1.0 - progress)
         for _ in range(self.config.gradient_steps):
             self._gradient_step()
@@ -324,8 +324,8 @@ def _default_checkpoint_root(config: LearningConfig, output_path: Path) -> Path:
     return output_path / "checkpoints"
 
 
-def create_agent(config: LearningConfig, **kwargs):
+def create_agent(config: LearningConfig):
     if config.algorithm == "grpo":
         from .grpo_agent import GRPOAgent
-        return GRPOAgent(config, **kwargs)
-    return MATD3Agent(config, total_regular_steps=1, **kwargs)
+        return GRPOAgent(config)
+    return MATD3Agent(config, total_regular_steps=1)

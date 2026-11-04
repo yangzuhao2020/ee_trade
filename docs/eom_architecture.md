@@ -60,8 +60,8 @@ simulate_v4_market()
 3. 每次开市先收集 `bids_for_products` 的额外需求；逐台机组调用
    `offers_for_plant`。返回 `None` 表示使用常规报价，返回空元组表示不报价，
    返回订单表示完整替换该机组报价。预测价格始终按原有边际成本计算。
-4. 交割开始附加启动成本后调用 `record_delivery_start`；交割结束回写常规状态，
-   再调用 `record_delivery`；最终调用 `finalize` 附加各扩展的结果。
+4. 交割开始附加启动成本后调用 `record_delivery_start`；交割结束由基础市场回写常规状态；
+   最终调用 `finalize` 附加各扩展的结果。
 
 同一时刻的顺序保持为：
 

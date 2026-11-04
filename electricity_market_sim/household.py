@@ -73,13 +73,7 @@ def _build_household_problem(
     initial_battery_discharge_power_mw: float,
 ) -> _HouseholdProblem:
     """依次校验初始状态、准备预测并组装变量与约束。"""
-    _validate_household_initial_state(
-        household,
-        initial_energy_mwh,
-        initial_heat_pump_power_mw,
-        initial_battery_charge_power_mw,
-        initial_battery_discharge_power_mw,
-    )
+    _validate_household_initial_state(household, initial_heat_pump_power_mw)
     forecasts = _prepare_household_forecasts(
         household,
         products,
@@ -115,47 +109,16 @@ def _build_household_problem(
 
 def _validate_household_initial_state(
     household: HouseholdUnit,
-    initial_energy_mwh: float,
     initial_heat_pump_power_mw: float,
-    initial_battery_charge_power_mw: float,
-    initial_battery_discharge_power_mw: float,
 ) -> None:
-    """检查初始电池能量和设备功率是否满足运行限制。"""
-
-    if initial_energy_mwh < household.min_energy_mwh - _TOLERANCE or (
-        initial_energy_mwh > household.max_energy_mwh + _TOLERANCE
-    ):
+    """检查上一时段的热泵功率。"""
+    if not np.isfinite(initial_heat_pump_power_mw) or initial_heat_pump_power_mw < 0:
         raise InputValidationError(
-            f"家庭用户 {household.name!r} 的初始电池储能量超出 SOC 限制。"
-        )
-    initial_powers = (
-        initial_heat_pump_power_mw,
-        initial_battery_charge_power_mw,
-        initial_battery_discharge_power_mw,
-    )
-    if any(not np.isfinite(value) or value < 0 for value in initial_powers):
-        raise InputValidationError(
-            f"家庭用户 {household.name!r} 的初始设备功率必须为非负有限值。"
+            f"家庭用户 {household.name!r} 的初始热泵功率必须为非负有限值。"
         )
     if initial_heat_pump_power_mw > household.heat_pump_max_power_mw + _TOLERANCE:
         raise InputValidationError(
             f"家庭用户 {household.name!r} 的初始热泵功率超出功率上限。"
-        )
-    if (
-        initial_battery_charge_power_mw
-        > household.battery_max_charge_power_mw + _TOLERANCE
-        or initial_battery_discharge_power_mw
-        > household.battery_max_discharge_power_mw + _TOLERANCE
-    ):
-        raise InputValidationError(
-            f"家庭用户 {household.name!r} 的初始电池充放电功率超出功率上限。"
-        )
-    if (
-        initial_battery_charge_power_mw > _TOLERANCE
-        and initial_battery_discharge_power_mw > _TOLERANCE
-    ):
-        raise InputValidationError(
-            f"家庭用户 {household.name!r} 在初始状态下不能同时充电和放电。"
         )
 
 
@@ -355,36 +318,9 @@ def _add_battery_ramp_constraints(
         else:
             add_constraint(
                 {indices[0]: 1.0},
-                max(0.0, initial_power - household.battery_ramp_down_mw),
+                initial_power - household.battery_ramp_down_mw,
                 initial_power + household.battery_ramp_up_mw,
             )
-
-
-def _household_constraint(
-    problem: _HouseholdProblem,
-    extra_rows: tuple[tuple[np.ndarray, float, float], ...] = (),
-) -> LinearConstraint:
-    """把已经建立好的约束，包装成求解器能直接使用的 LinearConstraint 对象。"""
-    # matrix 的每一行保存一条约束的系数，lower、upper 保存对应的上下界。
-    # x 是全部优化变量的取值；每条约束都要求 lower <= matrix @ x <= upper。
-    matrix = problem.matrix
-    lower = problem.constraint_lower
-    upper = problem.constraint_upper
-    # extra_rows 默认为空；非空时，每一项都是 (系数行, 下界, 上界)。
-    if extra_rows:
-        # 取出额外约束的系数行；_ 表示不使用的上下界，* 将各行展开为列表元素。
-        # vstack 按行拼接，将这些系数行追加到基础约束矩阵的底部。
-        matrix = np.vstack([matrix, *(row for row, _, _ in extra_rows)])
-        # 追加额外约束的下界，与上面新增的系数行保持相同顺序。
-        lower = np.concatenate(
-            [lower, np.array([minimum for _, minimum, _ in extra_rows])]
-        )
-        # 追加额外约束的上界，每一行系数都对应一个下界和一个上界。
-        upper = np.concatenate(
-            [upper, np.array([maximum for _, _, maximum in extra_rows])]
-        )
-    # 包装成 LinearConstraint，供后续 milp 求解时使用；这里不执行优化求解。
-    return LinearConstraint(matrix, lower, upper)
 
 
 def _solve_household_problem(
@@ -401,7 +337,6 @@ def _solve_household_problem(
         integrality=problem.integrality,  # 0 表示连续变量，1 表示整数变量。
         bounds=problem.bounds,  # 单个变量的上下界，如充电功率和电池储能量范围。
         constraints=constraint,  # 变量之间的线性关系，如功率平衡和电量变化。
-        options={"presolve": True},  # 启用求解前的预处理，简化优化模型。
     )
     # 求解失败或未得到变量取值时，抛出包含家庭名称和求解器说明的异常。
     if not result.success or result.x is None:
@@ -418,10 +353,7 @@ def _solve_household_problem(
 
 
 def _baseline_objective(problem: _HouseholdProblem) -> np.ndarray:
-    # 累计费用变化目标：min J = Σ_t p_t * Δt_t * (C_t - D_t)
-    # p_t：各时段电价；Δt_t：时长；C_t、D_t：充电、放电功率。
-    # 固定负荷和热泵功率已知，对应参考费用为常数，省略后不改变最优方案。
-    # 损耗由能量约束计入；milp 通过 objective @ x 汇总所有时段。
+    # 固定负荷和热泵费用是常数，只计算电池充放电引起的费用变化。
     objective = np.zeros(problem.variable_count)
     objective[problem.charge] = problem.prices * problem.durations
     objective[problem.discharge] = -problem.prices * problem.durations
@@ -476,8 +408,11 @@ def _flexibility_bounds(
         household.cost_tolerance_percent / 100)
     cost_row = np.zeros(problem.variable_count)
     cost_row[problem.grid] = problem.prices * problem.durations
-    constraint = _household_constraint(
-        problem, ((cost_row, -np.inf, cost_limit + _TOLERANCE),))
+    constraint = LinearConstraint(
+        np.vstack((problem.matrix, cost_row)),
+        np.append(problem.constraint_lower, -np.inf),
+        np.append(problem.constraint_upper, cost_limit + _TOLERANCE),
+    )
     # 根据基准总费用和成本容忍度计算费用上限，
     # 并向优化模型添加“整个计划周期的总购电费用不得超过该上限”的约束。
 
@@ -533,12 +468,9 @@ def plan_household_opening(
     6. 返回结果：返回按家庭名称组织的基准计划和购电功率上下限。
     evaluate_flexibility=False 时跳过第 5 步，各家庭的灵活性结果为空。
     """
-    problems: dict[str, _HouseholdProblem] = {}
     plans_by_household: dict[str, tuple[HouseholdPlan, ...]] = {}
+    flexibility_by_household: dict[str, tuple[HouseholdFlexibilityResult, ...]] = {}
     for household in households:
-        if not products:
-            plans_by_household[household.name] = ()
-            continue
         problem = _build_household_problem(
             household,
             products,
@@ -549,7 +481,6 @@ def plan_household_opening(
             initial_battery_charge_power_mw[household.name],
             initial_battery_discharge_power_mw[household.name],
         ) # 准备模型数据
-        problems[household.name] = problem
         plans_by_household[household.name] = _household_plans(
             household,
             problem,
@@ -557,24 +488,16 @@ def plan_household_opening(
                 household,
                 problem,
                 _baseline_objective(problem),
-                _household_constraint(problem),
+                LinearConstraint(
+                    problem.matrix, problem.constraint_lower, problem.constraint_upper
+                ),
             ), 
         )
 
-    flexibility_by_household: dict[str, tuple[HouseholdFlexibilityResult, ...]] = {}
-    for household in households:
-        if not products or not evaluate_flexibility:
-            flexibility_by_household[household.name] = ()
-            continue
-        if household.cost_tolerance_percent < 0 or not np.isfinite(
-            household.cost_tolerance_percent):
-            raise InputValidationError(
-                f"家庭用户 {household.name!r} 的成本容忍度必须为非负有限值。")
-
-        flexibility_by_household[household.name] = _flexibility_bounds(
-            household,
-            problems[household.name],
-            plans_by_household[household.name],)
+        flexibility_by_household[household.name] = (
+            _flexibility_bounds(household, problem, plans_by_household[household.name])
+            if evaluate_flexibility else ()
+        )
 
     return plans_by_household, flexibility_by_household
 
@@ -604,7 +527,7 @@ def dispatch_household(
         duration = hours_between(plan.delivery_start, plan.delivery_end)
         retained_energy = energy * ((1.0 - household.battery_loss_rate) ** duration)
         # 计算电池扣除自放电损耗后的剩余能量
-        accepted_energy = accepted_grid_energy_mwh.get(plan.delivery_start, 0.0)
+        accepted_energy = accepted_grid_energy_mwh[plan.delivery_start]
         # 获取当前实际成交的购电量
         grid_power = accepted_energy / duration # 将成交电量转换为该时段的平均购电功率
         required_power = plan.fixed_power_mw + plan.planned_heat_pump_power_mw
@@ -635,13 +558,13 @@ def dispatch_household(
 
         available_power = grid_power + discharge # 计算当前可用的总功率
         served_fixed = min(plan.fixed_power_mw, available_power) # 优先供应固定负载
-        remaining_for_heat = max(0.0, available_power - served_fixed) # 计算可供热泵使用的剩余功率
+        remaining_for_heat = available_power - served_fixed # 计算可供热泵使用的剩余功率
         heat_pump_power = min(
             plan.planned_heat_pump_power_mw,
             remaining_for_heat,
             previous_heat_pump + household.heat_pump_ramp_up_mw,
         ) # 确定热泵实际用电功率
-        remaining_after_heat = max(0.0, available_power - served_fixed - heat_pump_power,)
+        remaining_after_heat = remaining_for_heat - heat_pump_power
         # 计算供应热泵后还剩多少功率
         charge_ramp_limit_mw = previous_charge + household.battery_ramp_up_mw
         # 爬坡限制对应的充电功率上限
@@ -674,13 +597,9 @@ def dispatch_household(
             raise InputValidationError(
                 f"家庭用户 {household.name!r} 在 {plan.delivery_start.isoformat(sep=' ')} "
                 "时刻的成交购电量不足以弥补电池损耗并维持最低 SOC。")
-        if next_energy > household.max_energy_mwh + _TOLERANCE:
-            raise InputValidationError(
-                f"家庭用户 {household.name!r} 在 {plan.delivery_start.isoformat(sep=' ')} "
-                "时刻的调度结果超出最高 SOC 限制。")
         energy = min(household.max_energy_mwh,
             max(household.min_energy_mwh, next_energy),)
-        unmet_electricity = max(0.0, plan.fixed_power_mw - served_fixed) * duration
+        unmet_electricity = (plan.fixed_power_mw - served_fixed) * duration
         unmet_heat = max(
             0.0,
             plan.heat_demand_mw_th - heat_pump_power * household.cop,

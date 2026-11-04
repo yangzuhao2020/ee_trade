@@ -47,7 +47,6 @@ class PlantRuntimeState:
 @dataclass
 class StorageRuntimeState:
     """单个储能单元在已完成交付后的实际储能量。
-
     未来已成交的产品由仿真调度器保存，并单独推算其影响。
     此状态仅在交付时段结束后更新。
     """

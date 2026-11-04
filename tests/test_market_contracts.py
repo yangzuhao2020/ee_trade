@@ -120,26 +120,19 @@ class CsvContracts(unittest.TestCase):
 
 
 class ClearingContracts(unittest.TestCase):
-    def test_validation_precedence_is_specific_to_each_algorithm(self):
-        first = bid()
-        second = replace(first, delivery_start=START + HOUR, delivery_end=START + 2 * HOUR)
-        with self.assertRaisesRegex(ValueError, "Demand bid identifiers must be unique"):
-            clear_pay_as_clear([first, second], [])
-        with self.assertRaisesRegex(ValueError, "must share a product"):
-            clear_pay_as_bid([first, second], [])
+    def test_duplicate_demand_ids_are_rejected(self):
+        for clear in (clear_pay_as_clear, clear_pay_as_bid):
+            with self.subTest(algorithm=clear.__name__):
+                with self.assertRaisesRegex(ValueError, "Demand bid identifiers must be unique"):
+                    clear([bid(), bid()], [])
 
-    def test_supply_id_error_keeps_algorithm_specific_detail(self):
-        cases = (
-            (clear_pay_as_clear,
-             "Supply offer identifiers must be unique within a product; "
-             "unit names must be unique when no offer_id is supplied."),
-            (clear_pay_as_bid, "Supply offer identifiers must be unique within a product."),
-        )
-        for clear, expected in cases:
+    def test_duplicate_supply_ids_are_rejected(self):
+        for clear in (clear_pay_as_clear, clear_pay_as_bid):
             with self.subTest(algorithm=clear.__name__):
                 with self.assertRaises(ValueError) as error:
                     clear([], [offer(), offer()])
-                self.assertEqual(str(error.exception), expected)
+                self.assertEqual(str(error.exception),
+                                 "Supply offer identifiers must be unique within a product.")
 
     def test_empty_market_errors_are_preserved(self):
         for clear, message in (

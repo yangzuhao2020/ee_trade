@@ -23,8 +23,6 @@ from ..models import (
 
 
 def _read_rows(path: Path) -> list[dict[str, str]]:
-    if not path.is_file():
-        raise InputValidationError(f"Missing required input file: {path}")
     with path.open(encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
         if not reader.fieldnames:
@@ -36,27 +34,29 @@ def _read_rows(path: Path) -> list[dict[str, str]]:
 
 
 def _require(row: dict[str, str], column: str, path: Path, row_number: int) -> str:
-    value = row.get(column)
-    if value is None or not value.strip():
+    value = (row.get(column) or "").strip()
+    if not value:
         raise InputValidationError(
             f"{path.name}, row {row_number}: required column {column!r} is empty."
         )
-    return value.strip()
+    return value
 
 
-def _float(row: dict[str, str], column: str, path: Path, row_number: int) -> float:
-    raw = _require(row, column, path, row_number)
+def _parse_float(raw: str, context: str) -> float:
     try:
         value = float(raw)
     except ValueError as exc:
         raise InputValidationError(
-            f"{path.name}, row {row_number}: {column!r} must be numeric, got {raw!r}."
+            f"{context} must be numeric, got {raw!r}."
         ) from exc
     if not isfinite(value):
-        raise InputValidationError(
-            f"{path.name}, row {row_number}: {column!r} must be finite."
-        )
+        raise InputValidationError(f"{context} must be finite.")
     return value
+
+
+def _float(row: dict[str, str], column: str, path: Path, row_number: int) -> float:
+    raw = _require(row, column, path, row_number)
+    return _parse_float(raw, f"{path.name}, row {row_number}: {column!r}")
 
 
 def _optional_float(
@@ -71,22 +71,14 @@ def _optional_float(
     raw = row.get(column)
     if raw is None or not raw.strip():
         return default
-    try:
-        value = float(raw.strip())
-    except ValueError as exc:
-        raise InputValidationError(
-            f"{path.name}, row {row_number}: {column!r} must be numeric, got {raw!r}."
-        ) from exc
-    if not isfinite(value):
-        raise InputValidationError(
-            f"{path.name}, row {row_number}: {column!r} must be finite."
-        )
-    return value
+    return _parse_float(raw, f"{path.name}, row {row_number}: {column!r}")
 
 
 def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
     """从 `powerplant_units.csv` 读取 V1 简单报价（naïve）、V2 启发式报价和 V5 学习报价的发电机组。"""
 
+    if not path.is_file():
+        raise InputValidationError(f"Missing required input file: {path}")
     rows = _read_rows(path)
     plants: list[PowerPlant] = []
     names: set[str] = set()
@@ -138,30 +130,6 @@ def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
             raise InputValidationError(
                 f"{path.name}, row {row_number}: bid_price is only supported "
                 "for powerplant_energy_naive."
-            )
-        if plant.max_power_mw <= 0:
-            raise InputValidationError(f"{path.name}, row {row_number}: max_power must be positive.")
-        if plant.min_power_mw < 0 or plant.min_power_mw > plant.max_power_mw:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: min_power must be between 0 and max_power."
-            )
-        if plant.efficiency <= 0:
-            raise InputValidationError(f"{path.name}, row {row_number}: efficiency must be positive.")
-        if plant.emission_factor < 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: emission_factor cannot be negative."
-            )
-        if plant.start_cost_eur < 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: start_cost cannot be negative."
-            )
-        if plant.min_operating_time_hours < 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: min_operating_time cannot be negative."
-            )
-        if plant.min_down_time_hours < 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: min_down_time cannot be negative."
             )
         plants.append(plant)
     return tuple(plants)
@@ -227,58 +195,6 @@ def load_storage_units(path: Path) -> tuple[StorageUnit, ...]:
             ),
         )
 
-        if storage.max_power_charge_mw < 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: max_power_charge cannot be negative."
-            )
-        if storage.max_power_discharge_mw < 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: max_power_discharge cannot be negative."
-            )
-        if (
-            storage.max_power_charge_mw == 0
-            and storage.max_power_discharge_mw == 0
-        ):
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: at least one storage power limit "
-                "must be positive."
-            )
-        if not 0 < storage.efficiency_charge <= 1:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: efficiency_charge must be in (0, 1]."
-            )
-        if not 0 < storage.efficiency_discharge <= 1:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: efficiency_discharge must be in (0, 1]."
-            )
-        if not 0 <= storage.min_soc <= storage.max_soc <= 1:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: SOC limits must satisfy "
-                "0 <= min_soc <= max_soc <= 1."
-            )
-        if not storage.min_soc <= storage.initial_soc <= storage.max_soc:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: initial_soc must satisfy "
-                "min_soc <= initial_soc <= max_soc."
-            )
-        if storage.capacity_mwh <= 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: capacity must be positive."
-            )
-        if storage.additional_cost_charge_eur_per_mwh < 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: additional_cost_charge "
-                "cannot be negative."
-            )
-        if storage.additional_cost_discharge_eur_per_mwh < 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: additional_cost_discharge "
-                "cannot be negative."
-            )
-        if storage.natural_inflow_mw < 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: natural_inflow cannot be negative."
-            )
         storages.append(storage)
 
     return tuple(storages)
@@ -287,6 +203,8 @@ def load_storage_units(path: Path) -> tuple[StorageUnit, ...]:
 def load_demand_units(path: Path) -> tuple[DemandUnit, ...]:
     """读取 EOM 需求参与者，忽略只属于 CRM 的行。"""
 
+    if not path.is_file():
+        raise InputValidationError(f"Missing required input file: {path}")
     rows = _read_rows(path)
     units: list[DemandUnit] = []
     names: set[str] = set()
@@ -310,16 +228,17 @@ def load_demand_units(path: Path) -> tuple[DemandUnit, ...]:
             )
         operator = _require(row, "unit_operator", path, row_number)
         if strategy == "demand_energy_naive":
-            price = _optional_float(
-                row, "price", float("nan"), path, row_number
-            )
             units.append(
                 DemandUnit(
                     name=name,
                     operator=operator,
                     bidding_strategy=strategy,
                     profile_column=name,
-                    price_eur_per_mwh=(price if isfinite(price) else None),
+                    price_eur_per_mwh=(
+                        _float(row, "price", path, row_number)
+                        if (row.get("price") or "").strip()
+                        else None
+                    ),
                 )
             )
             continue
@@ -342,25 +261,9 @@ def load_demand_units(path: Path) -> tuple[DemandUnit, ...]:
             max_price_eur_per_mwh=max_price,
             num_bids=int(num_bids_raw),
         )
-        if unit.max_power_mw is None or unit.max_power_mw <= 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: elastic max_power must be positive."
-            )
-        if unit.elasticity is None or unit.elasticity >= 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: elasticity must be negative."
-            )
         if unit.elasticity_model != "isoelastic":
             raise InputValidationError(
                 f"{path.name}, row {row_number}: only 'isoelastic' is supported."
-            )
-        if unit.max_price_eur_per_mwh is None or unit.max_price_eur_per_mwh <= 0:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: max_price must be positive."
-            )
-        if unit.num_bids is None or unit.num_bids < 2:
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: num_bids must be at least 2."
             )
         units.append(unit)
     return tuple(units)
@@ -375,9 +278,9 @@ def _group_field(
     required: bool = True,
 ) -> str | None:
     values = {
-        row.get(column, "").strip()
+        value
         for _, row in rows
-        if row.get(column, "").strip()
+        if (value := row.get(column, "").strip())
     }
     if len(values) > 1:
         raise InputValidationError(
@@ -437,7 +340,7 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
     """将热泵行和电池行合并为以建筑为单位的 V3 参与者。"""
 
     if not path.is_file():
-        return ()
+        raise InputValidationError(f"Missing required input file: {path}")
     raw_rows = _read_rows(path)
     grouped = _group_by_name(raw_rows, path)
 
@@ -458,23 +361,14 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
         prosumer_raw = (_group_field(
             rows, "is_prosumer", path, "building", required=False
         ) or "No").lower()
-        if prosumer_raw not in {"yes", "no"}:
+        if prosumer_raw != "no":
             raise InputValidationError(
-                f"{path.name}: building {name!r} is_prosumer must be Yes or No."
+                f"{path.name}: version three currently requires is_prosumer=No."
             )
-        cost_tolerance_raw = _group_field(rows, "cost_tolerance", path, "building") or "0"
-        try:
-            cost_tolerance = float(cost_tolerance_raw)
-        except ValueError as exc:
-            raise InputValidationError(
-                f"{path.name}: building {name!r} cost_tolerance must be numeric, "
-                f"got {cost_tolerance_raw!r}."
-            ) from exc
-        if not isfinite(cost_tolerance) or cost_tolerance < 0:
-            raise InputValidationError(
-                f"{path.name}: building {name!r} cost_tolerance must be a "
-                "non-negative finite value."
-            )
+        cost_tolerance_raw = _group_field(rows, "cost_tolerance", path, "building")
+        cost_tolerance = _parse_float(
+            cost_tolerance_raw, f"{path.name}: building {name!r} cost_tolerance"
+        )
         heat_min_operating_time = _optional_float(
             heat, "min_operating_time", 0.0, path, heat_number
         )
@@ -486,14 +380,14 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
 
         household = HouseholdUnit(
             name=name,
-            operator=_group_field(rows, "unit_operator", path, "building") or "",
+            operator=_group_field(rows, "unit_operator", path, "building"),
             bidding_strategy=strategy,
-            objective=_group_field(rows, "objective", path, "building") or "",
+            objective=_group_field(rows, "objective", path, "building"),
             flexibility_measure=_group_field(
                 rows, "flexibility_measure", path, "building"
-            ) or "",
+            ),
             cost_tolerance_percent=cost_tolerance,
-            is_prosumer=prosumer_raw == "yes",
+            is_prosumer=False,
             fixed_power_mw=0.0,
             heat_pump_max_power_mw=_float(
                 heat, "max_power", path, heat_number
@@ -547,58 +441,6 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
                 f"{path.name}: building {name!r} flexibility_measure must be "
                 "cost_based_load_shift."
             )
-        if household.is_prosumer:
-            raise InputValidationError(
-                f"{path.name}: version three currently requires is_prosumer=No."
-            )
-        if household.cop <= 0 or household.heat_pump_max_power_mw <= 0:
-            raise InputValidationError(
-                f"{path.name}: building {name!r} heat-pump limits and COP must be positive."
-            )
-        if not (
-            0
-            <= household.heat_pump_min_power_mw
-            <= household.heat_pump_max_power_mw
-        ):
-            raise InputValidationError(
-                f"{path.name}: building {name!r} has invalid heat-pump power limits."
-            )
-        if household.battery_capacity_mwh <= 0:
-            raise InputValidationError(
-                f"{path.name}: building {name!r} battery capacity must be positive."
-            )
-        if not (
-            0
-            <= household.battery_min_soc
-            <= household.battery_initial_soc
-            <= household.battery_max_soc
-            <= 1
-        ):
-            raise InputValidationError(
-                f"{path.name}: building {name!r} has invalid SOC limits."
-            )
-        if not (
-            0 < household.battery_efficiency_charge <= 1
-            and 0 < household.battery_efficiency_discharge <= 1
-        ):
-            raise InputValidationError(
-                f"{path.name}: building {name!r} battery efficiencies must be in (0, 1]."
-            )
-        if min(
-            household.battery_max_charge_power_mw,
-            household.battery_max_discharge_power_mw,
-            household.battery_ramp_up_mw,
-            household.battery_ramp_down_mw,
-        ) < 0:
-            raise InputValidationError(
-                f"{path.name}: building {name!r} battery power and ramp limits "
-                "cannot be negative."
-            )
-        if not 0 <= household.battery_loss_rate < 1:
-            raise InputValidationError(
-                f"{path.name}: building {name!r} storage_loss_rate must be in "
-                "[0, 1)."
-            )
         households.append(household)
     return tuple(households)
 
@@ -607,35 +449,21 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
     """将电解槽、DRI（直接还原铁）和 EAF（电弧炉）行合并为钢厂参与者。"""
 
     if not path.is_file():
-        return ()
+        raise InputValidationError(f"Missing required input file: {path}")
     raw_rows = _read_rows(path)
     grouped = _group_by_name(raw_rows, path)
 
     def plant_field(
         rows: list[tuple[int, dict[str, str]]],
         column: str,
-        *,
-        required: bool = True,
     ) -> str | None:
-        return _group_field(rows, column, path, "steel plant", required=required)
+        return _group_field(rows, column, path, "steel plant")
 
     def numeric_plant_field(
         rows: list[tuple[int, dict[str, str]]], column: str
     ) -> float:
         raw = plant_field(rows, column)
-        assert raw is not None
-        try:
-            value = float(raw)
-        except ValueError as exc:
-            raise InputValidationError(
-                f"{path.name}: steel-plant field {column!r} must be numeric, "
-                f"got {raw!r}."
-            ) from exc
-        if not isfinite(value):
-            raise InputValidationError(
-                f"{path.name}: steel-plant field {column!r} must be finite."
-            )
-        return value
+        return _parse_float(raw, f"{path.name}: steel-plant field {column!r}")
 
     units: list[IndustrialUnit] = []
     for name, rows in sorted(grouped.items()):
@@ -719,19 +547,6 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
                     row, "min_down_time", 0.0, path, row_number
                 ),
             )
-            if result.max_power_mw <= 0:
-                raise InputValidationError(
-                    f"{path.name}, row {row_number}: max_power must be positive."
-                )
-            if not 0 <= result.min_power_mw <= result.max_power_mw:
-                raise InputValidationError(
-                    f"{path.name}, row {row_number}: industrial min_power must "
-                    "be between 0 and max_power."
-                )
-            if min(result.ramp_up_mw, result.ramp_down_mw) < 0:
-                raise InputValidationError(
-                    f"{path.name}, row {row_number}: ramp limits cannot be negative."
-                )
             if result.min_operating_time_hours != 0 or result.min_down_time_hours != 0:
                 raise InputValidationError(
                     f"{path.name}, row {row_number}: version four supports "
@@ -742,51 +557,14 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
         electrolyser = device("electrolyser")
         dri_plant = device("dri_plant")
         eaf = device("eaf")
-        if electrolyser.efficiency <= 0 or electrolyser.efficiency > 1:
-            raise InputValidationError(
-                f"{path.name}: steel plant {name!r} electrolyser efficiency must "
-                "be in (0, 1]."
-            )
         if dri_plant.fuel_type != "hydrogen":
             raise InputValidationError(
                 f"{path.name}: steel plant {name!r} DRI fuel_type must be hydrogen."
-            )
-        required_positive = {
-            "DRI specific_electricity_consumption": (
-                dri_plant.specific_electricity_consumption
-            ),
-            "DRI specific_hydrogen_consumption": (
-                dri_plant.specific_hydrogen_consumption
-            ),
-            "DRI specific_iron_ore_consumption": (
-                dri_plant.specific_iron_ore_consumption
-            ),
-            "EAF specific_dri_demand": eaf.specific_dri_demand,
-            "EAF specific_electricity_consumption": (
-                eaf.specific_electricity_consumption
-            ),
-            "EAF specific_lime_demand": eaf.specific_lime_demand,
-        }
-        invalid = [label for label, value in required_positive.items() if value <= 0]
-        if invalid:
-            raise InputValidationError(
-                f"{path.name}: steel plant {name!r} requires positive values for: "
-                + ", ".join(invalid)
-                + "."
-            )
-        if eaf.lime_co2_factor < 0:
-            raise InputValidationError(
-                f"{path.name}: steel plant {name!r} lime_co2_factor cannot be negative."
             )
 
         cost_tolerance = numeric_plant_field(rows, "cost_tolerance")
         demand = numeric_plant_field(rows, "demand")
         deviation = numeric_plant_field(rows, "load_profile_deviation")
-        if cost_tolerance < 0 or demand <= 0 or deviation < 0:
-            raise InputValidationError(
-                f"{path.name}: steel plant {name!r} requires non-negative cost "
-                "tolerance and load-profile deviation, and positive demand."
-            )
         look_ahead = parse_duration(
             plant_field(rows, "look_ahead_horizon"), "look_ahead_horizon"
         )
@@ -796,11 +574,6 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
         rolling_step = parse_duration(
             plant_field(rows, "rolling_step"), "rolling_step"
         )
-        if commit_horizon > look_ahead:
-            raise InputValidationError(
-                f"{path.name}: steel plant {name!r} commit_horizon cannot exceed "
-                "look_ahead_horizon."
-            )
         if rolling_step != commit_horizon:
             raise InputValidationError(
                 f"{path.name}: version four requires rolling_step=commit_horizon."
@@ -809,7 +582,7 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
         units.append(
             IndustrialUnit(
                 name=name,
-                operator=plant_field(rows, "unit_operator") or "",
+                operator=plant_field(rows, "unit_operator"),
                 bidding_strategy=strategy,
                 objective=objective,
                 flexibility_measure=flexibility,
@@ -821,7 +594,7 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
                 commit_horizon=commit_horizon,
                 rolling_step=rolling_step,
                 forecast_price_column=(
-                    plant_field(rows, "forecast_electricity_price_update") or ""
+                    plant_field(rows, "forecast_electricity_price_update")
                 ),
                 electrolyser=electrolyser,
                 dri_plant=dri_plant,
@@ -831,21 +604,15 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
     return tuple(units)
 
 
-_ValueCheck = Callable[[str, dict[str, float], Path, int], None]
-
-
 def _read_time_series(
     path: Path,
     select_columns: Callable[[list[str]], Sequence[str]],
-    *,
-    datetime_context: str = "",
-    check: _ValueCheck | None = None,
 ) -> tuple[Sequence[str], dict[datetime, dict[str, float]]]:
     with path.open(encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
         if not reader.fieldnames or "datetime" not in reader.fieldnames:
             raise InputValidationError(
-                f"{path.name} must include a 'datetime' column{datetime_context}."
+                f"{path.name} must include a 'datetime' column."
             )
         columns = select_columns(reader.fieldnames)
         rows: dict[datetime, dict[str, float]] = {}
@@ -856,12 +623,9 @@ def _read_time_series(
                     f"{path.name}, row {row_number}: duplicate timestamp "
                     f"{timestamp.isoformat(sep=' ')}."
                 )
-            values: dict[str, float] = {}
-            for column in columns:
-                values[column] = _float(row, column, path, row_number)
-                if check is not None:
-                    check(column, values, path, row_number)
-            rows[timestamp] = values
+            rows[timestamp] = {
+                column: _float(row, column, path, row_number) for column in columns
+            }
     return columns, rows
 
 
@@ -878,7 +642,6 @@ def _hourly_means(
     rows: dict[datetime, dict[str, float]], columns: Sequence[str]
 ) -> dict[str, dict[datetime, float]]:
     """对每个小时内的可用样本按相同权重求平均。
-
     允许不完整的小时和不规则采样。只有一个样本时，该样本代表整个小时；没有样本的
     小时不会出现在结果中。这既不是按时间加权的平均，也不同于对齐曲线所用的
     “时段数据必须完整”规则。
@@ -888,32 +651,13 @@ def _hourly_means(
         column: defaultdict(list) for column in columns
     }
     for timestamp, values in rows.items():
-        hour = _hour_start(timestamp)
+        hour = timestamp.replace(minute=0, second=0, microsecond=0)
         for column in columns:
             buckets[column][hour].append(values[column])
     return {
         column: {hour: sum(values) / len(values) for hour, values in hourly.items()}
         for column, hourly in buckets.items()
     }
-
-
-def _check_availability(
-    column: str, values: dict[str, float], path: Path, row_number: int
-) -> None:
-    if not 0 <= values[column] <= 1:
-        raise InputValidationError(
-            f"{path.name}, row {row_number}: availability for {column!r} "
-            "must be between 0 and 1."
-        )
-
-
-def _check_demand(
-    column: str, values: dict[str, float], path: Path, row_number: int
-) -> None:
-    if values[column] < 0:
-        raise InputValidationError(
-            f"{path.name}, row {row_number}: demand cannot be negative."
-        )
 
 
 def load_time_series_profiles(
@@ -942,17 +686,18 @@ def load_time_series_profiles(
             raise InputValidationError(
                 f"{path.name} is missing columns: {', '.join(missing)}."
             )
-        unused = [
-            column
-            for column in fieldnames
-            if column != "datetime" and column not in required_columns
-        ]
-        if warn_unused_columns and unused:
-            warnings.warn(
-                f"{path.name}: ignored unused columns: {', '.join(unused)}.",
-                RuntimeWarning,
-                stacklevel=4,
-            )
+        if warn_unused_columns:
+            unused = [
+                column
+                for column in fieldnames
+                if column != "datetime" and column not in required_columns
+            ]
+            if unused:
+                warnings.warn(
+                    f"{path.name}: ignored unused columns: {', '.join(unused)}.",
+                    RuntimeWarning,
+                    stacklevel=4,
+                )
         return required_columns
 
     _, rows = _read_time_series(path, select)
@@ -965,35 +710,44 @@ def load_aligned_time_series_profiles(
     product_duration: timedelta,
 ) -> dict[str, dict[datetime, float]]:
     """按产品分辨率读取数值曲线，更细粒度的数据取平均值。
-
     源数据的时间间隔必须固定，并且能整除市场产品时长。只有当某个产品时段内
     预期的源数据点全部存在时才保留该时段，这样后续按产品查找时会报告输入缺失，
     而不是对不完整的区间求平均。
     """
 
     exact = load_time_series_profiles(path, required_columns)
-    if not required_columns:
+    return _align_time_series_profiles(path, exact, product_duration)
+
+
+def _align_time_series_profiles(
+    path: Path,
+    exact: dict[str, dict[datetime, float]],
+    product_duration: timedelta,
+) -> dict[str, dict[datetime, float]]:
+    """将已读取的各列曲线按完整产品时段对齐，不再读取文件。"""
+
+    if not exact:
         return exact
-    timestamps = sorted(exact[required_columns[0]])
+    timestamps = sorted(next(iter(exact.values())))
     if len(timestamps) < 2:
         raise InputValidationError(
             f"{path.name} requires at least two timestamps to determine its cadence."
         )
     steps = {
         later - earlier
-        for earlier, later in zip(timestamps, timestamps[1:], strict=False)
+        for earlier, later in zip(timestamps, timestamps[1:])
     }
     if len(steps) != 1:
         raise InputValidationError(f"{path.name} timestamps must use a regular cadence.")
     source_step = steps.pop()
-    if source_step <= timedelta(0) or source_step > product_duration:
+    if source_step > product_duration:
         raise InputValidationError(
             f"{path.name} cadence {source_step} cannot be aligned to product "
             f"duration {product_duration}."
         )
     ratio = product_duration.total_seconds() / source_step.total_seconds()
     expected_count = round(ratio)
-    if expected_count <= 0 or abs(ratio - expected_count) > 1e-9:
+    if abs(ratio - expected_count) > 1e-9:
         raise InputValidationError(
             f"{path.name} cadence must divide the product duration exactly."
         )
@@ -1008,13 +762,12 @@ def load_aligned_time_series_profiles(
         bucket = epoch + timedelta(seconds=(elapsed // product_seconds) * product_seconds)
         buckets[bucket].append(timestamp)
 
-    aligned = {column: {} for column in required_columns}
+    aligned = {column: {} for column in exact}
     for bucket, members in buckets.items():
-        members.sort()
         expected = [bucket + index * source_step for index in range(expected_count)]
         if members != expected:
             continue
-        for column in required_columns:
+        for column in exact:
             aligned[column][bucket] = sum(exact[column][time] for time in members) / len(
                 members
             )
@@ -1028,22 +781,23 @@ def load_aligned_fuel_price_profiles(
 
     if not path.is_file():
         raise InputValidationError(f"Missing required input file: {path}")
-    with path.open(encoding="utf-8-sig", newline="") as file:
-        reader = csv.reader(file)
-        try:
-            header = next(reader)
-        except StopIteration as exc:
-            raise InputValidationError(f"{path.name} is empty.") from exc
-    if not header or header[0].strip() != "datetime":
-        raise InputValidationError(
-            f"{path.name} must use the time-series layout beginning with datetime."
+
+    def select(fieldnames: list[str]) -> tuple[str, ...]:
+        if fieldnames[0].strip() != "datetime":
+            raise InputValidationError(
+                f"{path.name} must use the time-series layout beginning with datetime."
+            )
+        columns = tuple(
+            column
+            for raw_column in fieldnames[1:]
+            if (column := raw_column.strip())
         )
-    columns = tuple(column.strip() for column in header[1:] if column.strip())
-    if "co2" not in columns:
-        raise InputValidationError(f"{path.name} must provide a 'co2' column.")
-    by_column = load_aligned_time_series_profiles(path, columns, product_duration)
-    if not columns:
-        return {}
+        if "co2" not in columns:
+            raise InputValidationError(f"{path.name} must provide a 'co2' column.")
+        return columns
+
+    columns, rows = _read_time_series(path, select)
+    by_column = _align_time_series_profiles(path, _by_column(rows, columns), product_duration)
     timestamps = sorted(by_column[columns[0]])
     return {
         timestamp: {column: by_column[column][timestamp] for column in columns}
@@ -1063,7 +817,7 @@ def load_fuel_price_profiles(path: Path) -> dict[datetime, dict[str, float]]:
             raise InputValidationError(f"{path.name} must provide a 'co2' column.")
         return price_columns
 
-    _, profiles = _read_time_series(path, select, datetime_context=" for pay_as_bid")
+    _, profiles = _read_time_series(path, select)
     return profiles
 
 
@@ -1078,7 +832,6 @@ def load_exact_availability_profiles(
     columns, rows = _read_time_series(
         path,
         lambda fieldnames: [column for column in fieldnames if column in plant_names],
-        check=_check_availability,
     )
     return _by_column(rows, columns)
 
@@ -1086,6 +839,8 @@ def load_exact_availability_profiles(
 def load_exchange_unit(path: Path) -> ExchangeUnit:
     """从 `exchange_units.csv` 读取唯一一个 V1 外部电网（Exchange）参与者。"""
 
+    if not path.is_file():
+        raise InputValidationError(f"Missing required input file: {path}")
     rows = _read_rows(path)
     if len(rows) != 1:
         raise InputValidationError(
@@ -1114,7 +869,7 @@ def load_fuel_prices(path: Path) -> dict[str, float]:
         raise InputValidationError(f"Missing required input file: {path}")
     with path.open(encoding="utf-8-sig", newline="") as file:
         rows = list(csv.reader(file))
-    if len(rows) < 2 or len(rows[0]) < 2:
+    if len(rows) < 2 or not rows[0]:
         raise InputValidationError(
             f"{path.name} must contain a fuel header row and one price row."
         )
@@ -1128,7 +883,7 @@ def load_fuel_prices(path: Path) -> dict[str, float]:
         raise InputValidationError(f"{path.name}: header and price row lengths differ.")
 
     prices: dict[str, float] = {}
-    for fuel, raw_price in zip(headers[1:], values[1:], strict=True):
+    for fuel, raw_price in zip(headers[1:], values[1:]):
         if not fuel:
             raise InputValidationError(f"{path.name}: a fuel column has no name.")
         try:
@@ -1143,21 +898,18 @@ def load_fuel_prices(path: Path) -> dict[str, float]:
 
 
 def _parse_datetime(raw: str, path: Path, row_number: int) -> datetime:
+    value = raw.strip()
     try:
-        return datetime.fromisoformat(raw.strip())
+        return datetime.fromisoformat(value)
     except ValueError:
         for date_format in ("%m/%d/%Y %H:%M", "%m/%d/%Y %H:%M:%S"):
             try:
-                return datetime.strptime(raw.strip(), date_format)
+                return datetime.strptime(value, date_format)
             except ValueError:
                 continue
         raise InputValidationError(
             f"{path.name}, row {row_number}: invalid datetime {raw!r}."
         )
-
-
-def _hour_start(timestamp: datetime) -> datetime:
-    return timestamp.replace(minute=0, second=0, microsecond=0)
 
 
 def load_hourly_demand_profiles(
@@ -1181,7 +933,7 @@ def load_hourly_demand_profiles(
             )
         return [unit.profile_column for unit in profiled_units]
 
-    columns, rows = _read_time_series(path, select, check=_check_demand)
+    columns, rows = _read_time_series(path, select)
     hourly = _hourly_means(rows, columns)
     return {unit.name: hourly[unit.profile_column] for unit in profiled_units}
 
@@ -1218,7 +970,7 @@ def load_hourly_availability_profiles(
             )
         return profile_columns
 
-    columns, rows = _read_time_series(path, select, check=_check_availability)
+    columns, rows = _read_time_series(path, select)
     return _hourly_means(rows, columns)
 
 
@@ -1245,17 +997,7 @@ def load_hourly_exchange_profiles(
             )
         return [import_column, export_column]
 
-    def check_powers(
-        column: str, values: dict[str, float], path: Path, row_number: int
-    ) -> None:
-        if column == export_column and (
-            values[import_column] < 0 or values[export_column] < 0
-        ):
-            raise InputValidationError(
-                f"{path.name}, row {row_number}: import and export powers must be non-negative."
-            )
-
-    columns, rows = _read_time_series(path, select, check=check_powers)
+    columns, rows = _read_time_series(path, select)
     hourly = _hourly_means(rows, columns)
     return {
         hour: ExchangeSchedule(

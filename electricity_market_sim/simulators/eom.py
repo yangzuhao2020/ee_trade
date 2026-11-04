@@ -71,9 +71,6 @@ class EomMarketExtension(Protocol):
     def record_delivery_start(self, result: MarketClearingResult) -> None:
         """在启动成本计入之后，接收开始交付的产品结果。"""
 
-    def record_delivery(self, result: MarketClearingResult) -> None:
-        """将已结束的交付写入扩展模块的状态。"""
-
     def finalize(self, result: SimulationResult) -> SimulationResult:
         """所有事件完成后，附加扩展模块特有的结果。"""
 
@@ -108,12 +105,10 @@ def simulate_eom_market(market: BaseMarket) -> SimulationResult:
 
     while openings_by_time or pending_starts or pending_ends:
         event_time = min([*openings_by_time, *pending_starts, *pending_ends])
-        # 处理当前时间点所有“应该结束交付”的产品，并记录由此产生的储能结果和扩展状态更新。
+        # 处理当前时间点所有“应该结束交付”的产品，更新常规状态并记录储能结果。
         # 只有已结束的交割才能影响本次开市的报价，因此必须先于开市处理。
         for key in pending_ends.pop(event_time, []):
             storage_results.extend(market.end_delivery(scheduled_results[key]))
-            if extension is not None:
-                extension.record_delivery(scheduled_results[key])
 
         starting_keys = pending_starts.pop(event_time, [])
         if settle_before_opening:

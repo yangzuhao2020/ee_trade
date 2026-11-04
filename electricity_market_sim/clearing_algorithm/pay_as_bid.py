@@ -25,11 +25,7 @@ def clear_pay_as_bid(
     if not demand_bids and not supply_offers:
         raise ValueError("Cannot clear an empty market.")
     delivery_start, delivery_end = _single_product(demand_bids, supply_offers)
-    _validate_order_ids(
-        demand_bids,
-        supply_offers,
-        supply_error="Supply offer identifiers must be unique within a product.",
-    )
+    _validate_order_ids(demand_bids, supply_offers)
 
     ordered_bids = sorted(
         demand_bids,
