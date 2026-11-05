@@ -11,7 +11,6 @@ from ..models import (
 )
 from .common import (
     _EPSILON,
-    _demand_totals,
     _single_product,
     _validate_order_ids,
 )
@@ -103,12 +102,9 @@ def clear_pay_as_bid(
         )
         for bid in demand_bids
     )
-    cleared_energy = sum(trade.trade_energy_mwh for trade in trades)
     return MarketClearingResult(
         delivery_start=delivery_start,
         delivery_end=delivery_end,
-        **_demand_totals(cleared_demands),
-        cleared_energy_mwh=cleared_energy,
         clearing_price_eur_per_mwh=None,
         offers=cleared_offers,
         demand_bids=cleared_demands,

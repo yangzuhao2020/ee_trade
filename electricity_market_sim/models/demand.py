@@ -17,7 +17,6 @@ class DemandUnit:
     profile_column: str | None = None
     max_power_mw: float | None = None
     elasticity: float | None = None
-    elasticity_model: str | None = None
     max_price_eur_per_mwh: float | None = None
     num_bids: int | None = None
     price_eur_per_mwh: float | None = None
@@ -34,10 +33,3 @@ class ExchangeUnit:
     operator: str
     price_import_eur_per_mwh: float
     price_export_eur_per_mwh: float
-
-
-@dataclass(frozen=True)
-class ExchangeSchedule:
-    """单个交付小时的计划进口与出口功率（均为正值）。"""
-    import_power_mw: float
-    export_power_mw: float

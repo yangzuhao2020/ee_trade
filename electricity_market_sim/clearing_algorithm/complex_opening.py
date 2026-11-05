@@ -8,16 +8,16 @@ from ..models import (
     ClearedSupplyOffer,
     DemandBid,
     MarketClearingResult,
-    StorageClearingContext,
+    StorageUnit,
     SupplyOffer,
 )
-from .common import _EPSILON, _demand_totals
+from .common import _EPSILON
 
 
 def clear_complex_opening(
     demand_bids: list[DemandBid],
     supply_offers: list[SupplyOffer],
-    storage_contexts: tuple[StorageClearingContext, ...] = (),
+    storages: tuple[tuple[StorageUnit, float], ...] = (),
 ) -> tuple[MarketClearingResult, ...]:
     """对一次复杂 EOM 开市中的所有产品进行联合出清。
 
@@ -42,20 +42,20 @@ def clear_complex_opening(
         if offer.offer_type == "storage_discharge"
     }
     context_names: set[str] = set()
-    for context in storage_contexts:
-        if context.unit_name in context_names:
+    for storage, initial_energy in storages:
+        if storage.name in context_names:
             raise ValueError(
-                f"储能 {context.unit_name!r} 的出清上下文重复。"
+                f"储能 {storage.name!r} 的出清上下文重复。"
             )
-        if not context.min_energy_mwh <= context.initial_energy_mwh <= context.max_energy_mwh:
+        if not storage.min_energy_mwh <= initial_energy <= storage.max_energy_mwh:
             raise ValueError(
-                f"储能 {context.unit_name!r} 的初始电量超出 SOC 允许范围。"
+                f"储能 {storage.name!r} 的初始电量超出 SOC 允许范围。"
             )
-        if context.efficiency_charge <= 0 or context.efficiency_discharge <= 0:
+        if storage.efficiency_charge <= 0 or storage.efficiency_discharge <= 0:
             raise ValueError(
-                f"储能 {context.unit_name!r} 的充电和放电效率必须大于 0。"
+                f"储能 {storage.name!r} 的充电和放电效率必须大于 0。"
             )
-        context_names.add(context.unit_name)
+        context_names.add(storage.name)
     missing_contexts = sorted(storage_order_names - context_names)
     if missing_contexts:
         raise ValueError(
@@ -77,7 +77,7 @@ def clear_complex_opening(
             active_offers,
             products,
             product_rows,
-            storage_contexts,
+            storages,
         )
         accepted_supply, accepted_demand, prices = solution
         negative_parent = _lowest_negative_parent_bid(
@@ -127,12 +127,12 @@ def _solve_complex_order_book(
     supply_offers: list[SupplyOffer],
     products: tuple[tuple, ...],
     product_rows: dict[tuple, int],
-    storage_contexts: tuple[StorageClearingContext, ...] = (),
+    storages: tuple[tuple[StorageUnit, float], ...] = (),
 ) -> tuple[dict[str, float], list[float], dict[tuple, float]]:
     """先求解 MILP，固定 BB 决策后求解 LP，返回成交电量和对偶价格。"""
 
     variables, objective, bounds, constraints, integrality = _build_complex_matrices(
-        demand_bids, supply_offers, products, product_rows, storage_contexts
+        demand_bids, supply_offers, products, product_rows, storages
     )
     mip_result = milp(
         c=objective,
@@ -171,7 +171,7 @@ def _build_complex_variables(
     demand_bids: list[DemandBid],
     supply_offers: list[SupplyOffer],
     products: tuple[tuple, ...],
-    storage_contexts: tuple[StorageClearingContext, ...],
+    storages: tuple[tuple[StorageUnit, float], ...],
 ) -> tuple[list[dict], dict[tuple[str, tuple], int]]:
     """按需求、BB、SB/LB、储能状态的顺序建立优化变量及储能状态索引。"""
 
@@ -217,17 +217,17 @@ def _build_complex_variables(
         )
 
     storage_state_variables: dict[tuple[str, tuple], int] = {}
-    for context in storage_contexts:
+    for storage, _ in storages:
         for product in products:
-            storage_state_variables[(context.unit_name, product)] = len(variables)
+            storage_state_variables[(storage.name, product)] = len(variables)
             variables.append(
                 {
                     "kind": "storage_energy",
                     "indices": (),
                     "bid_type": "STATE",
-                    "bid_id": f"{context.unit_name}::{product[0].isoformat()}",
+                    "bid_id": f"{storage.name}::{product[0].isoformat()}",
                     "parent_bid_id": None,
-                    "storage_name": context.unit_name,
+                    "storage_name": storage.name,
                 }
             )
     return variables, storage_state_variables
@@ -238,16 +238,16 @@ def _build_complex_matrices(
     supply_offers: list[SupplyOffer],
     products: tuple[tuple, ...],
     product_rows: dict[tuple, int],
-    storage_contexts: tuple[StorageClearingContext, ...],
+    storages: tuple[tuple[StorageUnit, float], ...],
 ):
     """构建目标函数、变量边界、供需平衡、储能 SOC 和父子报价约束。
     储能状态表示每个产品结束时的电量，平衡方程只计入实际成交的充放电量。
     """
 
     variables, storage_state_variables = _build_complex_variables(
-        demand_bids, supply_offers, products, storage_contexts
+        demand_bids, supply_offers, products, storages
     )
-    contexts_by_name = {context.unit_name: context for context in storage_contexts}
+    storages_by_name = {storage.name: storage for storage, _ in storages}
     number_variables = len(variables)
     objective = np.zeros(number_variables)
     balance = np.zeros((len(products), number_variables))
@@ -280,41 +280,41 @@ def _build_complex_matrices(
             if variable["bid_type"] == "BB":
                 parent_variable[variable["bid_id"]] = variable_index
         else:
-            context = contexts_by_name[variable["storage_name"]]
-            lower_bounds[variable_index] = context.min_energy_mwh
-            upper_bounds[variable_index] = context.max_energy_mwh
+            storage = storages_by_name[variable["storage_name"]]
+            lower_bounds[variable_index] = storage.min_energy_mwh
+            upper_bounds[variable_index] = storage.max_energy_mwh
 
     storage_balance_rows: list[np.ndarray] = []
     storage_balance_rhs: list[float] = []
-    for context in storage_contexts:
+    for storage, initial_energy in storages:
         previous_state_index: int | None = None
         for product in products:
             row = np.zeros(number_variables)
-            state_index = storage_state_variables[(context.unit_name, product)]
+            state_index = storage_state_variables[(storage.name, product)]
             row[state_index] = 1.0
             if previous_state_index is None:
-                right_hand_side = context.initial_energy_mwh
+                right_hand_side = initial_energy
             else:
                 row[previous_state_index] = -1.0
                 right_hand_side = 0.0
 
             for demand_index, bid in enumerate(demand_bids):
                 if (
-                    bid.unit_name == context.unit_name
+                    bid.unit_name == storage.name
                     and bid.demand_type == "storage_charge"
                     and (bid.delivery_start, bid.delivery_end) == product
                 ):
                     row[demand_variable[demand_index]] -= (
-                        bid.volume_mwh * context.efficiency_charge
+                        bid.volume_mwh * storage.efficiency_charge
                     )
             for offer_index, offer in enumerate(supply_offers):
                 if (
-                    offer.unit_name == context.unit_name
+                    offer.unit_name == storage.name
                     and offer.offer_type == "storage_discharge"
                     and (offer.delivery_start, offer.delivery_end) == product
                 ):
                     row[supply_variable[offer_index]] += (
-                        offer.offered_energy_mwh / context.efficiency_discharge
+                        offer.offered_energy_mwh / storage.efficiency_discharge
                     )
             storage_balance_rows.append(row)
             storage_balance_rhs.append(right_hand_side)
@@ -464,10 +464,6 @@ def _complex_results(
             MarketClearingResult(
                 delivery_start=delivery_start,
                 delivery_end=delivery_end,
-                **_demand_totals(cleared_demands),
-                cleared_energy_mwh=sum(
-                    item.accepted_energy_mwh for item in cleared_offers
-                ),
                 clearing_price_eur_per_mwh=prices[product],
                 offers=cleared_offers,
                 demand_bids=cleared_demands,

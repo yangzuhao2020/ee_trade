@@ -14,7 +14,6 @@ from ..models import (
 )
 from .common import (
     _EPSILON,
-    _demand_totals,
     _single_product,
     _validate_order_ids,
 )
@@ -109,7 +108,6 @@ def clear_pay_as_clear(
         )
         for index, bid in enumerate(demand_bids)
     )
-    cleared_energy = sum(item.accepted_energy_mwh for item in cleared_offers)
     trades = tuple(
         Trade(
             delivery_start=delivery_start,
@@ -125,8 +123,6 @@ def clear_pay_as_clear(
     return MarketClearingResult(
         delivery_start=delivery_start,
         delivery_end=delivery_end,
-        **_demand_totals(cleared_demands),
-        cleared_energy_mwh=cleared_energy,
         clearing_price_eur_per_mwh=clearing_price,
         offers=cleared_offers,
         demand_bids=cleared_demands,

@@ -83,7 +83,7 @@ def validate_learning_data_coverage(input_path: Path, settings: MarketSettings) 
         plant.bidding_strategy in _FORECAST_STRATEGIES and plant.min_power_mw > _POWER_TOLERANCE_MW
         for plant in plants
     )
-    for name, _ in settings.learning_config.periods:
+    for name in settings.learning_config.periods:
         period_settings = learning_period_settings(settings, name)
         deliveries = {
             start for opening in market_openings(period_settings) for start, _ in opening.products

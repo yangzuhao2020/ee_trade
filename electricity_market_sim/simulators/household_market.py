@@ -17,9 +17,8 @@ from ..inputs import (
 )
 from ..models import (
     DemandBid,
-    HouseholdCostResult,
+    HouseholdResult,
     HouseholdDispatchResult,
-    HouseholdFlexibilityResult,
     HouseholdUnit,
     MarketClearingResult,
     MarketOpening,
@@ -56,15 +55,9 @@ def simulate_household_market(
         ],
         "发电机组、需求单元和家庭用户",)
 
-    demand_columns = []
-    for unit in demand_units:               # 逐个遍历需求单元
-        profile_column = unit.profile_column  # 获取当前单元对应的列名
-        if profile_column is not None:       # 如果列名不是 None
-            demand_columns.append(profile_column)  # 加到列表末尾
-
     demand_profiles = load_time_series_profiles(
         input_path / "demand_df.csv",
-        tuple(demand_columns),
+        tuple(unit.profile_column for unit in demand_units),
         warn_unused_columns=True,
     )
     forecast_columns = ("price_EOM",) + tuple(
@@ -76,13 +69,20 @@ def simulate_household_market(
         input_path / "availability_df.csv", plants)
     validate_fuel_coverage(plants, next(iter(fuel_prices.values()), {}))
 
+    products = [product for opening in openings for product in opening.products]
+    if len(products) != len(set(products)):
+        raise ValueError("同一交付产品不能在两次开市中重复报价。")
+    for delivery_start, _ in products:
+        if delivery_start not in fuel_prices:
+            raise InputValidationError(
+                f"fuel_prices_df.csv 中缺少 {format_timestamp(delivery_start)} 时刻的燃料价格。")
+
     def run_openings(
         households: tuple[HouseholdUnit, ...],
         evaluate_flexibility: bool,
     ) -> tuple[
         list[MarketClearingResult],
         list[HouseholdDispatchResult],
-        list[HouseholdFlexibilityResult],
     ]:
         """按开市顺序完成居民优化、报价、出清及设备调度，返回全部结果。"""
         household_energy = {household.name: household.initial_energy_mwh for household in households}
@@ -93,14 +93,8 @@ def simulate_household_market(
         
         market_results: list[MarketClearingResult] = []
         household_results = []
-        household_flexibility_results = []
-        cleared_products: set[tuple[datetime, datetime]] = set()
-
         for opening in openings:
-            if any(product in cleared_products for product in opening.products):
-                raise ValueError("同一交付产品不能在两次开市中重复报价。")
-
-            plans_by_household, flexibility_by_household = plan_household_opening(
+            plans_by_household, bounds_by_household = plan_household_opening(
                 households,
                 opening.products,
                 forecasts["price_EOM"],
@@ -110,10 +104,6 @@ def simulate_household_market(
                 household_discharge_power,
                 evaluate_flexibility=evaluate_flexibility,
             )
-            for household in households:
-                household_flexibility_results.extend(
-                    flexibility_by_household[household.name])
-
             # 已经优化完成的购电计划，这几行负责把结果整理成方便查询的字典
             plan_by_product = {}
             for household_plans in plans_by_household.values():
@@ -126,7 +116,6 @@ def simulate_household_market(
                 duration_hours = hours_between(delivery_start, delivery_end)
                 demand_bids: list[DemandBid] = []
                 for unit in demand_units:
-                    assert unit.profile_column is not None
                     power = demand_profiles[unit.profile_column][delivery_start]
                     demand_bids.append(
                         DemandBid(
@@ -165,11 +154,7 @@ def simulate_household_market(
                         )
                     ) # 生成一条买单，家庭负荷。
 
-                try:
-                    product_fuel_prices = fuel_prices[delivery_start]
-                except KeyError as exc:
-                    raise InputValidationError(
-                        f"fuel_prices_df.csv 中缺少 {format_timestamp(delivery_start)} 时刻的燃料价格。") from exc
+                product_fuel_prices = fuel_prices[delivery_start]
                     
                 offers: list[SupplyOffer] = []
                 for plant in plants:
@@ -188,35 +173,19 @@ def simulate_household_market(
                 result = clear_pay_as_bid(demand_bids, offers)
                 opening_results.append(replace(result, opening_time=opening.opening_time))
 
-            results_by_start = {result.delivery_start: result for result in opening_results}
+            purchases = _household_purchases(opening_results)
             for household in households:
-                accepted_grid_energy: dict[datetime, float] = {}
-                for delivery_start, _ in opening.products:
-                    # 获取当前交付时段的出清结果。
-                    product_result = results_by_start[delivery_start]
-                    cleared_bid = None
-                    for cleared in product_result.demand_bids:
-                        bid = cleared.bid
-                        # 跳过其他参与者的买单。
-                        if bid.unit_name != household.name:
-                            continue
-                        # 只查找居民负荷买单。
-                        if bid.demand_type != "household_load":
-                            continue
-                        # 找到第一条匹配的买单后，结束查找。
-                        cleared_bid = cleared
-                        break
-                    if cleared_bid is None:
-                        accepted_grid_energy[delivery_start] = 0.0
-                    else:
-                        accepted_grid_energy[delivery_start] = cleared_bid.accepted_energy_mwh
-                    # 提取当前家庭在每个交付时段实际买到的电量
-                    
+                accepted_grid_energy = {
+                    start: purchases.get((household.name, start), (0.0, 0.0))[0]
+                    for start, _ in opening.products
+                }
+
                 dispatch = dispatch_household(
                     household,
                     plans_by_household[household.name], # 购电、充放点计划
                     accepted_grid_energy,
                     household_energy[household.name], # 取出当前家庭电池已经储存的电量
+                    grid_power_bounds_mw=bounds_by_household[household.name],
                     initial_heat_pump_power_mw=household_heat_pump_power[household.name],
                     initial_battery_charge_power_mw=household_charge_power[household.name],
                     initial_battery_discharge_power_mw=household_discharge_power[household.name],
@@ -238,10 +207,9 @@ def simulate_household_market(
                     ].battery_discharge_power_mw
 
             market_results.extend(opening_results)
-            cleared_products.update(opening.products)
-        return market_results, household_results, household_flexibility_results
+        return market_results, household_results
 
-    market_results, household_results, household_flexibility_results = run_openings(
+    market_results, household_results = run_openings(
         households, evaluate_flexibility=True)
     # 基准方案：电池不参与运行，充放电功率上限和自放电率均设为 0，储能量保持初始值；
     # 其余输入和流程完全相同。保留自放电会使储能量低于最低 SOC 而又无法充电，导致求解不可行。
@@ -255,28 +223,19 @@ def simulate_household_market(
         )
         for household in households
     )
-    baseline_market_results, baseline_household_results, _ = run_openings(
+    baseline_market_results, baseline_household_results = run_openings(
         baseline_households, evaluate_flexibility=False)
 
     return SimulationResult(
         settings=settings,
         market_results=tuple(
             sorted(market_results, key=lambda result: result.delivery_start)),
-        household_results=tuple(
-            sorted(household_results,
-                key=lambda result: (result.delivery_start, result.unit_name),)),
-        household_flexibility_results=tuple(
-            sorted(household_flexibility_results,
-                key=lambda result: (result.delivery_start, result.unit_name),)),
-        household_cost_results=tuple(
-            sorted(
-                household_cost_results(
-                    household_results,
-                    market_results,
-                    baseline_household_results,
-                    baseline_market_results,
-                ),
-                key=lambda result: (result.delivery_start, result.unit_name),)),
+        household_results=tuple(sorted(
+            _household_results(
+                household_results, market_results, baseline_household_results, baseline_market_results,
+            ),
+            key=lambda result: (result.dispatch.plan.delivery_start, result.dispatch.plan.unit_name),
+        )),
     )
 
 
@@ -293,12 +252,12 @@ def _household_purchases(
     return purchases
 
 
-def household_cost_results(
+def _household_results(
     household_results: list[HouseholdDispatchResult],
     market_results: list[MarketClearingResult],
     baseline_household_results: list[HouseholdDispatchResult],
     baseline_market_results: list[MarketClearingResult],
-) -> tuple[HouseholdCostResult, ...]:
+) -> tuple[HouseholdResult, ...]:
     """对比优化方案与基准方案每个产品的实际支付，以及按预测电价的计划节省，
     并保留基准方案的缺供量和 SOC，用于检查两者是否提供了同等服务。
 
@@ -308,32 +267,23 @@ def household_cost_results(
     purchases = _household_purchases(market_results)
     baseline_purchases = _household_purchases(baseline_market_results)
     baseline_dispatch = {
-        (result.unit_name, result.delivery_start): result
+        (result.plan.unit_name, result.plan.delivery_start): result
         for result in baseline_household_results
     }
-    costs: list[HouseholdCostResult] = []
+    results: list[HouseholdResult] = []
     for result in household_results:
-        key = (result.unit_name, result.delivery_start)
-        duration_hours = hours_between(result.delivery_start, result.delivery_end)
+        key = (result.plan.unit_name, result.plan.delivery_start)
         energy, payment = purchases.get(key, (0.0, 0.0))
         baseline_energy, baseline_payment = baseline_purchases.get(key, (0.0, 0.0))
         baseline = baseline_dispatch[key]
-        planned_shift_mwh = (
-            baseline.planned_grid_power_mw - result.planned_grid_power_mw) * duration_hours
-        costs.append(
-            HouseholdCostResult(
-                delivery_start=result.delivery_start,
-                delivery_end=result.delivery_end,
-                unit_name=result.unit_name,
+        results.append(
+            HouseholdResult(
+                dispatch=result,
+                baseline=baseline,
                 accepted_grid_energy_mwh=energy,
                 payment_eur=payment,
                 baseline_grid_energy_mwh=baseline_energy,
                 baseline_payment_eur=baseline_payment,
-                forecast_saving_eur=(
-                    result.forecast_price_eur_per_mwh * planned_shift_mwh),
-                baseline_unmet_electricity_mwh=baseline.unmet_electricity_mwh,
-                baseline_unmet_heat_mwh_th=baseline.unmet_heat_mwh_th,
-                baseline_soc_after=baseline.soc_after,
             )
         )
-    return tuple(costs)
+    return tuple(results)

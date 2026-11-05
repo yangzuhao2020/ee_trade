@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from .models import DemandBid, PowerPlant, StorageUnit, SupplyOffer
 from .utils import hours_between
@@ -20,28 +20,6 @@ class PlantRuntimeState:
     """
 
     is_running: bool
-    elapsed_periods: int = 0
-    operating_periods: int = 0
-
-    @classmethod
-    def initially_off(cls) -> PlantRuntimeState:
-        return cls(is_running=False)
-
-    @property
-    def average_operating_time(self) -> float:
-        """V2 中历史运行时段占总时段的比例，而非连续运行时长。"""
-
-        if self.elapsed_periods == 0:
-            return 0.0
-        return self.operating_periods / self.elapsed_periods
-
-    def record_dispatch(self, accepted_power_mw: float) -> None:
-        """在对应交付时段结束后更新运行状态。"""
-
-        self.elapsed_periods += 1
-        self.is_running = accepted_power_mw > _POWER_TOLERANCE_MW
-        if self.is_running:
-            self.operating_periods += 1
 
 
 @dataclass
@@ -53,38 +31,21 @@ class StorageRuntimeState:
 
     energy_mwh: float
 
-    @classmethod
-    def from_initial_soc(cls, storage: StorageUnit) -> StorageRuntimeState:
-        return cls(energy_mwh=storage.initial_energy_mwh)
-
-    def energy_after_dispatch(
-        self,
-        storage: StorageUnit,
-        accepted_charge_mwh: float,
-        accepted_discharge_mwh: float,
-        duration_hours: float = 1.0,
-    ) -> float:
-        """根据电网侧成交的充放电量，计算下一时刻的内部储能量。"""
-
-        return (
-            self.energy_mwh
-            + storage.natural_inflow_mw * duration_hours
-            + accepted_charge_mwh * storage.efficiency_charge
-            - accepted_discharge_mwh / storage.efficiency_discharge
-        )
-
     def record_dispatch(
         self,
         storage: StorageUnit,
         accepted_charge_mwh: float,
         accepted_discharge_mwh: float,
-        duration_hours: float = 1.0,
+        duration_hours: float,
     ) -> tuple[float, float]:
         """执行一个已交付产品的调度，并返回调度前后的储能量。"""
 
         before = self.energy_mwh
-        after = self.energy_after_dispatch(
-            storage, accepted_charge_mwh, accepted_discharge_mwh, duration_hours
+        after = (
+            before
+            + storage.natural_inflow_mw * duration_hours
+            + accepted_charge_mwh * storage.efficiency_charge
+            - accepted_discharge_mwh / storage.efficiency_discharge
         )
         tolerance = 1e-7
         if after < storage.min_energy_mwh - tolerance:
@@ -126,16 +87,11 @@ def storage_heuristic_orders(
             storage.max_energy_mwh,
             reference_energy + storage.natural_inflow_mw * duration_hours,
         )
-        window_times = [
-            delivery_start + timedelta(hours=offset)
-            for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1)
-            if forecast_start
-            <= delivery_start + timedelta(hours=offset)
-            <= forecast_end
-        ]
-        window = [
-            price_forecast[time] for time in window_times if time in price_forecast
-        ]
+        window = []
+        for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1):
+            time = delivery_start + timedelta(hours=offset)
+            if forecast_start <= time <= forecast_end and time in price_forecast:
+                window.append(price_forecast[time])
         average_price = sum(window) / len(window)
         current_price = price_forecast[delivery_start]
         timestamp = delivery_start.isoformat()
@@ -158,17 +114,13 @@ def storage_heuristic_orders(
                         delivery_end=delivery_end,
                         volume_mwh=charge_energy_mwh,
                         price_eur_per_mwh=bid_price,
-                        bid_type="storage_charge",
+                        demand_type="storage_charge",
                         bid_id=f"{storage.name}::charge::{timestamp}",
                     )
                 )
-                reference_energy += (
-                    charge_energy_mwh * storage.efficiency_charge
-                )
+                reference_energy += charge_energy_mwh * storage.efficiency_charge
         elif current_price > average_price:
-            available_internal_mwh = max(
-                0.0, reference_energy - storage.min_energy_mwh
-            )
+            available_internal_mwh = reference_energy - storage.min_energy_mwh
             discharge_energy_mwh = min(
                 storage.max_power_discharge_mw * duration_hours,
                 available_internal_mwh * storage.efficiency_discharge,
@@ -185,21 +137,16 @@ def storage_heuristic_orders(
                         technology=storage.technology,
                         delivery_start=delivery_start,
                         delivery_end=delivery_end,
-                        offered_power_mw=discharge_energy_mwh / duration_hours,
                         offered_energy_mwh=discharge_energy_mwh,
                         bid_price_eur_per_mwh=bid_price,
-                        marginal_cost_eur_per_mwh=(
-                            storage.additional_cost_discharge_eur_per_mwh
-                        ),
+                        marginal_cost_eur_per_mwh=storage.additional_cost_discharge_eur_per_mwh,
                         offer_type="storage_discharge",
                         offer_id=identifier,
                         offer_segment="storage_discharge",
                         bid_id=identifier,
                     )
                 )
-                reference_energy -= (
-                    discharge_energy_mwh / storage.efficiency_discharge
-                )
+                reference_energy -= discharge_energy_mwh / storage.efficiency_discharge
 
     return charge_bids, discharge_offers
 
@@ -232,7 +179,6 @@ def naive_offer(
         technology=plant.technology,
         delivery_start=delivery_start,
         delivery_end=delivery_end,
-        offered_power_mw=available_power,
         offered_energy_mwh=available_power * duration_hours,
         bid_price_eur_per_mwh=(
             plant.bid_price_eur_per_mwh
@@ -267,7 +213,6 @@ def segment_supply_offers(
                 technology=plant.technology,
                 delivery_start=delivery_start,
                 delivery_end=delivery_end,
-                offered_power_mw=power_mw,
                 offered_energy_mwh=power_mw * duration_hours,
                 bid_price_eur_per_mwh=price,
                 marginal_cost_eur_per_mwh=marginal_cost,
@@ -279,7 +224,7 @@ def segment_supply_offers(
     return offers
 
 
-def heuristic_flexible_offers(
+def heuristic_segment_specs(
     plant: PowerPlant,
     state: PlantRuntimeState,
     delivery_start: datetime,
@@ -287,8 +232,8 @@ def heuristic_flexible_offers(
     available_power: float,
     marginal_cost: float,
     price_forecast: dict[datetime, float],
-) -> list[SupplyOffer]:
-    """将符合条件的机组拆分为 V2 的非灵活出力段和灵活出力段报价。
+) -> list[tuple[str, float, float]]:
+    """计算机组各出力段的名称、功率和报价。
     灵活出力段始终按边际成本报价。停机机组将启动成本分摊到最低稳定出力段。
     对于运行中的机组，若指定的 13 个时间点的预测表明维持运行的未来价值
     非负，则该出力段可以按零价格报价。仿真（时段）边界处可用的预测不足
@@ -304,37 +249,28 @@ def heuristic_flexible_offers(
     inflexible_power = plant.min_power_mw
     flexible_power = available_power - inflexible_power
 
-    if inflexible_power > _POWER_TOLERANCE_MW and state.is_running:
-        future_prices = [
-            price_forecast[delivery_start + timedelta(hours=hour)]
-            for hour in range(_FORECAST_HOURS + 1)
-            if delivery_start + timedelta(hours=hour) in price_forecast
-        ]
-        future_expected_profit = sum(price - marginal_cost for price in future_prices)
-        # 简单预测未来是否盈利。
-        current_forecast = future_prices[0]
-        inflexible_price = (
-            0.0
-            if current_forecast < marginal_cost and future_expected_profit >= 0.0
-            else marginal_cost
-        ) # 机组已经处于运行状态时，最低稳定出力段 inflexible 应该报多少钱。
-    elif inflexible_power > _POWER_TOLERANCE_MW:
-        expected_operating_time = max(
-            state.average_operating_time,
-            plant.min_operating_time_hours,
-            duration_hours,
-        )
-        inflexible_price = marginal_cost + plant.start_cost_eur / (
-            expected_operating_time * inflexible_power
-        )
-
     segment_specs = []
     if inflexible_power > _POWER_TOLERANCE_MW:
+        if state.is_running:
+            future_expected_profit = sum(
+                price_forecast[delivery_start + timedelta(hours=hour)] - marginal_cost
+                for hour in range(_FORECAST_HOURS + 1)
+                if delivery_start + timedelta(hours=hour) in price_forecast
+            )
+            inflexible_price = (
+                0.0
+                if price_forecast[delivery_start] < marginal_cost
+                and future_expected_profit >= 0.0
+                else marginal_cost
+            )
+        else:
+            expected_operating_time = max(plant.min_operating_time_hours, duration_hours)
+            inflexible_price = marginal_cost + plant.start_cost_eur / (
+                expected_operating_time * inflexible_power
+            )
         segment_specs.append(("inflexible", inflexible_power, inflexible_price))
     segment_specs.append(("flexible", flexible_power, marginal_cost))
-    return segment_supply_offers(
-        plant, delivery_start, delivery_end, segment_specs, marginal_cost
-    )
+    return segment_specs
 
 
 def heuristic_block_offers(
@@ -353,10 +289,10 @@ def heuristic_block_offers(
     为同一次日前开市的所有产品定价。
     """
 
-    inflexible_legs: list[SupplyOffer] = []
-    flexible_legs: list[SupplyOffer] = []
+    inflexible_legs = []
+    flexible_legs = []
     for delivery_start, delivery_end in products:
-        hourly = heuristic_flexible_offers(
+        segments = heuristic_segment_specs(
             plant,
             state,
             delivery_start,
@@ -365,45 +301,47 @@ def heuristic_block_offers(
             marginal_cost,
             price_forecast,
         )
-        for offer in hourly:
-            if offer.offer_segment == "inflexible":
-                inflexible_legs.append(offer)
-            else:
-                flexible_legs.append(offer)
+        for segment, power_mw, price in segments:
+            if power_mw <= _POWER_TOLERANCE_MW:
+                continue
+            legs = inflexible_legs if segment == "inflexible" else flexible_legs
+            energy = power_mw * hours_between(delivery_start, delivery_end)
+            legs.append((delivery_start, delivery_end, energy, price))
 
     opening_id = opening_time.isoformat()
     parent_bid_id = f"{plant.name}::BB::{opening_id}"
-    has_parent = bool(inflexible_legs)
     offers: list[SupplyOffer] = []
-    if has_parent:
-        total_energy = sum(leg.offered_energy_mwh for leg in inflexible_legs)
+    if inflexible_legs:
         block_price = sum(
-            leg.bid_price_eur_per_mwh * leg.offered_energy_mwh
-            for leg in inflexible_legs
-        ) / total_energy
-        offers.extend(
-            replace(
-                leg,
-                offer_id=f"{parent_bid_id}::{leg.delivery_start.isoformat()}",
-                bid_id=parent_bid_id,
-                bid_type="BB",
-                min_acceptance_ratio=1.0,
-                bid_price_eur_per_mwh=block_price,
-                offer_segment="block_inflexible",
+            price * energy for _, _, energy, price in inflexible_legs
+        ) / sum(energy for _, _, energy, _ in inflexible_legs)
+    child_type, child_parent_id, child_segment = (
+        ("LB", parent_bid_id, "linked_flexible") if linked and inflexible_legs else ("SB", None, "flexible")
+    )
+    for legs, bid_type, segment, parent in (
+        (inflexible_legs, "BB", "block_inflexible", None),
+        (flexible_legs, child_type, child_segment, child_parent_id),
+    ):
+        is_block = bid_type == "BB"
+        for delivery_start, delivery_end, energy, price in legs:
+            timestamp = delivery_start.isoformat()
+            bid_id = parent_bid_id if is_block else f"{plant.name}::{bid_type}::{opening_id}::{timestamp}"
+            offer_id = f"{bid_id}::{timestamp}" if is_block else bid_id
+            offers.append(
+                SupplyOffer(
+                    unit_name=plant.name,
+                    operator=plant.operator,
+                    technology=plant.technology,
+                    delivery_start=delivery_start,
+                    delivery_end=delivery_end,
+                    offered_energy_mwh=energy,
+                    bid_price_eur_per_mwh=block_price if is_block else price,
+                    marginal_cost_eur_per_mwh=marginal_cost,
+                    offer_id=offer_id,
+                    offer_segment=segment,
+                    bid_id=bid_id,
+                    bid_type=bid_type,
+                    parent_bid_id=parent,
+                )
             )
-            for leg in inflexible_legs
-        )
-
-    for leg in flexible_legs:
-        child_id = f"{plant.name}::{'LB' if linked and has_parent else 'SB'}::{opening_id}::{leg.delivery_start.isoformat()}"
-        offers.append(
-            replace(
-                leg,
-                offer_id=child_id,
-                bid_id=child_id,
-                bid_type="LB" if linked and has_parent else "SB",
-                parent_bid_id=parent_bid_id if linked and has_parent else None,
-                offer_segment="linked_flexible" if linked and has_parent else "flexible",
-            )
-        )
     return offers

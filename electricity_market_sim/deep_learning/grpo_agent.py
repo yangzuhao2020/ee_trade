@@ -28,6 +28,9 @@ class GaussianActor(nn.Module):
     def distribution(self, states):
         return Normal(self.mean(states), self.log_std.exp())
 
+    def forward(self, states):
+        return F.softsign(self.mean(states))
+
 
 def action_log_prob(distribution, latent):
     # Softsign 的导数为 (1 + |z|)^-2；二维动作使用联合概率。
@@ -75,7 +78,7 @@ def _collect_trajectory(policy, rng, runner, device):
             )))
             return tuple(chosen.cpu().tolist())
 
-    result = runner.run_episode(action)
+    result = runner(action)
     transitions = result.learning_transitions
     fields = [torch.stack(values) for values in zip(*samples)]
     can_bid = [
@@ -89,17 +92,14 @@ def _collect_trajectory(policy, rng, runner, device):
     ), result
 
 
-def collect_group(agent, runner, on_episode=None):
-    """同一旧策略运行完整组；仅返回训练张量和回合指标所需结果。"""
-    trajectories, results = [], []
+def collect_group(agent, runner, on_episode):
+    """同一旧策略运行完整组，通过回调处理回合结果，只返回训练张量。"""
+    trajectories = []
     for _ in range(agent.config.group_size):
         trajectory, result = _collect_trajectory(agent.actor, agent.rng, runner, agent.device)
         trajectories.append(trajectory)
-        if on_episode is None:
-            results.append(result)
-        else:
-            on_episode(result)
-    return GroupBatch(*(torch.stack(values) for values in zip(*trajectories))), results
+        on_episode(result)
+    return GroupBatch(*(torch.stack(values) for values in zip(*trajectories)))
 
 
 class GRPOAgent:
@@ -122,7 +122,7 @@ class GRPOAgent:
     def deterministic_action(self, state):
         with torch.no_grad():
             observation = torch.tensor(state, dtype=torch.float32, device=self.device)
-            return tuple(F.softsign(self.actor.mean(observation)).cpu().tolist())
+            return tuple(self.actor(observation).cpu().tolist())
 
     def update(self, batch: GroupBatch):
         cfg = self.config
@@ -199,9 +199,6 @@ class GRPOAgent:
         temporary.replace(path)
 
     def load_checkpoint(self, path: Path):
-        payload = _read_checkpoint_payload(path, self.device, algorithm="grpo")
-        if (payload["periods"] != _periods_payload(self.config)
-                or payload["max_bid_price"] != self.config.max_bid_price):
-            raise InputValidationError("GRPO checkpoint periods or max_bid_price differ from config.")
+        payload = _read_checkpoint_payload(path, self.device, self.config, algorithm="grpo")
         self.actor.load_state_dict(payload["actor"])
         return payload

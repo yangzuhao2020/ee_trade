@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from datetime import datetime, timedelta
 from ...bidding import available_power_mw, naive_offer
 from ...clearing_algorithm import clear_pay_as_clear
-from ...models import ExchangeSchedule, ExchangeUnit, MarketOpening, MarketSettings, PowerPlant
+from ...models import ExchangeUnit, MarketOpening, MarketSettings, PowerPlant
 from ...utils import format_timestamp
 from .demand import _demand_bids_for_product, _exchange_import_offer
 
@@ -13,7 +13,6 @@ _FORECAST_HOURS = 12
 
 def _naive_price_forecasts(
     *,
-    products: list[tuple[datetime, datetime]],
     settings: MarketSettings,
     plants: tuple[PowerPlant, ...],
     marginal_costs: dict[str, float],
@@ -21,8 +20,8 @@ def _naive_price_forecasts(
     demand_units,
     demand_profiles: dict[str, dict[datetime, float]],
     exchange_unit: ExchangeUnit | None,
-    exchange_profiles: dict[datetime, ExchangeSchedule],
-    forecast_starts: set[datetime] | None = None,
+    exchange_profiles: dict[datetime, tuple[float, float]],
+    forecast_starts: set[datetime],
 ) -> dict[datetime, float]:
     """按边际成本报价模拟出清，为机组和储能策略提供朴素 EOM 电价预测。
     使用刚性负荷、机组可用容量及进出口计划，逐时段按 pay_as_clear 出清，
@@ -30,18 +29,11 @@ def _naive_price_forecasts(
     电价为成交卖单的最高报价，无成交时为 0.0。
     """
 
-    if forecast_starts is None:
-        # 默认预测各产品起点及其后 12 小时的逐小时电价，并去重。
-        forecast_starts = {
-            delivery_start + timedelta(hours=hour)
-            for delivery_start, _ in products
-            for hour in range(_FORECAST_HOURS + 1)
-        }
     prices: dict[datetime, float] = {}
     for delivery_start in sorted(forecast_starts):
         delivery_end = delivery_start + settings.product_duration
         # 刚性负荷按市场最高报价买电；启用电力交换时加入出口需求。
-        demand_bids, exchange_schedule = _demand_bids_for_product(
+        demand_bids = _demand_bids_for_product(
             demand_units=demand_units,
             demand_profiles=demand_profiles,
             exchange_unit=exchange_unit,
@@ -66,10 +58,10 @@ def _naive_price_forecasts(
                     marginal_costs[plant.name],
                 )
             )
-        if exchange_unit is not None and exchange_schedule is not None:
+        if exchange_unit is not None:
             # 将计划进口加入供给。
             import_offer = _exchange_import_offer(
-                exchange_unit, exchange_schedule, delivery_start, delivery_end)
+                exchange_unit, exchange_profiles[delivery_start], delivery_start, delivery_end)
             offers.append(import_offer)
             
         clearing_result = clear_pay_as_clear(demand_bids, offers)
@@ -82,13 +74,12 @@ def _forecast_starts(
     *,
     settings: MarketSettings,
     requires_price_forecast: bool = False,
-    extra_forecast_offsets: tuple[int, ...] = (),
     requires_storage_price_forecast: bool = False,
     hard_forecast_horizon: bool = False,
 ) -> set[datetime]:
     """返回各个已启用的策略类别为给定交付时段所需的预测时间点。
-    机组需要从交付开始时刻起共 _FORECAST_HOURS + 1 个小时的预测。扩展模块显式
-    声明各自所需的时间偏移；储能额外需要以交付时刻为中心的对称窗口，并截取在
+    机组需要从交付开始时刻起共 _FORECAST_HOURS + 1 个小时的预测。
+    储能额外需要以交付时刻为中心的对称窗口，并截取在
     仿真时间范围内。hard_forecast_horizon 为 True 时（如学习时段），所有窗口
     进一步截取在 settings.end 之前，不向时段边界外读取真实数据。
     """
@@ -100,10 +91,6 @@ def _forecast_starts(
                 delivery_start + timedelta(hours=offset)
                 for offset in range(_FORECAST_HOURS + 1)
             )
-        starts.update(
-            delivery_start + timedelta(hours=offset)
-            for offset in extra_forecast_offsets
-        )
         if requires_storage_price_forecast:
             for offset in range(-_FORECAST_HOURS, _FORECAST_HOURS + 1):
                 forecast_start = delivery_start + timedelta(hours=offset)
@@ -113,12 +100,6 @@ def _forecast_starts(
         starts = {start for start in starts if start < settings.end}
     return starts
 
-def _missing_profile_times(
-    profile: dict[datetime, object] | None, required_times: set[datetime]
-) -> list[datetime]:
-    return sorted(
-        time for time in required_times if profile is None or time not in profile
-    )
 
 def _opening_coverage_issues(
     *,
@@ -129,14 +110,12 @@ def _opening_coverage_issues(
     demand_profiles: dict[str, dict[datetime, float]],
     availability_profiles: dict[str, dict[datetime, float]],
     exchange_unit: ExchangeUnit | None,
-    exchange_profiles: dict[datetime, ExchangeSchedule],
+    exchange_profiles: dict[datetime, tuple[float, float]],
     requires_price_forecast: bool,
-    required_data_offsets: tuple[int, ...] = (),
-    price_forecast_offsets: tuple[int, ...] = (),
     requires_storage_price_forecast: bool = False,
     hard_forecast_horizon: bool = False,
 ) -> list[str]:
-    """检查交付、未来输入和电价预测所需的数据；输入窗口不隐含电价预测需求。"""
+    """检查交付及机组、储能价格预测所需的数据。"""
 
     issues: list[str] = []
     delivery_times = {delivery_start for delivery_start, _ in opening.products}
@@ -156,7 +135,6 @@ def _opening_coverage_issues(
         delivery_times,
         settings=settings,
         requires_price_forecast=requires_price_forecast,
-        extra_forecast_offsets=required_data_offsets + price_forecast_offsets,
         requires_storage_price_forecast=requires_storage_price_forecast,
         hard_forecast_horizon=hard_forecast_horizon,
     )
@@ -177,18 +155,14 @@ def _opening_coverage_issues(
     for demand_unit in demand_units:
         if demand_unit.is_elastic:
             continue
-        missing = _missing_profile_times(
-            demand_profiles.get(demand_unit.name), required_times
-        )
+        missing = sorted(required_times - demand_profiles[demand_unit.name].keys())
         add_missing_issue(f"demand_df.csv/{demand_unit.name}", missing)
     for plant in plants:
         if plant.name not in availability_profiles:
             continue
-        missing = _missing_profile_times(
-            availability_profiles[plant.name], required_times
-        )
+        missing = sorted(required_times - availability_profiles[plant.name].keys())
         add_missing_issue(f"availability_df.csv/{plant.name}", missing)
     if exchange_unit is not None:
-        missing = _missing_profile_times(exchange_profiles, required_times)
+        missing = sorted(required_times - exchange_profiles.keys())
         add_missing_issue("exchanges_df.csv", missing)
     return issues

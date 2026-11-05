@@ -102,7 +102,7 @@ def _plot_operator_profit(
                 continue
             profits[cleared.offer.operator] += cleared.profit_eur
     for storage in storage_results:
-        profits[storage.operator] += storage.net_cash_flow_eur
+        profits[storage.unit.operator] += storage.net_cash_flow_eur
 
     displayed_profits = {
         operator: value for operator, value in profits.items() if abs(value) > 1e-6
@@ -157,7 +157,7 @@ def _plot_storage_dispatch(
 
     by_unit: dict[str, list[StorageDispatchResult]] = defaultdict(list)
     for storage in storage_results:
-        by_unit[storage.unit_name].append(storage)
+        by_unit[storage.unit.name].append(storage)
     ranked_storage_names = sorted(
         by_unit,
         key=lambda name: (-sum(row.accepted_charge_mwh + row.accepted_discharge_mwh

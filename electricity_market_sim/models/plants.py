@@ -21,8 +21,6 @@ class PowerPlant:
     # 以下可选 V2 参数沿用 V2 示例的默认值。
     start_cost_eur: float = 0.0
     min_operating_time_hours: float = 1.0
-    # 为保持兼容性而加载并校验；最小停机时间约束并未实际执行。
-    min_down_time_hours: float = 1.0
     # 简单卖单的可选固定报价；不改变边际成本及利润核算。
     bid_price_eur_per_mwh: float | None = None
 

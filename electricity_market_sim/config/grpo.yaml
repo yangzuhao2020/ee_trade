@@ -1,25 +1,25 @@
 # 第六版连续报价 GRPO；training_steps 由场景按完整组设置。
 learning_config:
   algorithm: grpo
-  actor_architecture: mlp
+  actor_architecture: mlp # 策略网络结构
   device: cpu
   learning_rate: 0.0001
-  min_lr_ratio: 0.25
-  weight_decay: 0.01
-  max_grad_norm: 1.0
-  gamma: 0.99
-  max_bid_price: 100
-  group_size: 6
+  min_lr_ratio: 0.25 # 余弦衰减的最低学习率比例
+  weight_decay: 0.01 # AdamW 权重衰减系数
+  max_grad_norm: 1.0 # 梯度范数裁剪上限
+  gamma: 0.99 # 未来奖励折扣因子
+  max_bid_price: 100 # 报价映射及价格、成本归一化基数（EUR/MWh）
+  group_size: 6 # 同一旧策略每组采集的完整轨迹数
   # 每隔指定组数验证一次；最后一组始终验证，按验证总奖励选择 best.pt。
   validation_groups_interval: 5
-  # CPU 采样进程数，每个进程使用单线程；设为 1 切回串行。
+  # CPU 采样进程数上限，每进程单线程；设为 1 时串行。
   sampling_workers: 12
   # 每遍分批累积整组梯度，更新一次；整组 KL 超限后停止后续遍数。
-  update_epochs: 8 # 同一组采样数据最多用于训练 8 遍，期间不重新采样
-  minibatch_size: 2048
-  clip_epsilon: 0.2
-  target_kl: 0.02
-  initial_std: 0.2
-  min_std: 0.02
-  max_std: 1.0
-  advantage_threshold: 0.000001
+  update_epochs: 8 # 同组数据最多训练遍数，期间不重新采样
+  minibatch_size: 2048 # 每批梯度计算的样本数
+  clip_epsilon: 0.2 # 新旧策略概率比的裁剪幅度
+  target_kl: 0.02 # 新旧策略 KL 散度的早停阈值
+  initial_std: 0.2 # softsign 映射前高斯策略的初始标准差
+  min_std: 0.02 # 策略标准差下限
+  max_std: 1.0 # 策略标准差上限
+  advantage_threshold: 0.000001 # 组内同一时刻回报标准差不大于此值时跳过训练

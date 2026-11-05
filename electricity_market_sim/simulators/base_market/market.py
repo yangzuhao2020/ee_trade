@@ -1,10 +1,11 @@
 """第一、二、四、五版共用的基础市场：加载参与者、准备预测、组织出清并更新交付状态。"""
 
+from __future__ import annotations
 import warnings
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from ...bidding import PlantRuntimeState, StorageRuntimeState
+from typing import TYPE_CHECKING
+from ...bidding import PlantRuntimeState, StorageRuntimeState, storage_heuristic_orders
 from ...clearing_algorithm import (
     clear_complex_opening, clear_pay_as_clear,
     validate_demand_prices, validate_offer_prices,
@@ -17,15 +18,14 @@ from ...inputs import (
 )
 from ...models import (
     DemandBid,
-    ExchangeSchedule,
     MarketClearingResult,
     MarketOpening,
     MarketSettings,
-    StorageClearingContext,
+    StorageUnit,
     StorageDispatchResult,
 )
 from ...utils import format_timestamp, validate_fuel_coverage, validate_unique_names
-from ..eom import EomExtensionInputs, EomMarketExtension, ScheduledProductKey
+from ..eom import ScheduledProductKey
 from .demand import _demand_bids_for_product
 from .forecasts import _forecast_starts, _naive_price_forecasts, _opening_coverage_issues
 from .plants import (
@@ -34,8 +34,11 @@ from .plants import (
 )
 from .storage import (
     _project_storage_energies, _record_storage_states,
-    _storage_orders_for_opening, _validate_storage_configuration,
+    _validate_storage_configuration,
 )
+
+if TYPE_CHECKING:
+    from ...deep_learning.learning import LearningEpisodeSession
 
 _POWER_TOLERANCE_MW = 1e-9
 _FORECAST_STRATEGIES = frozenset({
@@ -53,19 +56,7 @@ class BaseMarket:
         self.input_path = input_path
         self.settings = settings
         self.openings = openings
-        self.extension: EomMarketExtension | None = None
-
-    def prepare(
-        self,
-        extension: EomMarketExtension | None = None,
-        *,
-        input_loader: Callable[["BaseMarket"], EomExtensionInputs] | None = None,
-    ) -> None:
-        """准备基础市场；独立场景可用 input_loader 提供额外输入。"""
-        if extension is not None and input_loader is not None:
-            raise ValueError("Specify either extension or input_loader, not both.")
-        input_path, settings = self.input_path, self.settings
-        self.extension = extension
+        self.learning_session: LearningEpisodeSession | None = None
         self.plants = load_powerplants(input_path / "powerplant_units.csv")
         _validate_strategy_configuration(settings, self.plants)
         self.storages = load_storage_units(input_path / "storage_units.csv")
@@ -88,21 +79,25 @@ class BaseMarket:
             input_path / "demand_df.csv", self.demand_units) # 读取需求侧的负荷预测数据。
         self.availability_profiles = load_hourly_availability_profiles(
             input_path / "availability_df.csv", self.plants) # 读取发电机组的可用性预测数据。
-        if input_loader is not None:
-            extension_inputs = input_loader(self)
-        else:
-            extension_inputs = (
-                extension.prepare(self) if extension is not None else EomExtensionInputs())
-        self.extension_inputs = extension_inputs
-        self.requires_market_price_forecast |= bool(extension_inputs.price_forecast_offsets)
-        # 只有显式电价预测需求才打开开关；未来负荷等数据窗口仅参与完整性检查。
-        self.fuel_prices = (
-            extension_inputs.fuel_prices
-            if extension_inputs.fuel_prices is not None
+
+    def prepare(
+        self,
+        *,
+        participant_names: tuple[str, ...] = (),
+        fuel_price_profiles: dict[datetime, dict[str, float]] | None = None,
+        market_price_forecasts: dict[datetime, float] | None = None,
+        learning_session: LearningEpisodeSession | None = None,
+    ) -> None:
+        """使用场景提供的额外输入，准备价格、开市安排和设备运行状态。"""
+        input_path, settings = self.input_path, self.settings
+        self.learning_session = learning_session
+        fuel_prices = (
+            next(iter(fuel_price_profiles.values()))
+            if fuel_price_profiles is not None
             else load_fuel_prices(input_path / "fuel_prices_df.csv")
-        ) # 读取燃料价格数据，优先使用扩展模块提供的燃料价格。
-        self.fuel_price_profiles = extension_inputs.fuel_price_profiles
-        validate_fuel_coverage(self.plants, self.fuel_prices)
+        )
+        self.fuel_price_profiles = fuel_price_profiles
+        validate_fuel_coverage(self.plants, fuel_prices)
 
         # 外部电力交换初始化说明：
         # 1. 仅在配置 exchange_units_file 时启用；未配置时，交换单元为 None，时序数据为空字典。
@@ -112,17 +107,17 @@ class BaseMarket:
         self.exchange_unit = None
         if settings.exchange_units_file is not None:
             self.exchange_unit = load_exchange_unit(input_path / settings.exchange_units_file)
-        participant_names = [
+        all_participant_names = [
             *(plant.name for plant in self.plants),
             *(storage.name for storage in self.storages),
             *(unit.name for unit in self.demand_units),
-            *extension_inputs.participant_names,
+            *participant_names,
         ]
         if self.exchange_unit is not None:
-            participant_names.append(self.exchange_unit.name)
-        validate_unique_names(participant_names, "all market units")
+            all_participant_names.append(self.exchange_unit.name)
+        validate_unique_names(all_participant_names, "all market units")
 
-        self.exchange_profiles: dict[datetime, ExchangeSchedule] = {}
+        self.exchange_profiles: dict[datetime, tuple[float, float]] = {}
         if self.exchange_unit is not None:
             for label, price in (
                 ("import", self.exchange_unit.price_import_eur_per_mwh),
@@ -137,23 +132,21 @@ class BaseMarket:
             )
         # 4. 分别检查进口和出口报价是否位于市场最低、最高报价之间（含边界）；价格越界时报错。
         # 5. 从 exchanges_df.csv 读取“参与者名称_import”和“参与者名称_export”列，功率必须非负。
-        #    每小时的可用样本取等权平均，保存为“小时起点 -> ExchangeSchedule”的映射，功率单位为 MW。
+        #    每小时的可用样本取等权平均，保存为“小时起点 -> tuple[float, float]”的映射，功率单位为 MW。
         # 6. 后续生成订单时，进口电力作为本地市场的供给卖单，出口电力作为本地市场的需求买单。
 
         self.marginal_costs = {
-            plant.name: plant.marginal_cost(self.fuel_prices) for plant in self.plants
-        }
+            plant.name: plant.marginal_cost(fuel_prices) for plant in self.plants
+        } if fuel_price_profiles is None else {}
         self._validate_marginal_costs()
-        self._prepare_openings_and_forecasts()
+        self._prepare_openings_and_forecasts(market_price_forecasts)
         self.runtime_states = {
-            plant.name: PlantRuntimeState.initially_off() for plant in self.runtime_plants
+            plant.name: PlantRuntimeState(is_running=False) for plant in self.runtime_plants
         }
         self.storage_states = {
-            storage.name: StorageRuntimeState.from_initial_soc(storage)
+            storage.name: StorageRuntimeState(energy_mwh=storage.initial_energy_mwh)
             for storage in self.storages
         }
-        if extension is not None:
-            extension.initialize(self)
 
     def _validate_marginal_costs(self) -> None:
         """检查各机组的边际成本是否处于市场报价上下限内（含边界），单位为 EUR/MWh。
@@ -189,19 +182,21 @@ class BaseMarket:
                         f"({marginal_cost:.6f} EUR/MWh) is outside the configured bid-price limits."
                     )
 
-    def _prepare_openings_and_forecasts(self) -> None:
-        """筛选可用的开市，并准备机组、储能及扩展报价策略所需的电价预测。
+    def _prepare_openings_and_forecasts(
+        self, market_price_forecasts: dict[datetime, float] | None,
+    ) -> None:
+        """筛选可用的开市，并准备机组和储能所需的电价预测。
         检查各开市的交付时段是否越界，以及交付和预测窗口所需的数据是否齐全。
-        发现问题时，按扩展配置选择抛出 InputValidationError，或发出警告并跳过该次开市。
+        发现问题时，学习场景抛出 InputValidationError，其余场景警告并跳过该次开市。
         将通过检查的开市保存到 self.valid_openings，保持原有顺序。
         需要电价预测时，优先使用扩展提供的预测，否则根据有效开市生成朴素出清价格预测。
         预测保存为“时段开始时间 -> 电价（EUR/MWh）”的 self.price_forecasts；无需预测时为空字典。
         """
-        inputs, settings = self.extension_inputs, self.settings
+        settings = self.settings
         valid_openings = []
         for opening in self.openings:
             # 检查产品交付范围、刚性负荷、已提供的机组可用率及启用的电力交换数据。
-            # 检查时间还包含机组、储能和扩展策略所需的预测窗口；issues 列出发现的问题。
+            # 检查时间还包含机组和储能所需的预测窗口；issues 列出发现的问题。
             issues = _opening_coverage_issues(
                 opening=opening,
                 settings=settings,
@@ -212,16 +207,13 @@ class BaseMarket:
                 exchange_unit=self.exchange_unit,
                 exchange_profiles=self.exchange_profiles,
                 requires_price_forecast=self.requires_price_forecast,
-                required_data_offsets=inputs.required_data_offsets,
-                price_forecast_offsets=inputs.price_forecast_offsets,
                 requires_storage_price_forecast=self.requires_storage_price_forecast,
-                hard_forecast_horizon=inputs.hard_forecast_horizon,
+                hard_forecast_horizon=self.learning_session is not None,
             )
             if issues:
-                if inputs.incomplete_opening_error is not None:
-                    # 扩展要求数据完整时立即报错，用指定的说明及问题列表解释原因。
+                if self.learning_session is not None:
                     raise InputValidationError(
-                        f"{inputs.incomplete_opening_error} {format_timestamp(opening.opening_time)} is incomplete: "
+                        f"Learning opening {format_timestamp(opening.opening_time)} is incomplete: "
                         + "; ".join(issues)
                     )
                 # 默认发出警告后跳过该次开市；stacklevel=2 将警告位置指向本函数的调用处。
@@ -237,23 +229,21 @@ class BaseMarket:
         # 没有策略需要电价预测时，保留空字典。
         self.price_forecasts: dict[datetime, float] = {}
         if self.requires_market_price_forecast:
-            if inputs.market_price_forecasts is not None:
+            if market_price_forecasts is not None:
                 # 优先直接使用扩展模块提供的预测，不在这里重新计算。
-                self.price_forecasts = inputs.market_price_forecasts
+                self.price_forecasts = market_price_forecasts
             else:
-                # 根据有效产品的交付开始时间，汇总机组、储能及扩展策略所需的预测时间点并去重。
+                # 根据有效产品的交付开始时间，汇总机组和储能所需的预测时间点并去重。
                 forecast_starts = _forecast_starts(
                     (start for opening in valid_openings for start, _ in opening.products),
                     settings=settings,
                     requires_price_forecast=self.requires_price_forecast,
-                    extra_forecast_offsets=inputs.price_forecast_offsets,
                     requires_storage_price_forecast=self.requires_storage_price_forecast,
-                    hard_forecast_horizon=inputs.hard_forecast_horizon,
+                    hard_forecast_horizon=self.learning_session is not None,
                 )
                 # 用机组边际成本和可用出力生成朴素卖单，结合刚性负荷及电力交换，
                 # 在所需时段按统一出清价机制模拟出清，将出清电价作为预测值。
                 self.price_forecasts = _naive_price_forecasts(
-                    products=[product for opening in valid_openings for product in opening.products],
                     settings=settings,
                     plants=self.plants,
                     marginal_costs=self.marginal_costs,
@@ -271,17 +261,13 @@ class BaseMarket:
                       additional_demand_bids: tuple[DemandBid, ...] = (),
                       ) -> tuple[MarketClearingResult, ...]:
         """根据开市时已知的机组运行状态、预计储能电量和预测数据，为本次开市的各产品生成报价。
-        汇总需求买单和供给卖单（含外部电力交换、储能及扩展报价），检查报价是否符合价格规则，
+        汇总需求买单和供给卖单（含外部电力交换、储能及学习报价），检查报价是否符合价格规则，
         additional_demand_bids 接收场景已生成的额外买单。
         再按配置的市场机制逐产品出清或联合出清，返回各产品的市场出清结果元组。
         """
         # 对本次开市的全部产品组织报价并出清，返回各产品的 MarketClearingResult 元组。
-        # opening 指定开市时间及交付时段；scheduled_results 保存此前已出清的产品结果。
+        # opening 指定开市时间及交付时段；scheduled_results 保存已出清但尚未结束交付的结果。
         settings = self.settings
-        # 合并扩展模块的需求报价；独立场景的额外订单通过参数传入。
-        extension_demand_bids = (
-            self.extension.bids_for_products(opening.products, scheduled_results)
-            if self.extension is not None else ())
         # 以当前已记录的储能电量为基础，计入首个产品开始交付前会结束的已成交充放电等影响。
         # 得到各储能单元在首个交付时段开始时的预计电量（MWh），供储能报价使用。
         # 此处仅预测电量，实际储能状态由交付结束事件更新。
@@ -293,9 +279,8 @@ class BaseMarket:
         )
 
         all_demand_bids: list[DemandBid] = []
-        exchange_schedules: dict[datetime, ExchangeSchedule | None] = {}
         for delivery_start, delivery_end in opening.products:
-            demand_bids, schedule = _demand_bids_for_product(
+            demand_bids = _demand_bids_for_product(
                 # 常规需求单元及其随时间变化的用电需求。
                 demand_units=self.demand_units,
                 demand_profiles=self.demand_profiles,
@@ -307,10 +292,8 @@ class BaseMarket:
                 maximum_bid_price=settings.maximum_bid_price,
             ) # 本地刚性负荷买单与弹性负荷买单
             all_demand_bids.extend(demand_bids)
-            exchange_schedules[delivery_start] = schedule
 
         all_demand_bids.extend(additional_demand_bids)
-        all_demand_bids.extend(extension_demand_bids)
 
         offers = _offers_for_opening(
             opening=opening,
@@ -323,20 +306,17 @@ class BaseMarket:
             fuel_price_profiles=self.fuel_price_profiles,
             price_forecasts=self.price_forecasts,
             exchange_unit=self.exchange_unit,
-            exchange_schedules=exchange_schedules,
-            # 扩展接口；此前出清结果也供扩展发电报价策略使用。
-            extension=self.extension,
-            scheduled_results=scheduled_results,
+            exchange_profiles=self.exchange_profiles,
+            learning_session=self.learning_session,
         ) # 机组卖单
         
-        storage_contexts: tuple[StorageClearingContext, ...] = ()
-        if self.storages:
+        clearing_storages: list[tuple[StorageUnit, float]] = []
+        for storage in self.storages:
             # 储能参数及预测的交付初始电量，用于生成充放电报价和构建物理约束。
-            storage_bids, storage_offers, storage_contexts = _storage_orders_for_opening(
-                opening=opening,
-                storages=self.storages,
-                initial_energies_mwh=storage_initial_energies,
-                price_forecasts=self.price_forecasts,
+            initial_energy = storage_initial_energies[storage.name]
+            clearing_storages.append((storage, initial_energy))
+            storage_bids, storage_offers = storage_heuristic_orders(
+                storage, initial_energy, opening.products, self.price_forecasts,
                 forecast_start=settings.start,
                 forecast_end=settings.end,
             )
@@ -351,7 +331,7 @@ class BaseMarket:
             return clear_complex_opening(
                 all_demand_bids,
                 offers,
-                storage_contexts=storage_contexts,
+                storages=tuple(clearing_storages),
             )
         if any(offer.bid_type != "SB" for offer in offers):
             raise InputValidationError(

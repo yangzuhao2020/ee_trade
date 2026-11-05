@@ -1,10 +1,3 @@
-# 第五版强化学习公共配置（单智能体 MATD3）。
-# 参数取自 docs/version5.md，example_02a/base 直接使用；经验池容量作为初始设置。
-# 场景 learning_mode 为 true 时由 loader.py 自动读取；场景参数覆盖公共参数。
-# 命令行支持的覆盖参数优先级最高；未知参数会发出警告并被忽略。
-# 场景配置负责 learning_mode、periods，以及模型保存和加载路径设置。
-# periods 必须包含按交付时间定义的 train、validation、test 三个区间。
-
 learning_config:
   # 算法与网络：当前第五版支持 matd3 + mlp。
   algorithm: matd3
@@ -17,7 +10,7 @@ learning_config:
 
   # 总轮数包含前 5 轮经验收集；先用 30 轮调参，需更充分训练时用命令行增加。
   # 每轮仍遍历完整训练时段。
-  training_episodes: 30
+  training_episodes: 70
   # 前 5 轮围绕机组边际成本探索，只收集经验，不更新网络。
   episodes_collecting_initial_experience: 5
 

@@ -58,7 +58,7 @@ def generate_plots(
             key=lambda storage: (
                 storage.delivery_start,
                 storage.opening_time,
-                storage.unit_name,
+                storage.unit.name,
             ),
         )
     )
@@ -74,7 +74,7 @@ def generate_plots(
             _plot_market_overview(
                 pyplot, dates, results, plot_directory / "market_overview.png",
                 forecast_prices={
-                    household.delivery_start: household.forecast_price_eur_per_mwh
+                    household.dispatch.plan.delivery_start: household.dispatch.plan.forecast_price_eur_per_mwh
                     for household in result.household_results
                 },
             ),
@@ -115,7 +115,6 @@ def generate_plots(
                     pyplot,
                     dates,
                     result.industry_results,
-                    result.industry_flexibility_results,
                     industry_plot_path,
                 )
             )
@@ -130,8 +129,6 @@ def generate_plots(
                         pyplot,
                         dates,
                         result.household_results,
-                        result.household_flexibility_results,
-                        result.household_cost_results,
                         path,
                         days=days,
                     )
@@ -140,13 +137,12 @@ def generate_plots(
             household_plot_path.unlink(missing_ok=True)
             household_zoom_path.unlink(missing_ok=True)
         household_savings_path = plot_directory / "household_savings.png"
-        if result.household_cost_results:
+        if result.household_results:
             paths.append(
                 _plot_household_savings(
                     pyplot,
                     dates,
                     result.household_results,
-                    result.household_cost_results,
                     household_savings_path,
                 )
             )

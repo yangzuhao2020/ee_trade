@@ -20,7 +20,7 @@ from electricity_market_sim.models import (
     MarketSettings,
     PowerPlant,
     SimulationResult,
-    StorageDispatchResult,
+    StorageDispatchResult, StorageUnit,
     SupplyOffer,
 )
 from electricity_market_sim.reporting import write_results
@@ -34,7 +34,7 @@ from UI import charts
 
 START = datetime(2024, 1, 1)
 HOUR = timedelta(hours=1)
-SETTINGS = MarketSettings(START, START + 4 * HOUR, HOUR, HOUR, HOUR,
+SETTINGS = MarketSettings(START, START + 4 * HOUR, HOUR, HOUR,
                           HOUR, 1, HOUR, 100.0, -100.0, "pay_as_clear")
 PLANT = PowerPlant("plant", "operator", "gas", "powerplant_energy_naive",
                    "gas", 0.2, 1.0, 0.0, 0.5, 0.0, start_cost_eur=17.0)
@@ -43,42 +43,39 @@ PLANT = PowerPlant("plant", "operator", "gas", "powerplant_energy_naive",
 def orders(start, name="plant", quantity=1.0, segment="single"):
     end = start + HOUR
     bid = DemandBid("load", "operator", start, end, 1.0, 100.0)
-    offer = SupplyOffer(name, "operator", "gas", start, end, quantity,
-                        quantity, 10.0, 10.0,
+    offer = SupplyOffer(name, "operator", "gas", start, end, quantity, 10.0, 10.0,
                         offer_id=name + "::" + segment, offer_segment=segment)
     return bid, offer
 
 
-class TraceExtension:
-    def __init__(self, before_opening):
-        self.settle_before_opening = before_opening
+class TraceSession:
+    def __init__(self):
         self.startup_costs = []
 
-    def record_delivery_start(self, result):
+    def record_result(self, result):
         self.startup_costs.append(result.offers[0].startup_cost_eur)
-
-    def finalize(self, result):
-        return result
 
 
 class TraceMarket:
-    def __init__(self, before_opening=None):
+    def __init__(self, learning=False):
         self.settings = SETTINGS
         self.events = []
-        self.extension = (None if before_opening is None else
-                          TraceExtension(before_opening))
+        self.learning_session = TraceSession() if learning else None
         self.valid_openings = tuple(
             MarketOpening(START + i * HOUR,
                           ((START + (i + 1) * HOUR, START + (i + 2) * HOUR),))
             for i in range(3)
         )
-        self.runtime_states = {PLANT.name: PlantRuntimeState.initially_off()}
+        self.runtime_states = {PLANT.name: PlantRuntimeState(is_running=False)}
         self.observed_costs = []
+        self.scheduled_counts = []
 
     def clear_opening(self, opening, scheduled_results):
         self.events.append(("open", opening.opening_time))
-        if scheduled_results:
-            self.observed_costs.append(next(iter(scheduled_results.values())).offers[0].startup_cost_eur)
+        self.scheduled_counts.append(len(scheduled_results))
+        for result in scheduled_results.values():
+            if result.delivery_start == opening.opening_time:
+                self.observed_costs.append(result.offers[0].startup_cost_eur)
         bid, offer = orders(opening.products[0][0])
         return (clear_pay_as_clear([bid], [offer]),)
 
@@ -93,16 +90,15 @@ class TraceMarket:
 
 
 class EventContracts(unittest.TestCase):
-    def test_conventional_and_industrial_open_before_settling_starts(self):
-        for before_opening in (None, False):
-            with self.subTest(extension=before_opening):
-                market = TraceMarket(before_opening)
-                result = simulate_eom_market(market)
-                at_two = [kind for kind, time in market.events
-                          if time == START + 2 * HOUR]
-                self.assertEqual(at_two, ["end", "open", "start"])
-                self.assertEqual(market.observed_costs, [0.0, 17.0])
-                self.assertEqual(len(result.market_results), 3)
+    def test_conventional_market_opens_before_settling_starts(self):
+        market = TraceMarket()
+        result = simulate_eom_market(market)
+        at_two = [kind for kind, time in market.events
+                  if time == START + 2 * HOUR]
+        self.assertEqual(at_two, ["end", "open", "start"])
+        self.assertEqual(market.observed_costs, [0.0, 0.0])
+        self.assertEqual(market.scheduled_counts, [0, 1, 1])
+        self.assertEqual(len(result.market_results), 3)
 
     def test_learning_settles_starts_before_requesting_the_next_action(self):
         market = TraceMarket(True)
@@ -110,34 +106,37 @@ class EventContracts(unittest.TestCase):
         at_two = [kind for kind, time in market.events
                   if time == START + 2 * HOUR]
         self.assertEqual(at_two, ["end", "start", "open"])
-        self.assertEqual(market.observed_costs, [17.0, 17.0])
+        self.assertEqual(market.observed_costs, [17.0, 0.0])
+        self.assertEqual(market.scheduled_counts, [0, 1, 1])
 
     def test_start_callback_receives_startup_cost_and_delivery_ends_commit_state(self):
         market = TraceMarket(True)
         result = simulate_eom_market(market)
-        self.assertEqual(market.extension.startup_costs, [17.0, 0.0, 0.0])
-        self.assertEqual(market.runtime_states[PLANT.name].elapsed_periods, 3)
+        self.assertEqual(market.learning_session.startup_costs, [17.0, 0.0, 0.0])
+        self.assertTrue(market.runtime_states[PLANT.name].is_running)
         self.assertEqual([item.offers[0].startup_cost_eur for item in result.market_results],
-                         market.extension.startup_costs)
+                         market.learning_session.startup_costs)
 
 
-class SupplyHookContracts(unittest.TestCase):
+class SupplySessionContracts(unittest.TestCase):
     def quote(self, replacement):
         normal = replace(PLANT, name="normal")
 
-        def supply(plant, products, powers, cost_at, scheduled):
-            return replacement if plant.name == PLANT.name else None
+        def supply(**kwargs):
+            return replacement
 
         return _offers_for_opening(
             opening=MarketOpening(START, ((START + HOUR, START + 2 * HOUR),)),
             plants=(PLANT, normal), runtime_states={}, availability_profiles={},
             marginal_costs={PLANT.name: 10.0, normal.name: 10.0},
             fuel_price_profiles=None, price_forecasts={},
-            exchange_unit=None, exchange_schedules={},
-            extension=SimpleNamespace(offers_for_plant=supply), scheduled_results={},
+            exchange_unit=None, exchange_profiles={},
+            learning_session=(
+                SimpleNamespace(plant=PLANT, offers_for_product=supply)
+                if replacement is not None else None),
         )
 
-    def test_extension_replaces_only_its_plant_without_duplicate_supply(self):
+    def test_session_replaces_only_its_plant_without_duplicate_supply(self):
         minimum = orders(START + HOUR, segment="minimum", quantity=0.25)[1]
         flexible = orders(START + HOUR, segment="flexible", quantity=0.75)[1]
         offers = self.quote((minimum, flexible))
@@ -146,38 +145,35 @@ class SupplyHookContracts(unittest.TestCase):
                           "normal::single::2024-01-01T01:00:00"])
         self.assertEqual(sum(item.offered_energy_mwh for item in offers), 2.0)
 
-    def test_empty_replacement_suppresses_supply_but_none_keeps_normal_quotes(self):
+    def test_empty_learning_quote_and_absent_session_keep_distinct_behaviors(self):
         self.assertEqual([item.unit_name for item in self.quote(())], ["normal"])
         self.assertEqual([item.unit_name for item in self.quote(None)], ["plant", "normal"])
 
-    def test_extension_only_strategy_is_never_interpreted_as_a_block_bid(self):
+    def test_learning_strategy_requires_a_session(self):
         plant = replace(PLANT, bidding_strategy="powerplant_energy_learning")
-        with self.assertRaisesRegex(InputValidationError, "supply-side market extension"):
+        with self.assertRaisesRegex(InputValidationError, "requires a learning session"):
             _offers_for_opening(
                 opening=MarketOpening(START, ((START + HOUR, START + 2 * HOUR),)),
-                plants=(plant,), runtime_states={plant.name: PlantRuntimeState.initially_off()},
+                plants=(plant,), runtime_states={plant.name: PlantRuntimeState(is_running=False)},
                 availability_profiles={}, marginal_costs={plant.name: 10.0},
                 fuel_price_profiles=None, price_forecasts={},
-                exchange_unit=None, exchange_schedules={},
+                exchange_unit=None, exchange_profiles={},
             )
 
-    def test_extension_prediction_window_participates_in_opening_preflight(self):
+    def test_heuristic_prediction_window_participates_in_opening_preflight(self):
         delivery = START + HOUR
-        for window in (
-            {"required_data_offsets": (0, 1)},
-            {"price_forecast_offsets": (0, 1)},
-        ):
-            with self.subTest(window=window):
-                issues = _opening_coverage_issues(
-                    opening=MarketOpening(START, ((delivery, delivery + HOUR),)),
-                    settings=SETTINGS, plants=(PLANT,),
-                    demand_units=(DemandUnit("load", "operator"),),
-                    demand_profiles={"load": {delivery: 1.0}}, availability_profiles={},
-                    exchange_unit=None, exchange_profiles={}, requires_price_forecast=False,
-                    **window,
-                )
-                self.assertEqual(issues,
-                                 ["报价预测数据缺少 demand_df.csv/load: 2024-01-01 02:00"])
+        issues = _opening_coverage_issues(
+            opening=MarketOpening(START, ((delivery, delivery + HOUR),)),
+            settings=SETTINGS, plants=(PLANT,),
+            demand_units=(DemandUnit("load", "operator"),),
+            demand_profiles={"load": {
+                delivery + hour * HOUR: 1.0 for hour in range(13) if hour != 1
+            }},
+            availability_profiles={}, exchange_unit=None, exchange_profiles={},
+            requires_price_forecast=True,
+        )
+        self.assertEqual(issues,
+                         ["报价预测数据缺少 demand_df.csv/load: 2024-01-01 02:00"])
 
 
 class LearningActionContracts(unittest.TestCase):
@@ -193,7 +189,6 @@ class LearningActionContracts(unittest.TestCase):
         return session.offers_for_product(
             delivery_start=START + HOUR, delivery_end=START + 2 * HOUR,
             available_power_mw=power, marginal_cost_eur_per_mwh=10.0,
-            scheduled_results={},
         )
 
     def test_experience_keeps_action_order_while_offer_prices_are_sorted(self):
@@ -239,6 +234,48 @@ class LearningActionContracts(unittest.TestCase):
             with self.subTest(bounded=bounded):
                 self.assertEqual(self.quote(self.session((1.7, -2.5), bounded), 0.0), ())
 
+    def test_fixed_observation_scales_are_validated_when_session_starts(self):
+        for invalid in (0.0, -1.0, float("nan"), float("inf")):
+            with self.subTest(parameter="rated_power", value=invalid):
+                with self.assertRaisesRegex(ValueError, "Rated power"):
+                    LearningEpisodeSession(
+                        plant=replace(PLANT, max_power_mw=invalid),
+                        action_provider=lambda state: (0.0, 0.0),
+                    )
+            with self.subTest(parameter="price_scale", value=invalid):
+                with self.assertRaisesRegex(ValueError, "Price scale"):
+                    LearningEpisodeSession(
+                        plant=PLANT, action_provider=lambda state: (0.0, 0.0),
+                        price_scale_eur_per_mwh=invalid,
+                    )
+
+    def test_zero_reward_hours_preserve_market_history_and_zero_dispatch(self):
+        for power, demand, expected_price in ((1.0, 0.0, 0.0), (0.0, 1.0, 30.0)):
+            with self.subTest(available_power=power, demand=demand):
+                states, transitions = [], []
+
+                def action(state):
+                    states.append(state)
+                    return (0.0, 0.0)
+
+                session = LearningEpisodeSession(
+                    plant=replace(PLANT, min_power_mw=0.25), action_provider=action,
+                    transition_consumer=transitions.append,
+                )
+                offers = self.quote(session, power)
+                bid = DemandBid("load", "operator", START + HOUR, START + 2 * HOUR, demand, 100.0)
+                rival = SupplyOffer("rival", "operator", "gas", START + HOUR,
+                                    START + 2 * HOUR, 1.0, 30.0, 30.0)
+                session.record_result(clear_pay_as_clear([bid], [*offers, rival]))
+                session.offers_for_product(
+                    delivery_start=START + 2 * HOUR, delivery_end=START + 3 * HOUR,
+                    available_power_mw=1.0, marginal_cost_eur_per_mwh=10.0,
+                )
+                self.assertEqual(states[0][:12], (0.0,) * 12)
+                self.assertEqual(states[1][:12], (0.0,) * 11 + (expected_price / 100.0,))
+                self.assertEqual(states[1][14], 0.0)
+                self.assertEqual(transitions[0].reward, 0.0)
+
 
 class DeliveryIntervalContracts(unittest.TestCase):
     def test_demand_bid_rejects_non_positive_delivery_duration(self):
@@ -249,7 +286,7 @@ class DeliveryIntervalContracts(unittest.TestCase):
     def test_clearing_result_rejects_non_positive_delivery_duration(self):
         for end in (START, START - HOUR):
             with self.subTest(end=end), self.assertRaisesRegex(ValueError, "交付时长"):
-                MarketClearingResult(START, end, 0.0, 0.0, 0.0, 0.0, 0.0, (), (), None)
+                MarketClearingResult(START, end, 0.0, (), (), None)
 
 
 class ReportingContracts(unittest.TestCase):
@@ -274,7 +311,7 @@ class ReportingContracts(unittest.TestCase):
         elastic = DemandBid("elastic", "operator", START, START + HOUR, 0.5, 5.0,
                             demand_type="elastic_load")
         charge = DemandBid("storage", "operator", START, START + HOUR, 2.0, 5.0,
-                           bid_type="storage_charge")
+                           demand_type="storage_charge")
         market = clear_pay_as_clear([bid, elastic, charge], [offer])
         self.assertAlmostEqual(market.requested_storage_charge_mwh, 2.0)
         self.assertAlmostEqual(market.unaccepted_storage_charge_mwh, 2.0)
@@ -294,10 +331,13 @@ class ReportingContracts(unittest.TestCase):
         bid, offer = orders(START)
         market = clear_pay_as_clear([bid], [offer])
         storage = StorageDispatchResult(
-            START, START, START + HOUR, "storage", "operator", "battery",
-            50.0, 49.0, 100.0, 2.0, 2.0, 40.0, 1.0, 1.0, 60.0, 50.0,
-            20.0, 30.0, 0.56, 0.28,
+            START, START, START + HOUR,
+            StorageUnit("storage", "operator", "battery", 10.0, 10.0, 1.0, 1.0,
+                        0.0, 1.0, 100.0, 0.5, 0.28, 0.28),
+            50.0, 49.0, 2.0, 2.0, 40.0, 1.0, 1.0, 60.0, 50.0,
         )
+        self.assertAlmostEqual(storage.additional_charge_cost_eur, 0.56)
+        self.assertAlmostEqual(storage.additional_discharge_cost_eur, 0.28)
         result = SimulationResult(SETTINGS, (market,), (storage,))
         generation = market.offers[0]
         with TemporaryDirectory() as directory:
@@ -307,12 +347,12 @@ class ReportingContracts(unittest.TestCase):
         self.assertAlmostEqual(float(row["accepted_energy_mwh"]),
                                generation.accepted_energy_mwh + 1.0)
         self.assertAlmostEqual(float(row["accepted_charge_mwh"]), 2.0)
-        self.assertAlmostEqual(float(row["revenue_eur"]), generation.revenue_eur + 30.0)
-        self.assertAlmostEqual(float(row["purchase_cost_eur"]), 20.0)
+        self.assertAlmostEqual(float(row["revenue_eur"]), generation.revenue_eur + 50.0)
+        self.assertAlmostEqual(float(row["purchase_cost_eur"]), 100.0)
         self.assertAlmostEqual(float(row["variable_cost_eur"]),
                                generation.variable_cost_eur + 0.84)
         self.assertAlmostEqual(float(row["total_cost_eur"]),
-                               generation.total_cost_eur + 20.84)
+                               generation.total_cost_eur + 100.84)
         self.assertAlmostEqual(float(row["profit_eur"]),
                                generation.profit_eur + storage.net_cash_flow_eur)
 
@@ -323,11 +363,12 @@ class StorageChargeCharts(unittest.TestCase):
         household = DemandBid("household", "operator", START, START + HOUR, 0.5, 100.0,
                               demand_type="household_load")
         charge = DemandBid("storage", "operator", START, START + HOUR, 2.0, 5.0,
-                           bid_type="storage_charge")
+                           demand_type="storage_charge")
         storage = StorageDispatchResult(
-            START, START, START + HOUR, "storage", "operator", "battery",
-            50.0, 50.0, 100.0, 2.0, 0.0, 4.3, 0.0, 0.0, None, 10.0,
-            0.0, 0.0, 0.0, 0.0,
+            START, START, START + HOUR,
+            StorageUnit("storage", "operator", "battery", 10.0, 10.0, 1.0, 1.0,
+                        0.0, 1.0, 100.0, 0.5, 0.0, 0.0),
+            50.0, 50.0, 2.0, 0.0, 4.3, 0.0, 0.0, None, 10.0,
         )
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -350,7 +391,7 @@ class StorageChargeCharts(unittest.TestCase):
         elastic = DemandBid("elastic", "operator", START, START + HOUR, 0.5, 50.0,
                             demand_type="elastic_load")
         charge = DemandBid("storage", "operator", START, START + HOUR, 2.0, 5.0,
-                           bid_type="storage_charge")
+                           demand_type="storage_charge")
         with TemporaryDirectory() as directory:
             write_results(Path(directory), SimulationResult(
                 SETTINGS, (clear_pay_as_clear([bid, elastic, charge], [offer]),)))
@@ -478,14 +519,17 @@ class HouseholdSavingContracts(unittest.TestCase):
             path = _write_household_scenario(directory, 0.5)
             (household,) = load_household_units(path / "residential_dsm_units.csv")
         plan = HouseholdPlan(START, START + HOUR, household.name, 10.0, 12.0,
-                             0.0, 6.0, 6.0, 0.0)
+                             6.0, 6.0, 0.0)
         (result,) = dispatch_household(
             household, (plan,), {START: 5.5}, household.initial_energy_mwh,
+            grid_power_bounds_mw=None,
             initial_heat_pump_power_mw=5.0,
         )
         self.assertAlmostEqual(result.heat_pump_power_mw, 5.0)
+        self.assertIs(result.plan, plan)
         self.assertAlmostEqual(result.battery_charge_power_mw, 0.5)
         self.assertAlmostEqual(result.unmet_heat_mwh_th, 2.0)
+        self.assertIsNone(result.grid_power_bounds_mw)
 
     def test_positive_solar_quote_is_used_in_optimized_and_baseline_payments(self):
         from electricity_market_sim.simulation import simulate
@@ -524,21 +568,20 @@ class HouseholdSavingContracts(unittest.TestCase):
     def summary(self, result):
         from electricity_market_sim.models import summarize_household_savings
 
-        (summary,) = summarize_household_savings(
-            result.household_results, result.household_cost_results)
+        (summary,) = summarize_household_savings(result.household_results)
         return summary
 
     def test_baseline_without_battery_ignores_self_discharge(self):
         result = self.simulate(0.5, min_soc=0.5, initial_soc=0.5, loss_rate=0.01)
-        self.assertTrue(all(abs(cost.baseline_soc_after - 0.5) < 1e-9
-                            for cost in result.household_cost_results))
+        self.assertTrue(all(abs(cost.baseline.soc_after - 0.5) < 1e-9
+                            for cost in result.household_results))
         summary = self.summary(result)
         self.assertTrue(summary.comparable)
         self.assertGreaterEqual(summary.final_soc_difference, -1e-9)
 
     def test_battery_saves_by_shifting_purchases_to_cheap_periods(self):
         result = self.simulate(0.5)
-        costs = result.household_cost_results
+        costs = result.household_results
         self.assertEqual(len(costs), len(result.household_results))
         payment = sum(cost.payment_eur for cost in costs)
         baseline = sum(cost.baseline_payment_eur for cost in costs)
@@ -561,12 +604,12 @@ class HouseholdSavingContracts(unittest.TestCase):
             if cost.accepted_grid_energy_mwh > 0:
                 self.assertAlmostEqual(
                     cost.actual_price_eur_per_mwh,
-                    0.0 if cost.delivery_start.hour < 12 else 50.0,
+                    0.0 if cost.dispatch.plan.delivery_start.hour < 12 else 50.0,
                 )
 
     def test_without_battery_the_optimized_run_equals_the_baseline(self):
         result = self.simulate(0.0)
-        for cost in result.household_cost_results:
+        for cost in result.household_results:
             self.assertAlmostEqual(cost.payment_eur, cost.baseline_payment_eur)
             self.assertAlmostEqual(cost.accepted_grid_energy_mwh,
                                    cost.baseline_grid_energy_mwh)
@@ -575,19 +618,25 @@ class HouseholdSavingContracts(unittest.TestCase):
 
     def test_household_cost_requires_non_optional_numbers(self):
         result = self.simulate(0.5)
-        costs = result.household_cost_results
-        for field in ("baseline_grid_energy_mwh", "forecast_saving_eur", "baseline_soc_after"):
-            with self.subTest(field=field), TemporaryDirectory() as directory:
-                cost = replace(costs[0], **{field: None})
-                invalid = replace(result, household_cost_results=(cost, *costs[1:]))
+        costs = result.household_results
+        row = costs[0]
+        invalid_rows = (
+            replace(row, baseline_grid_energy_mwh=None),
+            replace(row, dispatch=replace(row.dispatch, plan=replace(
+                row.dispatch.plan, forecast_price_eur_per_mwh=None))),
+            replace(row, baseline=replace(row.baseline, soc_after=None)),
+        )
+        for cost in invalid_rows:
+            with self.subTest(result=cost), TemporaryDirectory() as directory:
+                invalid = replace(result, household_results=(cost, *costs[1:]))
                 with self.assertRaises(TypeError):
                     write_results(Path(directory), invalid)
 
     def test_household_cost_leaves_untraded_actual_price_empty(self):
         result = self.simulate(0.5)
-        costs = result.household_cost_results
+        costs = result.household_results
         cost = replace(costs[0], accepted_grid_energy_mwh=0.0, payment_eur=0.0)
-        result = replace(result, household_cost_results=(cost, *costs[1:]))
+        result = replace(result, household_results=(cost, *costs[1:]))
         with TemporaryDirectory() as directory:
             write_results(Path(directory), result)
             with (Path(directory) / "household_results.csv").open(encoding="utf-8") as file:
@@ -613,6 +662,10 @@ class HouseholdSavingContracts(unittest.TestCase):
             )
             self.assertAlmostEqual(sum(float(row["actual_saving_eur"]) for row in rows),
                                    50.0, places=4)
+            for row, dispatch in zip(rows, result.household_results):
+                minimum, maximum = dispatch.dispatch.grid_power_bounds_mw
+                self.assertAlmostEqual(float(row["minimum_grid_power_mw"]), minimum, places=6)
+                self.assertAlmostEqual(float(row["maximum_grid_power_mw"]), maximum, places=6)
             names = {path.name for path in generate_plots(result, output / "plots")}
         self.assertTrue({"household_dispatch.png", "household_dispatch_zoom.png",
                          "household_savings.png"} <= names)
@@ -636,13 +689,10 @@ class HouseholdSavingContracts(unittest.TestCase):
 
     def test_offsetting_unmet_heat_in_different_periods_is_not_comparable(self):
         result = self.simulate(0.5)
-        dispatch = list(result.household_results)
-        costs = list(result.household_cost_results)
-        # 00:15 只有基准缺热，00:45 只有优化方案缺热；合计净差为 0，期末 SOC 不变。
-        costs[0] = replace(costs[0], baseline_unmet_heat_mwh_th=0.25)
-        dispatch[2] = replace(dispatch[2], unmet_heat_mwh_th=0.25)
-        result = replace(result, household_results=tuple(dispatch),
-                         household_cost_results=tuple(costs))
+        rows = list(result.household_results)
+        rows[0] = replace(rows[0], baseline=replace(rows[0].baseline, unmet_heat_mwh_th=0.25))
+        rows[2] = replace(rows[2], dispatch=replace(rows[2].dispatch, unmet_heat_mwh_th=0.25))
+        result = replace(result, household_results=tuple(rows))
         summary = self.summary(result)
         self.assertAlmostEqual(summary.unmet_heat_difference_mwh_th, 0.0)
         self.assertAlmostEqual(summary.unmet_heat_mismatch_mwh_th, 0.5)
@@ -679,52 +729,47 @@ class HouseholdComparabilityContracts(unittest.TestCase):
     QUARTER = timedelta(minutes=15)
 
     def pair(self, *, payment, unmet_heat=0.0, soc=(1.0, 1.0), baseline_unmet_heat=0.0):
-        from electricity_market_sim.models import HouseholdCostResult, HouseholdDispatchResult
+        from electricity_market_sim.models import HouseholdResult, HouseholdDispatchResult, HouseholdPlan
 
-        start = START
-        dispatch = HouseholdDispatchResult(
-            start, start + self.QUARTER, "A360", 50.0, 3.0, 0.0, 1.5, 1.5, 0.0, 0.0,
-            soc[0], soc[1], 0.0, unmet_heat,
-        )
-        cost = HouseholdCostResult(
-            start, start + self.QUARTER, "A360", payment / 50.0, payment,
-            0.375, 18.75, 0.0, 0.0, baseline_unmet_heat, 1.0,
-        )
-        return (dispatch,), (cost,)
+        plan = HouseholdPlan(START, START + self.QUARTER, "A360", 50.0, 3.0, 1.5, 1.5, 0.0)
+        dispatch = HouseholdDispatchResult(plan, 1.5, 0.0, 0.0, soc[0], soc[1], unmet_heat, None)
+        baseline = replace(dispatch, soc_before=1.0, soc_after=1.0,
+                           unmet_heat_mwh_th=baseline_unmet_heat)
+        return (HouseholdResult(dispatch, baseline, payment / 50.0, payment, 0.375, 18.75),)
 
-    def summary(self, dispatch, costs):
+    def summary(self, rows):
         from electricity_market_sim.models import summarize_household_savings
 
-        (summary,) = summarize_household_savings(dispatch, costs)
+        (summary,) = summarize_household_savings(rows)
         return summary
 
     def test_less_heat_supplied_is_not_a_comparable_saving(self):
-        summary = self.summary(*self.pair(payment=12.5, unmet_heat=0.25))
+        summary = self.summary(self.pair(payment=12.5, unmet_heat=0.25))
         self.assertAlmostEqual(summary.actual_saving_eur, 6.25)
         self.assertAlmostEqual(summary.unmet_heat_difference_mwh_th, 0.25)
         self.assertFalse(summary.comparable)
 
     def test_consuming_initial_battery_energy_is_not_a_comparable_saving(self):
-        summary = self.summary(*self.pair(payment=12.5, soc=(1.0, 0.875)))
+        summary = self.summary(self.pair(payment=12.5, soc=(1.0, 0.875)))
         self.assertAlmostEqual(summary.actual_saving_eur, 6.25)
         self.assertAlmostEqual(summary.final_soc_difference, -0.125)
         self.assertFalse(summary.comparable)
 
     def test_unmet_heat_in_different_periods_does_not_offset(self):
         later = START + self.QUARTER
-        first_dispatch, first_cost = self.pair(payment=18.75, baseline_unmet_heat=0.25)
-        second_dispatch, second_cost = self.pair(payment=12.5, unmet_heat=0.25)
-        second_dispatch = (replace(second_dispatch[0], delivery_start=later,
-                                   delivery_end=later + self.QUARTER),)
-        second_cost = (replace(second_cost[0], delivery_start=later,
-                               delivery_end=later + self.QUARTER),)
-        summary = self.summary(first_dispatch + second_dispatch, first_cost + second_cost)
+        first_rows = self.pair(payment=18.75, baseline_unmet_heat=0.25)
+        second_rows = self.pair(payment=12.5, unmet_heat=0.25)
+        second = second_rows[0]
+        plan = replace(second.dispatch.plan, delivery_start=later, delivery_end=later + self.QUARTER)
+        second = replace(second, dispatch=replace(second.dispatch, plan=plan),
+                         baseline=replace(second.baseline, plan=plan))
+        summary = self.summary(first_rows + (second,))
         self.assertAlmostEqual(summary.unmet_heat_difference_mwh_th, 0.0)
         self.assertAlmostEqual(summary.unmet_heat_mismatch_mwh_th, 0.5)
         self.assertFalse(summary.comparable)
 
     def test_equal_service_and_soc_is_comparable(self):
-        summary = self.summary(*self.pair(payment=12.5, unmet_heat=0.25,
+        summary = self.summary(self.pair(payment=12.5, unmet_heat=0.25,
                                           baseline_unmet_heat=0.25))
         self.assertTrue(summary.comparable)
 
@@ -735,7 +780,7 @@ class HouseholdComparabilityContracts(unittest.TestCase):
         pyplot, dates = _load_matplotlib()
         with TemporaryDirectory() as directory:
             path = _plot_household_savings(
-                pyplot, dates, *self.pair(payment=12.5, unmet_heat=0.25),
+                pyplot, dates, self.pair(payment=12.5, unmet_heat=0.25),
                 Path(directory) / "household_savings.png",
             )
             self.assertTrue(path.is_file())

@@ -2,6 +2,7 @@
 
 import shutil
 import sys
+from functools import partial
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -16,7 +17,7 @@ from ..errors import InputValidationError
 from .learning_metrics import _EpisodeMetrics, _metrics, _write_metrics, _write_run_summary, _write_records
 from ..models import MarketSettings, SimulationResult
 from ..reporting import write_results
-from ..simulation import LearningEpisodeRunner, learning_period_settings, market_openings
+from ..simulation import simulate_learning_episode, learning_period_settings, market_openings
 from .test import _evaluate_actor_and_baseline
 from .data_coverage import validate_learning_data_coverage
 
@@ -81,7 +82,7 @@ def _train_single_run(
     seed: int,
     training_episodes: int | None = None,
     training_steps: int | None = None,
-) -> tuple[SimulationResult, list[_EpisodeMetrics], Path, float, int | None]:
+) -> tuple[SimulationResult, list[_EpisodeMetrics], Path, float]:
     """完成一次统计上独立的 MATD3 训练：只用训练时段更新，只用验证时段选模型。"""
 
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
@@ -127,10 +128,8 @@ def _train_single_run(
     best_path.unlink(missing_ok=True)
 
     # 只有训练时段的经验进入经验池；验证时段只运行确定性 Actor。
-    train_runner = LearningEpisodeRunner(input_path, scenario=scenario, period="train")
-    validation_runner = LearningEpisodeRunner(
-        input_path, scenario=scenario, period="validation"
-    )
+    train_episode = partial(simulate_learning_episode, input_path, scenario=scenario, period="train")
+    validation_episode = partial(simulate_learning_episode, input_path, scenario=scenario, period="validation")
     metrics: list[_EpisodeMetrics] = []
     best_total_reward = float("-inf")
     progress = []
@@ -138,7 +137,7 @@ def _train_single_run(
     validation_seconds = 0.0
     for episode in _training_progress(episode_count, run):
         initial_experience = episode <= config.initial_experience_episodes
-        training_result = train_runner.run_episode(
+        training_result = train_episode(
             lambda state, initial=initial_experience: agent.exploration_action(
                 state, initial_experience=initial
             ),
@@ -160,7 +159,7 @@ def _train_single_run(
         should_validate = is_validation_due or is_last_episode
         if should_validate:
             validation_started = monotonic()
-            validation_result = validation_runner.run_episode(agent.deterministic_action)
+            validation_result = validation_episode(agent.deterministic_action)
             validation_seconds += monotonic() - validation_started
             validation_metrics = _metrics(
                 validation_result,
@@ -193,10 +192,9 @@ def _train_single_run(
             "or reduce episodes_collecting_initial_experience."
         )
 
-    seed_used = agent.seed
     best_payload = agent.load_checkpoint(best_path)
     validation_result, comparison = _evaluate_actor_and_baseline(
-        agent=agent,
+        action_provider=agent.deterministic_action,
         input_path=input_path,
         output_path=output_path / "validation",
         scenario=scenario,
@@ -206,14 +204,12 @@ def _train_single_run(
         run=run,
     )
     metrics.extend(comparison)
-    _write_metrics(output_path / "learning_metrics.csv", metrics)
     _write_records(output_path / "learning_progress.csv", progress)
     return (
         validation_result,
         metrics,
         best_path,
         best_total_reward,
-        seed_used,
     )
 
 
@@ -244,7 +240,7 @@ def train_learning_scenario(
     use_run_dirs = run_count > 1
     all_metrics: list[_EpisodeMetrics] = []
     run_records: list[dict[str, Any]] = []
-    results: dict[int, SimulationResult] = {}
+    selected_reward = float("-inf")
     for run in range(1, run_count + 1):
         run_output = (
             output_path if not use_run_dirs else output_path / "runs" / f"run_{run:02d}"
@@ -252,17 +248,25 @@ def train_learning_scenario(
         run_checkpoints = (
             checkpoint_root if not use_run_dirs else checkpoint_root / f"run_{run:02d}"
         )
-        result, metrics, best_path, best_reward, seed = _train_single_run(
+        seed = _independent_run_seed(settings.seed, run)
+        result, metrics, best_path, best_reward = _train_single_run(
             input_path,
             run_output,
             run_checkpoints,
             scenario,
             run=run,
-            seed=_independent_run_seed(settings.seed, run),
+            seed=seed,
             training_episodes=training_episodes,
             training_steps=training_steps,
         )
-        results[run] = result
+        # 验证总奖励打平时保留更早的运行，只保留当前最佳的完整结果。
+        if run == 1 or best_reward > selected_reward:
+            selected_run = run
+            selected_reward = best_reward
+            root_result = result
+        del result
+        if use_run_dirs:
+            _write_metrics(run_output / "learning_metrics.csv", metrics)
         all_metrics.extend(metrics)
         run_records.append({
             "run": run,
@@ -271,17 +275,12 @@ def train_learning_scenario(
             "validation_total_reward": best_reward,
         })
 
-    # 验证总奖励打平时保留更早的运行。
-    selected_entry = max(
-        run_records, key=lambda entry: float(entry["validation_total_reward"])
-    )
-    selected_run = int(selected_entry["run"])
+    selected_entry = run_records[selected_run - 1]
     _copy_if_distinct(
         checkpoint_root / selected_entry["best_checkpoint"],
         checkpoint_root / "best.pt",
     )
     _write_run_manifest(checkpoint_root, config, run_records, selected_run)
-    root_result = results[selected_run]
     write_results(output_path, root_result)
 
     _write_metrics(output_path / "learning_metrics.csv", all_metrics)

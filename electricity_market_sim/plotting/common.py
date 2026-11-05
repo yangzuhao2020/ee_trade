@@ -73,7 +73,7 @@ def _make_unit_colors(
             for market in results
             for cleared in market.offers
         }
-        | {storage.unit_name for storage in storage_results}
+        | {storage.unit.name for storage in storage_results}
     )
     return {
         name: _UNIT_COLORS[index % len(_UNIT_COLORS)]

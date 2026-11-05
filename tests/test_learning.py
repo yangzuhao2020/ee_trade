@@ -32,11 +32,9 @@ from electricity_market_sim.plotting import generate_learning_plots
 from electricity_market_sim.simulation import (
     learning_period_settings, market_openings, simulate_learning_episode,
 )
-from electricity_market_sim.simulators.base_market import BaseMarket
 from electricity_market_sim.simulators.base_market.forecasts import (
     _forecast_starts, _naive_price_forecasts,
 )
-from electricity_market_sim.simulators.eom import EomExtensionInputs
 
 
 START = datetime(2024, 1, 1)
@@ -587,11 +585,11 @@ class LearningMarketContracts(unittest.TestCase):
             with self.assertRaisesRegex(InputValidationError, "demand_df.csv/load"):
                 self.collect_states(path)
 
-    def test_calendar_encoding_and_history_window(self):
+    def test_calendar_encoding_with_prepared_history_window(self):
         def observation(delivery):
             return build_learning_observation(
                 delivery_start=delivery,
-                historical_clearing_prices_eur_per_mwh=range(15),
+                historical_clearing_prices_eur_per_mwh=range(3, 15),
                 previous_power_mw=5.0, rated_power_mw=10.0,
                 marginal_cost_eur_per_mwh=40.0, price_scale_eur_per_mwh=200.0,
             )
@@ -628,20 +626,6 @@ class LearningMarketContracts(unittest.TestCase):
                         )
                     forecast.assert_called_once()
                     self.assertEqual(len(result.market_results), 3)
-
-    def test_extension_price_window_is_explicit_and_separate_from_data_window(self):
-        with TemporaryDirectory() as temporary:
-            path = make_scenario(Path(temporary), profile_hours=18)
-            settings = load_market_settings(path / "config.yaml")
-            market = BaseMarket(path, settings, tuple(market_openings(settings)))
-            with patch(PRICE_PREDICTOR, wraps=_naive_price_forecasts) as forecast:
-                market.prepare(input_loader=lambda _: EomExtensionInputs(
-                    required_data_offsets=(0, 10), price_forecast_offsets=(0, 2),
-                ))
-            forecast.assert_called_once()
-            self.assertEqual(set(market.price_forecasts), {
-                START + i * HOUR for i in range(1, 6)
-            })
 
 
 class LearningPeriodContracts(unittest.TestCase):
@@ -707,14 +691,14 @@ class LearningPeriodContracts(unittest.TestCase):
             deliveries = [START + hour * HOUR for hour in PERIOD_HOURS["train"]]
             clipped = _forecast_starts(
                 deliveries, settings=period_settings, requires_price_forecast=True,
-                extra_forecast_offsets=(0, 10), requires_storage_price_forecast=True,
+                requires_storage_price_forecast=True,
                 hard_forecast_horizon=True,
             )
             self.assertTrue(clipped)
             self.assertTrue(all(start < period_settings.end for start in clipped))
             unclipped = _forecast_starts(
                 deliveries, settings=period_settings, requires_price_forecast=True,
-                extra_forecast_offsets=(0, 10), requires_storage_price_forecast=True,
+                requires_storage_price_forecast=True,
             )
             self.assertTrue(any(start > period_settings.end for start in unclipped))
 
@@ -1037,6 +1021,42 @@ class LearningTrainingContracts(unittest.TestCase):
                 agent.load_checkpoint(output / "checkpoints" / "best.pt")
             with self.assertRaisesRegex(InputValidationError, "时段与当前"):
                 run_learning_test(path, output)
+
+    def test_evaluation_rejects_missing_or_invalid_run_metadata(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = make_scenario(root / "input")
+            config = load_market_settings(path / "config.yaml").learning_config
+            checkpoint = root / "policy.pt"
+            MATD3Agent(config, total_regular_steps=1).save_checkpoint(
+                checkpoint, episode=1, validation_total_reward=0.0
+            )
+            payload = torch.load(checkpoint, weights_only=True)
+            del payload["run"]
+            for fields in ({}, {"run": None}, {"run": True}, {"run": "1"}, {"run": 1.0}):
+                with self.subTest(fields=fields):
+                    torch.save({**payload, **fields}, checkpoint)
+                    with self.assertRaisesRegex(InputValidationError, "integer run"):
+                        evaluate_learning_scenario(path, root / "evaluation", checkpoint_path=checkpoint)
+            self.assertFalse((root / "evaluation").exists())
+
+    def test_test_manifest_requires_an_existing_selected_run(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = make_scenario(root / "input")
+            config = load_market_settings(path / "config.yaml").learning_config
+            manifest = root / "runs.json"
+            payload = {
+                "algorithm": config.algorithm, "periods": _periods_payload(config),
+                "runs": [{"run": 1, "best_checkpoint": "missing.pt"}],
+            }
+            for fields in ({}, {"selected_run": None}, {"selected_run": True},
+                           {"selected_run": "1"}, {"selected_run": 2}):
+                with self.subTest(fields=fields):
+                    manifest.write_text(json.dumps({**payload, **fields}), encoding="utf-8")
+                    with self.assertRaisesRegex(InputValidationError, "selected_run"):
+                        run_learning_test(path, root / "test", manifest_path=manifest)
+            self.assertFalse((root / "test").exists())
 
     def test_old_and_other_dimensional_checkpoints_are_rejected(self):
         # 旧版本与旧维度的检查点不做迁移，统一按不兼容拒绝。

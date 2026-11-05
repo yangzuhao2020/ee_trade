@@ -3,6 +3,7 @@
 import json
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
+from functools import partial
 from multiprocessing import get_context
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -24,7 +25,7 @@ from electricity_market_sim.deep_learning.test import evaluate_learning_scenario
 from electricity_market_sim.deep_learning.training import train_learning_scenario
 from electricity_market_sim.errors import InputValidationError
 from electricity_market_sim.main import main
-from electricity_market_sim.simulation import LearningEpisodeRunner
+from electricity_market_sim.simulation import simulate_learning_episode
 from test_learning import make_scenario, read_rows, START, HOUR
 
 
@@ -72,7 +73,10 @@ class GRPOTests(unittest.TestCase):
             self.assertEqual(cfg.validation_interval, 5)
             agent = GRPOAgent(cfg, seed=7)
             before = {name: value.clone() for name, value in agent.actor.state_dict().items()}
-            batch, results = collect_group(agent, LearningEpisodeRunner(path, period="train"))
+            results = []
+            batch = collect_group(
+                agent, partial(simulate_learning_episode, path, period="train"), results.append
+            )
             self.assertEqual(batch.states.shape, (12, 3, 16))
             torch.testing.assert_close(batch.states[:, 0], batch.states[0, 0].expand(12, -1))
             self.assertTrue(batch.dones[:, -1].all())
@@ -100,7 +104,9 @@ class GRPOTests(unittest.TestCase):
             path = make_grpo_scenario(Path(temporary))
             cfg = load_market_settings(path / "config.yaml").learning_config
             agent = GRPOAgent(cfg, seed=7)
-            batch, _ = collect_group(agent, LearningEpisodeRunner(path, period="train"))
+            batch = collect_group(
+                agent, partial(simulate_learning_episode, path, period="train"), lambda result: None
+            )
             batch.can_bid.fill_(False)
             before = {name: value.clone() for name, value in agent.actor.state_dict().items()}
             diagnostic = agent.update(batch)
@@ -119,7 +125,9 @@ class GRPOTests(unittest.TestCase):
             cfg = replace(cfg, update_epochs=1)
             chunked = GRPOAgent(replace(cfg, minibatch_size=8), seed=7)
             whole = GRPOAgent(replace(cfg, minibatch_size=36), seed=7)
-            batch, _ = collect_group(chunked, LearningEpisodeRunner(path, period="train"))
+            batch = collect_group(
+                chunked, partial(simulate_learning_episode, path, period="train"), lambda result: None
+            )
             # 35 个有效样本，分批时最后一批为 3 个；无效动作不参与梯度。
             batch.can_bid[0, 0] = False
             diagnostic = chunked.update(batch)
@@ -136,7 +144,9 @@ class GRPOTests(unittest.TestCase):
             path = make_grpo_scenario(Path(temporary))
             cfg = load_market_settings(path / "config.yaml").learning_config
             agent = GRPOAgent(replace(cfg, minibatch_size=8, target_kl=1e-10), seed=7)
-            batch, _ = collect_group(agent, LearningEpisodeRunner(path, period="train"))
+            batch = collect_group(
+                agent, partial(simulate_learning_episode, path, period="train"), lambda result: None
+            )
             diagnostic = agent.update(batch)
             self.assertEqual(diagnostic["updates_this_group"], 1)
             self.assertEqual(diagnostic["sample_coverage"], 1)
@@ -167,11 +177,11 @@ class GRPOTests(unittest.TestCase):
             cfg = load_market_settings(path / "config.yaml").learning_config
             serial = GRPOAgent(cfg, seed=7, run=1)
             parallel = GRPOAgent(replace(cfg, sampling_workers=2), seed=7, run=1)
-            runner = LearningEpisodeRunner(path, period="train")
+            runner = partial(simulate_learning_episode, path, period="train")
             with ProcessPoolExecutor(max_workers=2, mp_context=get_context("spawn")) as pool:
                 for group in range(2):
                     serial_metrics = []
-                    batch, _ = collect_group(serial, runner, on_episode=lambda result: serial_metrics.append(
+                    batch = collect_group(serial, runner, on_episode=lambda result: serial_metrics.append(
                         _metrics(result, run=1, phase="train", gamma=cfg.gamma,
                                  episode=group * cfg.group_size + len(serial_metrics) + 1)
                     ))
@@ -252,6 +262,28 @@ class GRPOTests(unittest.TestCase):
             self.assertEqual(first.learning_steps, second.learning_steps)
             run_learning_test(path, output)
             self.assertEqual(len(read_rows(output / "learning_test_metrics.csv")), 6)
+
+    def test_evaluation_needs_no_critics_replay_buffer_or_optimizer(self):
+        for factory, agent_type in ((make_scenario, MATD3Agent), (make_grpo_scenario, GRPOAgent)):
+            with self.subTest(algorithm=agent_type.__name__), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                path = factory(root / "input")
+                config = load_market_settings(path / "config.yaml").learning_config
+                agent = (MATD3Agent(config, total_regular_steps=1, seed=7)
+                         if agent_type is MATD3Agent else GRPOAgent(config, seed=7))
+                checkpoint = root / "policy.pt"
+                agent.save_checkpoint(checkpoint, episode=1, validation_total_reward=0.0)
+                expected = simulate_learning_episode(
+                    path, agent.deterministic_action, period="validation"
+                )
+                with patch("electricity_market_sim.deep_learning.agent._TwinCritic",
+                           side_effect=AssertionError("Evaluation created critics")), \
+                     patch("electricity_market_sim.deep_learning.agent._ReplayBuffer",
+                           side_effect=AssertionError("Evaluation created a replay buffer")), \
+                     patch("torch.optim.AdamW",
+                           side_effect=AssertionError("Evaluation created an optimizer")):
+                    actual = evaluate_learning_scenario(path, root / "evaluation", checkpoint_path=checkpoint)
+                self.assertEqual(actual.learning_steps, expected.learning_steps)
 
     def test_fresh_training_ignores_incomplete_old_run_records(self):
         with TemporaryDirectory() as temporary:

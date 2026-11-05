@@ -20,8 +20,8 @@ _RUN_MANIFEST = "runs.json"
 def _periods_payload(config: LearningConfig) -> dict[str, list[str]]:
     """以可写入检查点的字符串形式记录三个交付时段。"""
     return {
-        name: [format_timestamp(period.start), format_timestamp(period.end)]
-        for name, period in config.periods
+        name: [format_timestamp(start), format_timestamp(end)]
+        for name, (start, end) in config.periods.items()
     }
 
 
@@ -70,7 +70,9 @@ def _initialize_linear(module: nn.Module) -> None:
         nn.init.zeros_(module.bias)
 
 
-def _read_checkpoint_payload(path: Path, device: torch.device | str, *, algorithm="matd3") -> dict[str, Any]:
+def _read_checkpoint_payload(
+    path: Path, device: torch.device | str, config: LearningConfig, *, algorithm="matd3"
+) -> dict[str, Any]:
     payload = torch.load(path, map_location=device, weights_only=True)
     if (
         payload.get("checkpoint_version") != (3 if algorithm == "grpo" else _CHECKPOINT_VERSION)
@@ -84,6 +86,19 @@ def _read_checkpoint_payload(path: Path, device: torch.device | str, *, algorith
         )
     if algorithm == "grpo" and payload.get("distribution") != "softsign-normal-v1":
         raise InputValidationError(f"Incompatible GRPO checkpoint: {path}")
+    if payload.get("max_bid_price") != config.max_bid_price:
+        raise InputValidationError(
+            f"Learning checkpoint {path} was trained with max_bid_price="
+            f"{payload.get('max_bid_price')!r}, but learning_config.max_bid_price="
+            f"{config.max_bid_price!r}."
+        )
+    if payload.get("periods") != _periods_payload(config):
+        raise InputValidationError(
+            f"Learning checkpoint {path} 的训练、验证、测试时段与当前 "
+            "learning_config.periods 不一致。"
+        )
+    if type(payload.get("run")) is not int:
+        raise InputValidationError(f"Learning checkpoint {path} must include an integer run.")
     return payload
 
 
@@ -184,7 +199,6 @@ class MATD3Agent:
                 self.config.noise_sigma * self.config.noise_scale * self.noise_factor
             )
             action += self.rng.normal(0.0, standard_deviation, size=ACTION_SIZE)
-        action = np.clip(action, -1.0, 1.0)
         return float(action[0]), float(action[1])
 
     def observe(self, transition: LearningTransition, *, train: bool) -> None:
@@ -271,18 +285,7 @@ class MATD3Agent:
         temporary_path.replace(path)
 
     def load_checkpoint(self, path: Path) -> dict[str, Any]:
-        payload = _read_checkpoint_payload(path, self.device)
-        if payload.get("max_bid_price") != self.config.max_bid_price:
-            raise InputValidationError(
-                f"Learning checkpoint {path} was trained with max_bid_price="
-                f"{payload.get('max_bid_price')!r}, but learning_config.max_bid_price="
-                f"{self.config.max_bid_price!r}."
-            )
-        if payload.get("periods") != _periods_payload(self.config):
-            raise InputValidationError(
-                f"Learning checkpoint {path} 的训练、验证、测试时段与当前 "
-                "learning_config.periods 不一致。"
-            )
+        payload = _read_checkpoint_payload(path, self.device, self.config)
         self.actor.load_state_dict(payload["actor"])
         return payload
 
@@ -315,6 +318,11 @@ def _read_run_manifest(path: Path, config: LearningConfig) -> dict[str, Any]:
             f"Learning run manifest {path} 的训练、验证、测试时段与当前 "
             "learning_config.periods 不一致。"
         )
+    if (
+        type(payload.get("selected_run")) is not int
+        or payload["selected_run"] not in {entry["run"] for entry in payload["runs"]}
+    ):
+        raise InputValidationError("Run manifest selected_run must identify an existing run.")
     return payload
 
 
@@ -324,8 +332,23 @@ def _default_checkpoint_root(config: LearningConfig, output_path: Path) -> Path:
     return output_path / "checkpoints"
 
 
-def create_agent(config: LearningConfig):
+def load_policy(config: LearningConfig, path: Path):
+    """只加载评估所需的 Actor，返回确定性策略和检查点元数据。"""
+    device = torch.device(config.device)
+    payload = _read_checkpoint_payload(path, device, config, algorithm=config.algorithm)
     if config.algorithm == "grpo":
-        from .grpo_agent import GRPOAgent
-        return GRPOAgent(config)
-    return MATD3Agent(config, total_regular_steps=1)
+        from .grpo_agent import GaussianActor
+        actor = GaussianActor(config.initial_std)
+    else:
+        actor = _Actor()
+    actor.to(device).eval()
+    actor.load_state_dict(payload["actor"])
+
+    def action(state):
+        observation = torch.as_tensor(state, dtype=torch.float32, device=device)
+        if config.algorithm == "matd3":
+            observation = observation.unsqueeze(0)
+        with torch.no_grad():
+            return tuple(actor(observation).reshape(-1).cpu().tolist())
+
+    return action, payload

@@ -2,15 +2,16 @@
 
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
+from functools import partial
 from multiprocessing import get_context
 from math import cos, pi
 from time import monotonic
 
 from ..errors import InputValidationError
-from ..simulation import LearningEpisodeRunner
+from ..simulation import simulate_learning_episode
 from .grpo_agent import GRPOAgent, collect_group
 from .grpo_sampling import collect_parallel_group
-from .learning_metrics import _metrics, _write_metrics, _write_records
+from .learning_metrics import _metrics, _write_records
 from .test import _evaluate_actor_and_baseline
 
 
@@ -30,8 +31,8 @@ def train_single_run(input_path, output_path, checkpoint_root, scenario, *,
     best_reward = float("-inf")
     best.unlink(missing_ok=True)
 
-    runner = LearningEpisodeRunner(input_path, scenario=scenario, period="train")
-    validation = LearningEpisodeRunner(input_path, scenario=scenario, period="validation")
+    runner = partial(simulate_learning_episode, input_path, scenario=scenario, period="train")
+    validation = partial(simulate_learning_episode, input_path, scenario=scenario, period="validation")
     metrics, diagnostics, progress = [], [], []
     started = monotonic()
     validation_seconds = 0.0
@@ -51,7 +52,7 @@ def train_single_run(input_path, output_path, checkpoint_root, scenario, *,
                                         gamma=config.gamma))
 
             if executor is None:
-                batch, _ = collect_group(agent, runner, on_episode=record)
+                batch = collect_group(agent, runner, on_episode=record)
             else:
                 batch, episode_metrics = collect_parallel_group(
                     agent, runner, executor, steps_per_episode, episode
@@ -67,7 +68,7 @@ def train_single_run(input_path, output_path, checkpoint_root, scenario, *,
             if group % config.validation_interval != 0 and group != groups:
                 continue
             validation_start = monotonic()
-            result = validation.run_episode(agent.deterministic_action)
+            result = validation(agent.deterministic_action)
             validation_seconds += monotonic() - validation_start
             score = _metrics(result, run=run, phase="validation", episode=episode, gamma=config.gamma)
             metrics.append(score)
@@ -82,12 +83,12 @@ def train_single_run(input_path, output_path, checkpoint_root, scenario, *,
 
     payload = agent.load_checkpoint(best)
     result, comparison = _evaluate_actor_and_baseline(
-        agent=agent, input_path=input_path, output_path=output_path / "validation",
+        action_provider=agent.deterministic_action,
+        input_path=input_path, output_path=output_path / "validation",
         scenario=scenario, period="validation", episode=payload["episode"],
         gamma=config.gamma, run=run,
     )
     metrics.extend(comparison)
-    _write_metrics(output_path / "learning_metrics.csv", metrics)
     _write_records(output_path / "grpo_diagnostics.csv", diagnostics)
     _write_records(output_path / "learning_progress.csv", progress)
-    return result, metrics, best, best_reward, agent.seed
+    return result, metrics, best, best_reward

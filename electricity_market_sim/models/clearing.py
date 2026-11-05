@@ -1,6 +1,5 @@
-""""""
+"""订单成交结果、逐笔交易和单产品出清汇总。"""
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from math import isclose, isfinite
@@ -75,22 +74,6 @@ class ClearedDemandBid:
         return self.accepted_energy_mwh * self.clearing_price_eur_per_mwh
 
 
-def sum_cleared_demand(
-    demand_bids: Iterable[ClearedDemandBid],
-    attribute: str,
-    demand_type: str | None = None,
-    bid_type: str | None = None,
-) -> float:
-    """按顺序累加需求出清结果的某个字段，组装市场结果之前或之后都可使用。"""
-    value_of = attrgetter(attribute)
-    return sum(
-        value_of(demand)
-        for demand in demand_bids
-        if (demand_type is None or demand.bid.demand_type == demand_type)
-        and (bid_type is None or demand.bid.bid_type == bid_type)
-    )
-
-
 @dataclass(frozen=True)
 class Trade:
     """出清后，保存一条买单与一条卖单之间的单笔成交记录。
@@ -120,10 +103,6 @@ class MarketClearingResult:
     """单个交付产品的市场出清结果。"""
     delivery_start: datetime
     delivery_end: datetime
-    requested_demand_mwh: float
-    cleared_energy_mwh: float
-    unserved_load_mwh: float
-    unfulfilled_export_mwh: float
     clearing_price_eur_per_mwh: float | None
     offers: tuple[ClearedSupplyOffer, ...]
     demand_bids: tuple[ClearedDemandBid, ...]
@@ -148,7 +127,6 @@ class MarketClearingResult:
         if any(
             value < -_ENERGY_TOLERANCE_MWH
             for value in (
-                self.requested_demand_mwh,
                 self.cleared_energy_mwh,
                 self.unserved_load_mwh,
                 self.unfulfilled_export_mwh,
@@ -188,20 +166,32 @@ class MarketClearingResult:
         accepted_demand_energy = self.demand_total("accepted_energy_mwh")
         if not isclose(
             accepted_demand_energy,
-            self.cleared_energy_mwh,
+            sum(offer.accepted_energy_mwh for offer in self.offers),
             rel_tol=0.0,
             abs_tol=_ENERGY_TOLERANCE_MWH,
         ):
             raise ValueError("买单成交电量之和必须等于出清电量。")
 
     @property
+    def requested_demand_mwh(self) -> float:
+        return self.demand_total("bid.volume_mwh")
+
+    @property
+    def cleared_energy_mwh(self) -> float:
+        return sum(offer.accepted_energy_mwh for offer in self.offers)
+
+    @property
+    def unserved_load_mwh(self) -> float:
+        return self.demand_total("unserved_energy_mwh", demand_type="inelastic_load")
+
+    @property
+    def unfulfilled_export_mwh(self) -> float:
+        return self.demand_total("unserved_energy_mwh", bid_type="export")
+
+    @property
     def duration_hours(self) -> float:
         """交付时长（小时），用于将电量换算为功率。"""
         return hours_between(self.delivery_start, self.delivery_end)
-
-    @property
-    def cleared_power_mw(self) -> float:
-        return self.cleared_energy_mwh / self.duration_hours
 
     def demand_total(
         self,
@@ -209,11 +199,13 @@ class MarketClearingResult:
         demand_type: str | None = None,
         bid_type: str | None = None,
     ) -> float:
-        return sum_cleared_demand(
-            self.demand_bids,
-            attribute,
-            demand_type=demand_type,
-            bid_type=bid_type,
+        """按需求类别或订单角色累加属性，支持嵌套属性路径。"""
+        value_of = attrgetter(attribute)
+        return sum(
+            value_of(demand)
+            for demand in self.demand_bids
+            if (demand_type is None or demand.bid.demand_type == demand_type)
+            and (bid_type is None or demand.bid.bid_type == bid_type)
         )
 
     @property

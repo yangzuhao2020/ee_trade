@@ -5,9 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from ..models import (
-    HouseholdCostResult,
-    HouseholdDispatchResult,
-    HouseholdFlexibilityResult,
+    HouseholdResult,
     summarize_household_savings,
 )
 from ..utils import hours_between
@@ -31,24 +29,24 @@ _COLORS = {
 def _by_unit(results) -> dict[str, list]:
     grouped: dict[str, list] = defaultdict(list)
     for result in results:
-        grouped[result.unit_name].append(result)
+        grouped[result.dispatch.plan.unit_name].append(result)
     for rows in grouped.values():
-        rows.sort(key=lambda result: (result.delivery_start, result.delivery_end))
+        rows.sort(key=lambda result: (result.dispatch.plan.delivery_start, result.dispatch.plan.delivery_end))
     return grouped
 
 
 def _active_spans(
-    rows: list[HouseholdDispatchResult], active
+    rows: list[HouseholdResult], active
 ) -> list[tuple[datetime, datetime]]:
     """把连续满足条件的交付时段合并为 (开始, 结束) 区间，用于背景着色。"""
     spans: list[tuple[datetime, datetime]] = []
     for row in rows:
         if not active(row):
             continue
-        if spans and spans[-1][1] == row.delivery_start:
-            spans[-1] = (spans[-1][0], row.delivery_end)
+        if spans and spans[-1][1] == row.dispatch.plan.delivery_start:
+            spans[-1] = (spans[-1][0], row.dispatch.plan.delivery_end)
         else:
-            spans.append((row.delivery_start, row.delivery_end))
+            spans.append((row.dispatch.plan.delivery_start, row.dispatch.plan.delivery_end))
     return spans
 
 
@@ -63,9 +61,7 @@ def _apply_chinese_fonts(figure) -> None:
 def _plot_household_dispatch(
     pyplot,
     dates,
-    results: tuple[HouseholdDispatchResult, ...],
-    flexibility_results: tuple[HouseholdFlexibilityResult, ...],
-    cost_results: tuple[HouseholdCostResult, ...],
+    results: tuple[HouseholdResult, ...],
     path: Path,
     *,
     days: int | None = None,
@@ -76,10 +72,6 @@ def _plot_household_dispatch(
     """
 
     dispatch_by_unit = _by_unit(results)
-    flexibility = {
-        (result.unit_name, result.delivery_start): result for result in flexibility_results
-    }
-    costs = {(result.unit_name, result.delivery_start): result for result in cost_results}
     household_names = sorted(dispatch_by_unit)
     figure, axes = pyplot.subplots(
         4 * len(household_names),
@@ -93,27 +85,26 @@ def _plot_household_dispatch(
     for index, unit_name in enumerate(household_names):
         rows = dispatch_by_unit[unit_name]
         if days is not None:
-            limit = rows[0].delivery_start + timedelta(days=days)
-            rows = [row for row in rows if row.delivery_start < limit]
+            limit = rows[0].dispatch.plan.delivery_start + timedelta(days=days)
+            rows = [row for row in rows if row.dispatch.plan.delivery_start < limit]
         price_axis, battery_axis, soc_axis, grid_axis = axes[4 * index: 4 * index + 4, 0]
-        edges = [rows[0].delivery_start] + [row.delivery_end for row in rows]
+        edges = [rows[0].dispatch.plan.delivery_start] + [row.dispatch.plan.delivery_end for row in rows]
 
         def stepped(values: list[float]) -> list[float]:
             return [*values, values[-1]]
 
-        row_costs = [costs.get((unit_name, row.delivery_start)) for row in rows]
         actual_prices = [
             float("nan")
-            if cost is None or cost.actual_price_eur_per_mwh is None
+            if cost.actual_price_eur_per_mwh is None
             else cost.actual_price_eur_per_mwh
-            for cost in row_costs
+            for cost in rows
         ]
-        durations = [hours_between(row.delivery_start, row.delivery_end) for row in rows]
+        durations = [hours_between(row.dispatch.plan.delivery_start, row.dispatch.plan.delivery_end) for row in rows]
 
         charge_spans = _active_spans(
-            rows, lambda row: row.battery_charge_power_mw > _POWER_TOLERANCE_MW)
+            rows, lambda row: row.dispatch.battery_charge_power_mw > _POWER_TOLERANCE_MW)
         discharge_spans = _active_spans(
-            rows, lambda row: row.battery_discharge_power_mw > _POWER_TOLERANCE_MW)
+            rows, lambda row: row.dispatch.battery_discharge_power_mw > _POWER_TOLERANCE_MW)
         for axis in (price_axis, battery_axis):
             for spans, color in (
                 (charge_spans, _COLORS["charge"]),
@@ -123,7 +114,7 @@ def _plot_household_dispatch(
                     axis.axvspan(start, end, color=color, alpha=0.10, linewidth=0)
 
         price_axis.step(
-            edges, stepped([row.forecast_price_eur_per_mwh for row in rows]),
+            edges, stepped([row.dispatch.plan.forecast_price_eur_per_mwh for row in rows]),
             where="post", color=_COLORS["forecast"], linewidth=1.3, linestyle="--",
             label=f"{unit_name} 预测购电价（优化依据）",
         )
@@ -140,11 +131,11 @@ def _plot_household_dispatch(
         price_axis.legend(loc="upper right", ncol=2, fontsize=8)
 
         battery_axis.fill_between(
-            edges, 0, stepped([row.battery_charge_power_mw * 1000 for row in rows]),
+            edges, 0, stepped([row.dispatch.battery_charge_power_mw * 1000 for row in rows]),
             step="post", color=_COLORS["charge"], alpha=0.8, linewidth=0, label="充电",
         )
         battery_axis.fill_between(
-            edges, 0, stepped([-row.battery_discharge_power_mw * 1000 for row in rows]),
+            edges, 0, stepped([-row.dispatch.battery_discharge_power_mw * 1000 for row in rows]),
             step="post", color=_COLORS["discharge"], alpha=0.8, linewidth=0, label="放电",
         )
         battery_axis.axhline(0, color="#1F1F1F", linewidth=0.8)
@@ -156,44 +147,41 @@ def _plot_household_dispatch(
         soc_times: list[datetime] = []
         soc_values: list[float] = []
         for row in rows:
-            if not soc_times or soc_times[-1] != row.delivery_start:
-                soc_times.append(row.delivery_start)
-                soc_values.append(row.soc_before * 100)
-            soc_times.append(row.delivery_end)
-            soc_values.append(row.soc_after * 100)
+            if not soc_times or soc_times[-1] != row.dispatch.plan.delivery_start:
+                soc_times.append(row.dispatch.plan.delivery_start)
+                soc_values.append(row.dispatch.soc_before * 100)
+            soc_times.append(row.dispatch.plan.delivery_end)
+            soc_values.append(row.dispatch.soc_after * 100)
         soc_axis.plot(soc_times, soc_values, color=_COLORS["soc"], linewidth=1.5)
         soc_axis.set_title("电池 SOC", loc="left", fontsize=10)
         soc_axis.set_ylabel("SOC（%）")
         soc_axis.set_ylim(0, min(100.0, max(soc_values) * 1.1 + 1.0))
         soc_axis.grid(axis="y", alpha=0.25)
 
-        flexibility_rows = [flexibility.get((unit_name, row.delivery_start)) for row in rows]
-        if all(item is not None for item in flexibility_rows):
-            grid_axis.fill_between(
-                edges,
-                stepped([item.minimum_grid_power_mw for item in flexibility_rows]),
-                stepped([item.maximum_grid_power_mw for item in flexibility_rows]),
-                step="post", color=_COLORS["flexibility"], alpha=0.45, linewidth=0,
-                label="灵活性区间（成本容忍度内）",
-            )
-        if all(cost is not None for cost in row_costs):
-            grid_axis.step(
-                edges,
-                stepped([
-                    cost.baseline_grid_energy_mwh / duration
-                    for cost, duration in zip(row_costs, durations)
-                ]),
-                where="post", color=_COLORS["baseline"], linewidth=1.1, linestyle="--",
-                label="基准购电（不使用电池）",
-            )
-            grid_axis.step(
-                edges,
-                stepped([
-                    cost.accepted_grid_energy_mwh / duration
-                    for cost, duration in zip(row_costs, durations)
-                ]),
-                where="post", color=_COLORS["grid"], linewidth=1.4, label="实际购电（优化后）",
-            )
+        grid_axis.fill_between(
+            edges,
+            stepped([row.dispatch.grid_power_bounds_mw[0] for row in rows]),
+            stepped([row.dispatch.grid_power_bounds_mw[1] for row in rows]),
+            step="post", color=_COLORS["flexibility"], alpha=0.45, linewidth=0,
+            label="灵活性区间（成本容忍度内）",
+        )
+        grid_axis.step(
+            edges,
+            stepped([
+                cost.baseline_grid_energy_mwh / duration
+                for cost, duration in zip(rows, durations)
+            ]),
+            where="post", color=_COLORS["baseline"], linewidth=1.1, linestyle="--",
+            label="基准购电（不使用电池）",
+        )
+        grid_axis.step(
+            edges,
+            stepped([
+                cost.accepted_grid_energy_mwh / duration
+                for cost, duration in zip(rows, durations)
+            ]),
+            where="post", color=_COLORS["grid"], linewidth=1.4, label="实际购电（优化后）",
+        )
         grid_axis.set_title("电网购电功率", loc="left", fontsize=10)
         grid_axis.set_ylabel("功率（MW）")
         grid_axis.grid(axis="y", alpha=0.25)
@@ -210,8 +198,7 @@ def _plot_household_dispatch(
 def _plot_household_savings(
     pyplot,
     dates,
-    dispatch_results: tuple[HouseholdDispatchResult, ...],
-    cost_results: tuple[HouseholdCostResult, ...],
+    results: tuple[HouseholdResult, ...],
     path: Path,
 ) -> Path:
     """绘制各居民相对不使用电池基准方案的累计节省。
@@ -219,11 +206,11 @@ def _plot_household_savings(
     对照不可比（缺供量不同或期末 SOC 低于基准）时标题标红。
     """
 
-    costs_by_unit = _by_unit(cost_results)
+    costs_by_unit = _by_unit(results)
     household_names = sorted(costs_by_unit)
     summaries = {
         summary.unit_name: summary
-        for summary in summarize_household_savings(dispatch_results, cost_results)
+        for summary in summarize_household_savings(results)
     }
     figure, axes = pyplot.subplots(
         len(household_names),
@@ -238,7 +225,7 @@ def _plot_household_savings(
         cumulative_axis = axes[index, 0]
 
         summary = summaries[unit_name]
-        times = [rows[0].delivery_start] + [row.delivery_end for row in rows]
+        times = [rows[0].dispatch.plan.delivery_start] + [row.dispatch.plan.delivery_end for row in rows]
         actual = [0.0]
         for row in rows:
             actual.append(actual[-1] + row.actual_saving_eur)
@@ -254,7 +241,9 @@ def _plot_household_savings(
             f"基准支付 {summary.baseline_payment_eur:,.2f} EUR\n"
             + ("对照可比" if summary.comparable
                else "对照不可比：实际节省不构成同等服务下的节省")
-            + "".join(f"\n{line}" for line in summary.difference_lines()),
+            + f"\n缺热量逐时段不一致 {summary.unmet_heat_mismatch_mwh_th:.6f} MWh_th"
+            + f"（净差 {summary.unmet_heat_difference_mwh_th:+.6f}）"
+            + f"\n期末 SOC 差 {summary.final_soc_difference * 100:+.2f} 个百分点",
             transform=cumulative_axis.transAxes, ha="left", va="top", fontsize=10,
             bbox={
                 "boxstyle": "round,pad=0.4", "facecolor": "white",

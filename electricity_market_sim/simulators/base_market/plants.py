@@ -7,11 +7,10 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from ...bidding import (
     PlantRuntimeState, available_power_mw, heuristic_block_offers,
-    heuristic_flexible_offers, naive_offer,
+    heuristic_segment_specs, naive_offer, segment_supply_offers,
 )
 from ...errors import InputValidationError
 from ...models import (
-    ExchangeSchedule,
     ExchangeUnit,
     MarketClearingResult,
     MarketOpening,
@@ -19,11 +18,10 @@ from ...models import (
     PowerPlant,
     SupplyOffer,
 )
-from ...utils import format_timestamp
 from .demand import _exchange_import_offer
 
 if TYPE_CHECKING:
-    from ..eom import EomMarketExtension, ScheduledProductKey
+    from ...deep_learning.learning import LearningEpisodeSession
 
 _POWER_TOLERANCE_MW = 1e-9
 _LINKED_REQUIRED_FIELDS = frozenset({"bid_type", "min_acceptance_ratio", "parent_bid_id"})
@@ -40,12 +38,10 @@ def _validate_strategy_configuration(
     不满足要求时抛出 InputValidationError；没有关联报价机组时直接返回。
     """
 
-    linked_plants = [
-        plant.name
+    if not any(
+        plant.bidding_strategy == "powerplant_energy_heuristic_linked"
         for plant in plants
-        if plant.bidding_strategy == "powerplant_energy_heuristic_linked"
-    ]
-    if not linked_plants:
+    ):
         return
     if settings.market_mechanism != "complex_clearing":
         raise InputValidationError(
@@ -69,7 +65,6 @@ def _apply_startup_costs(
 ) -> MarketClearingResult:
     """已成交的产品开始交付时，为需要启动的机组计入启动成本。"""
 
-    plants_by_name = {plant.name: plant for plant in plants}
     accepted_by_plant: dict[str, float] = defaultdict(float)
     for cleared in market_result.offers:
         if cleared.offer.offer_type == "power_plant":
@@ -81,6 +76,7 @@ def _apply_startup_costs(
     }
     if not started_names:
         return market_result
+    plants_by_name = {plant.name: plant for plant in plants}
     has_inflexible_offer = {
         cleared.offer.unit_name
         for cleared in market_result.offers
@@ -119,8 +115,8 @@ def _record_runtime_states(
         if cleared.offer.unit_name in runtime_states:
             accepted_by_plant[cleared.offer.unit_name] += cleared.accepted_energy_mwh
     for plant_name, state in runtime_states.items():
-        state.record_dispatch(
-            accepted_by_plant[plant_name] / market_result.duration_hours
+        state.is_running = (
+            accepted_by_plant[plant_name] / market_result.duration_hours > _POWER_TOLERANCE_MW
         )
 
 
@@ -134,9 +130,8 @@ def _offers_for_opening(
     fuel_price_profiles: dict[datetime, dict[str, float]] | None,
     price_forecasts: dict[datetime, float],
     exchange_unit: ExchangeUnit | None,
-    exchange_schedules: dict[datetime, ExchangeSchedule | None],
-    extension: EomMarketExtension | None = None,
-    scheduled_results: dict[ScheduledProductKey, MarketClearingResult] | None = None,
+    exchange_profiles: dict[datetime, tuple[float, float]],
+    learning_session: LearningEpisodeSession | None = None,
 ) -> list[SupplyOffer]:
     """机组卖单；启用 Exchange 时加入进口卖单"""
 
@@ -154,24 +149,16 @@ def _offers_for_opening(
         ) -> float:
             if fuel_price_profiles is None:
                 return marginal_costs[current_plant.name]
-            try:
-                prices = fuel_price_profiles[delivery_start]
-            except KeyError as exc:
-                raise InputValidationError(
-                    "fuel_prices_df.csv has no complete product profile for "
-                    f"{format_timestamp(delivery_start)}."
-                ) from exc
-            return current_plant.marginal_cost(prices)
+            return current_plant.marginal_cost(fuel_price_profiles[delivery_start])
 
-        extension_offers = (
-            extension.offers_for_plant(
-                plant, opening.products, available_powers, marginal_cost_at,
-                scheduled_results if scheduled_results is not None else {},
-            )
-            if extension is not None else None
-        )
-        if extension_offers is not None:
-            offers.extend(extension_offers)
+        if learning_session is not None and plant.name == learning_session.plant.name:
+            start, end = opening.products[0]
+            offers.extend(learning_session.offers_for_product(
+                delivery_start=start,
+                delivery_end=end,
+                available_power_mw=available_powers[start],
+                marginal_cost_eur_per_mwh=marginal_cost_at(start),
+            ))
             continue
 
         if plant.bidding_strategy == "powerplant_energy_naive":
@@ -187,15 +174,15 @@ def _offers_for_opening(
             )
         elif plant.bidding_strategy == "powerplant_energy_heuristic_flexable":
             for start, end in opening.products:
+                marginal_cost = marginal_cost_at(start)
                 offers.extend(
-                    heuristic_flexible_offers(
-                        plant,
-                        runtime_states[plant.name],
-                        start,
-                        end,
-                        available_powers[start],
-                        marginal_cost_at(start),
-                        price_forecasts,
+                    segment_supply_offers(
+                        plant, start, end,
+                        heuristic_segment_specs(
+                            plant, runtime_states[plant.name], start, end,
+                            available_powers[start], marginal_cost, price_forecasts,
+                        ),
+                        marginal_cost,
                     )
                 )
         elif plant.bidding_strategy in {
@@ -218,15 +205,13 @@ def _offers_for_opening(
             )
         else:
             raise InputValidationError(
-                f"{plant.bidding_strategy} requires a supply-side market extension."
+                f"{plant.bidding_strategy} requires a learning session."
             )
     if exchange_unit is not None:
         for delivery_start, delivery_end in opening.products:
-            schedule = exchange_schedules[delivery_start]
-            assert schedule is not None
             offers.append(
                 _exchange_import_offer(
-                    exchange_unit, schedule, delivery_start, delivery_end
+                    exchange_unit, exchange_profiles[delivery_start], delivery_start, delivery_end
                 )
             )
     return offers

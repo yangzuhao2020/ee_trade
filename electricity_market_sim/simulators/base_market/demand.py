@@ -1,7 +1,7 @@
 """刚性与弹性需求买单生成，以及计划进口卖单和出口买单的构建。"""
 
 from datetime import datetime
-from ...models import DemandBid, ExchangeSchedule, ExchangeUnit, SupplyOffer
+from ...models import DemandBid, ExchangeUnit, SupplyOffer
 from ...utils import hours_between
 
 
@@ -12,10 +12,6 @@ def _elastic_demand_bids(
 ) -> list[DemandBid]:
     """将 V2 的等弹性需求曲线离散化为价格逐段递减的买单。"""
 
-    assert demand_unit.max_power_mw is not None
-    assert demand_unit.elasticity is not None
-    assert demand_unit.max_price_eur_per_mwh is not None
-    assert demand_unit.num_bids is not None
     duration_hours = hours_between(delivery_start, delivery_end)
     maximum_power = demand_unit.max_power_mw
     maximum_price = demand_unit.max_price_eur_per_mwh
@@ -51,12 +47,12 @@ def _demand_bids_for_product(
     demand_units,
     demand_profiles: dict[str, dict[datetime, float]],
     exchange_unit: ExchangeUnit | None,
-    exchange_profiles: dict[datetime, ExchangeSchedule],
+    exchange_profiles: dict[datetime, tuple[float, float]],
     delivery_start: datetime,
     delivery_end: datetime,
     maximum_bid_price: float, # 刚性负载最高意愿的买单。
     include_elastic: bool = True,
-) -> tuple[list[DemandBid], ExchangeSchedule | None]:
+) -> list[DemandBid]:
     """为指定交付时段生成需求侧买单，供后续市场出清使用"""
 
     duration_hours = hours_between(delivery_start, delivery_end)
@@ -80,31 +76,31 @@ def _demand_bids_for_product(
             )
         )
     if exchange_unit is None:
-        return demand_bids, None
+        return demand_bids
     
-    exchange_schedule = exchange_profiles[delivery_start]
+    _, export_power = exchange_profiles[delivery_start]
     demand_bids.append(
         DemandBid(
             unit_name=exchange_unit.name,
             operator=exchange_unit.operator,
             delivery_start=delivery_start,
             delivery_end=delivery_end,
-            volume_mwh=exchange_schedule.export_power_mw * duration_hours,
+            volume_mwh=export_power * duration_hours,
             price_eur_per_mwh=exchange_unit.price_export_eur_per_mwh,
-            bid_type="export",
             bid_id=f"{exchange_unit.name}::export::{delivery_start.isoformat()}",
             demand_type="export",
         )
     )
-    return demand_bids, exchange_schedule
+    return demand_bids
 
 
 def _exchange_import_offer(
     exchange_unit: ExchangeUnit,
-    exchange_schedule: ExchangeSchedule,
+    exchange_schedule: tuple[float, float],
     delivery_start: datetime,
     delivery_end: datetime,
 ) -> SupplyOffer:
+    import_power, _ = exchange_schedule
     duration_hours = hours_between(delivery_start, delivery_end)
     identifier = f"{exchange_unit.name}::import::{delivery_start.isoformat()}"
     return SupplyOffer(
@@ -113,8 +109,7 @@ def _exchange_import_offer(
         technology="exchange",
         delivery_start=delivery_start,
         delivery_end=delivery_end,
-        offered_power_mw=exchange_schedule.import_power_mw,
-        offered_energy_mwh=exchange_schedule.import_power_mw * duration_hours,
+        offered_energy_mwh=import_power * duration_hours,
         bid_price_eur_per_mwh=exchange_unit.price_import_eur_per_mwh,
         marginal_cost_eur_per_mwh=0.0,
         offer_type="import",

@@ -22,82 +22,41 @@ from ..models import (
     StorageDispatchResult,
 )
 from .base_market import BaseMarket
-from .eom import (
-    EomExtensionInputs,
-    ScheduledProductKey,
-)
+from .eom import ScheduledProductKey
 
 
-class _IndustryInputs:
-    """读取工业仿真需要的预测和价格数据，按市场交付时长对齐，再把基础市场需要的数据打包返回。"""
-    def __init__(
-        self,
-        input_path: Path,
-        settings: MarketSettings,
-        units: tuple[IndustrialUnit, ...],
-    ) -> None:
-        self.input_path = input_path
-        self.settings = settings
-        self.units = units
-        self.profiles: dict[str, dict[datetime, float]] = {}
-        self.fuel_price_profiles: dict[datetime, dict[str, float]] = {}
-
-    def load(self, market: BaseMarket) -> EomExtensionInputs:
-        requires_market_price_forecast = market.requires_market_price_forecast
-        external_forecast_columns = (
-            {"electricity_price"} if requires_market_price_forecast else set()
+def _load_industry_inputs(
+    market: BaseMarket, units: tuple[IndustrialUnit, ...],
+) -> tuple[dict[str, dict[datetime, float]], dict[datetime, dict[str, float]]]:
+    """按产品时长对齐工业预测和价格，返回时序数据。"""
+    required_forecasts = tuple(
+        sorted(
+            ({"electricity_price"} if market.requires_market_price_forecast else set())
+            | {unit.forecast_price_column for unit in units}
+            | {f"{unit.name}_normalized_load_profile" for unit in units}
         )
-        required_forecasts = tuple(
-            sorted(
-                external_forecast_columns
-                | {unit.forecast_price_column for unit in self.units}
-                | {f"{unit.name}_normalized_load_profile" for unit in self.units}
-            )
-        )
-        self.profiles = load_aligned_time_series_profiles(
-            self.input_path / "forecasts_df.csv",
-            required_forecasts,
-            self.settings.product_duration,
-        )
-        self.fuel_price_profiles = load_aligned_fuel_price_profiles(
-            self.input_path / "fuel_prices_df.csv",
-            self.settings.product_duration,
-        )
-        if not self.fuel_price_profiles:
-            raise InputValidationError(
-                "fuel_prices_df.csv 中没有完整交付时段的价格数据。")
-
-        for missing_price in missing_industrial_price_names(self.fuel_price_profiles):
-            warnings.warn(
-                f"fuel_prices_df.csv 中缺少原料 {missing_price!r} 的价格数据；"
-                "工业优化将按文档规定使用默认价格 0。",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        market_price_forecasts = (
-            self.profiles["electricity_price"]
-            if requires_market_price_forecast else None)
-        return EomExtensionInputs(
-            participant_names=tuple(unit.name for unit in self.units),
-            fuel_prices=next(iter(self.fuel_price_profiles.values())),
-            fuel_price_profiles=self.fuel_price_profiles,
-            market_price_forecasts=market_price_forecasts,
-        )
-
-
-def _load_and_validate_industrial_units(
-    input_path: Path, settings: MarketSettings
-) -> tuple[IndustrialUnit, ...]:
-    """加载工业用户（钢铁厂）的配置，检查是否满足第四版工业滚动优化的要求，通过后返回工业用户集合。"""
-    if settings.industrial_dsm_units_file is None:
+    )
+    profiles = load_aligned_time_series_profiles(
+        market.input_path / "forecasts_df.csv",
+        required_forecasts,
+        market.settings.product_duration,
+    )
+    fuel_price_profiles = load_aligned_fuel_price_profiles(
+        market.input_path / "fuel_prices_df.csv",
+        market.settings.product_duration,
+    )
+    if not fuel_price_profiles:
         raise InputValidationError(
-            "第四版场景要求在 config.yaml 中配置 industrial_dsm_units。")
-    units = load_industrial_units(input_path / settings.industrial_dsm_units_file)
-    if settings.market_mechanism != "pay_as_clear":
-        raise InputValidationError(
-            "第四版工业滚动优化目前仅支持统一出清价机制"
-            "（market_mechanism: pay_as_clear）。")
-    return units
+            "fuel_prices_df.csv 中没有完整交付时段的价格数据。")
+
+    for missing_price in missing_industrial_price_names(fuel_price_profiles):
+        warnings.warn(
+            f"fuel_prices_df.csv 中缺少原料 {missing_price!r} 的价格数据；"
+            "工业优化将按文档规定使用默认价格 0。",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return profiles, fuel_price_profiles
 
 
 def simulate_v4_market(
@@ -110,15 +69,26 @@ def simulate_v4_market(
     机组报价、储能订单、出清及常规设备状态仍由 BaseMarket 负责。
     """
     # 1. 准备基础市场和工业输入，建立滚动生产协调器。
-    units = _load_and_validate_industrial_units(input_path, settings)
-    inputs = _IndustryInputs(input_path, settings, units)
+    if settings.industrial_dsm_units_file is None:
+        raise InputValidationError(
+            "第四版场景要求在 config.yaml 中配置 industrial_dsm_units。")
+    units = load_industrial_units(input_path / settings.industrial_dsm_units_file)
+    if settings.market_mechanism != "pay_as_clear":
+        raise InputValidationError(
+            "第四版工业滚动优化目前仅支持统一出清价机制"
+            "（market_mechanism: pay_as_clear）。")
     market = BaseMarket(input_path, settings, openings)
-    market.prepare(input_loader=inputs.load)
+    profiles, fuel_price_profiles = _load_industry_inputs(market, units)
+    market.prepare(
+        participant_names=tuple(unit.name for unit in units),
+        fuel_price_profiles=fuel_price_profiles,
+        market_price_forecasts=(
+            profiles["electricity_price"] if market.requires_market_price_forecast else None),
+    )
     product_list = [
         product
         for opening in market.valid_openings
         for product in opening.products
-        if product[1] <= settings.end
     ]
     
     if len(product_list) != len(set(product_list)):
@@ -130,29 +100,30 @@ def simulate_v4_market(
         units=units,
         all_products=tuple(sorted(product_list)), # 所有可安排的交付时段
         price_forecasts={
-            unit.name: inputs.profiles[unit.forecast_price_column] for unit in units},
+            unit.name: profiles[unit.forecast_price_column] for unit in units},
         normalized_load_profiles={
-            unit.name: inputs.profiles[f"{unit.name}_normalized_load_profile"]
+            unit.name: profiles[f"{unit.name}_normalized_load_profile"]
             for unit in units}, # 每家工厂对应的参考负荷曲线
-        fuel_price_profiles=inputs.fuel_price_profiles,
+        fuel_price_profiles=fuel_price_profiles,
         maximum_bid_price=settings.maximum_bid_price,
     )
 
     openings_by_time: dict[datetime, list[MarketOpening]] = defaultdict(list)
     for opening in market.valid_openings:
         openings_by_time[opening.opening_time].append(opening)
-    scheduled_results: dict[ScheduledProductKey, MarketClearingResult] = {}
-    pending_starts: dict[datetime, list[ScheduledProductKey]] = defaultdict(list)
-    pending_ends: dict[datetime, list[ScheduledProductKey]] = defaultdict(list)
-    market_results: list[MarketClearingResult] = []
-    storage_results: list[StorageDispatchResult] = []
+        
+    scheduled_results = {}
+    pending_starts = defaultdict(list)
+    pending_ends = defaultdict(list)
+    market_results = []
+    storage_results = []
 
     while openings_by_time or pending_starts or pending_ends:
         event_time = min([*openings_by_time, *pending_starts, *pending_ends])
 
         # 取出当前时间对应的列表，并从字典里删除这一项，表示这批结束事件已经取出处理。如果当前时间没有交付结束，就返回空列表 []，循环执行零次。
         for key in pending_ends.pop(event_time, []):
-            result = scheduled_results[key]
+            result = scheduled_results.pop(key)
             storage_results.extend(market.end_delivery(result))
             coordinator.record_delivery(result) # 更新钢铁厂的实际生产情况
 
@@ -184,19 +155,15 @@ def simulate_v4_market(
         settings=settings,
         market_results=tuple(sorted(
             market_results,
-            key=lambda item: (item.delivery_start, item.opening_time or item.delivery_start),
+            key=lambda item: (item.delivery_start, item.opening_time),
         )),
         storage_results=tuple(sorted(
             storage_results,
-            key=lambda item: (item.delivery_start, item.opening_time, item.unit_name),
+            key=lambda item: (item.delivery_start, item.opening_time, item.unit.name),
         )),
         industry_results=tuple(sorted(
             coordinator.dispatch_results,
-            key=lambda item: (item.delivery_start, item.unit_name),
-        )),
-        industry_flexibility_results=tuple(sorted(
-            coordinator.flexibility_results,
-            key=lambda item: (item.delivery_start, item.unit_name),
+            key=lambda item: (item.plan.delivery_start, item.plan.unit_name),
         )),
         industry_optimization_windows=tuple(sorted(
             coordinator.window_results,

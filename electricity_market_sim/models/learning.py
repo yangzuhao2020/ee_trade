@@ -8,13 +8,6 @@ LEARNING_PERIOD_NAMES = ("train", "validation", "test")
 
 
 @dataclass(frozen=True)
-class LearningPeriod:
-    """按交付开始时间定义的半开区间 [start, end)。"""
-    start: datetime
-    end: datetime
-
-
-@dataclass(frozen=True)
 class LearningConfig:
     """MATD3 / GRPO 的公共设置及各自训练参数。"""
     learning_mode: bool
@@ -32,18 +25,16 @@ class LearningConfig:
     noise_sigma: float = 0.1
     noise_scale: float = 1.0
     noise_dt: float = 1.0
-    action_noise_schedule: str = "linear"
     tau: float = 0.005
     policy_delay: int = 2
     target_policy_noise: float = 0.2
     target_noise_clip: float = 0.5
-    actor_architecture: str = "mlp"
     device: str = "cpu"
     trained_policies_save_path: str | None = None
     trained_policies_load_path: str | None = None
     max_bid_price: float = 100.0
-    # 学习模式必填，按 train、validation、test 的顺序保存 (名称, 交付时段)。
-    periods: tuple[tuple[str, LearningPeriod], ...] | None = None
+    # 学习模式必填，按名称保存交付时段 [start, end)。
+    periods: dict[str, tuple[datetime, datetime]] | None = None
     training_steps: int = 0
     group_size: int = 12
     sampling_workers: int = 4
@@ -58,14 +49,6 @@ class LearningConfig:
     max_grad_norm: float = 1.0
     weight_decay: float = 0.01
     min_lr_ratio: float = 0.25
-
-    def period(self, name: str) -> LearningPeriod:
-        """返回指定数据集的交付时段；未配置时报错。"""
-        for period_name, period in self.periods or ():
-            if period_name == name:
-                return period
-        raise ValueError(f"learning_config.periods 未配置 {name!r} 时段。")
-
 
 @dataclass(frozen=True)
 class LearningStepResult:

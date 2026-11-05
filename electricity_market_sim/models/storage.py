@@ -11,7 +11,6 @@ class StorageUnit:
     name: str
     operator: str
     technology: str
-    bidding_strategy: str
     max_power_charge_mw: float
     max_power_discharge_mw: float
     efficiency_charge: float
@@ -38,28 +37,14 @@ class StorageUnit:
 
 
 @dataclass(frozen=True)
-class StorageClearingContext:
-    """单次联合复杂出清开市所需的储能物理数据。"""
-    unit_name: str
-    initial_energy_mwh: float
-    min_energy_mwh: float
-    max_energy_mwh: float
-    efficiency_charge: float
-    efficiency_discharge: float
-
-
-@dataclass(frozen=True)
 class StorageDispatchResult:
     """单个储能单元在单个产品上的成交调度结果及 SOC 变化。"""
     opening_time: datetime
     delivery_start: datetime
     delivery_end: datetime
-    unit_name: str
-    operator: str
-    technology: str
+    unit: StorageUnit
     energy_before_mwh: float
     energy_after_mwh: float
-    capacity_mwh: float
     offered_charge_mwh: float
     accepted_charge_mwh: float
     charge_bid_price_eur_per_mwh: float | None
@@ -67,18 +52,30 @@ class StorageDispatchResult:
     accepted_discharge_mwh: float
     discharge_bid_price_eur_per_mwh: float | None
     clearing_price_eur_per_mwh: float
-    charge_payment_eur: float
-    discharge_revenue_eur: float
-    additional_charge_cost_eur: float
-    additional_discharge_cost_eur: float
+
+    @property
+    def additional_charge_cost_eur(self) -> float:
+        return self.accepted_charge_mwh * self.unit.additional_cost_charge_eur_per_mwh
+
+    @property
+    def additional_discharge_cost_eur(self) -> float:
+        return self.accepted_discharge_mwh * self.unit.additional_cost_discharge_eur_per_mwh
+
+    @property
+    def charge_payment_eur(self) -> float:
+        return self.accepted_charge_mwh * self.clearing_price_eur_per_mwh
+
+    @property
+    def discharge_revenue_eur(self) -> float:
+        return self.accepted_discharge_mwh * self.clearing_price_eur_per_mwh
 
     @property
     def soc_before(self) -> float:
-        return self.energy_before_mwh / self.capacity_mwh
+        return self.energy_before_mwh / self.unit.capacity_mwh
 
     @property
     def soc_after(self) -> float:
-        return self.energy_after_mwh / self.capacity_mwh
+        return self.energy_after_mwh / self.unit.capacity_mwh
 
     @property
     def net_cash_flow_eur(self) -> float:

@@ -30,13 +30,13 @@
 | --- | --- | --- |
 | [market.py](market.py) | `MarketSettings`、`MarketOpening` | 市场配置与一次开市的产品安排 |
 | [plants.py](plants.py) | `PowerPlant` | 发电机组参数及边际成本计算 |
-| [demand.py](demand.py) | `DemandUnit`、`ExchangeUnit`、`ExchangeSchedule` | 普通需求参与者与计划进出口 |
-| [storage.py](storage.py) | `StorageUnit`、`StorageClearingContext`、`StorageDispatchResult` | 储能参数、联合出清上下文与运行结果 |
-| [household.py](household.py) | `HouseholdUnit`、`HouseholdPlan`、`HouseholdDispatchResult`、`HouseholdCostResult`、`HouseholdFlexibilityResult` | 居民建筑参数、计划、实际运行、购电成本对比与灵活性范围 |
-| [industry.py](industry.py) | `IndustrialDevice`、`IndustrialUnit`、`IndustrialPlan`、`IndustrialDispatchResult`、`IndustrialFlexibilityResult`、`IndustrialOptimizationWindowResult` | 工业钢铁厂设备、生产计划、运行及滚动优化结果 |
-| [learning.py](learning.py) | `LearningConfig`、`LearningPeriod`、`LearningStepResult`、`LearningTransition` | 学习配置与数据时段、逐时段动作与奖励、经验回放记录 |
+| [demand.py](demand.py) | `DemandUnit`、`ExchangeUnit` | 普通需求参与者与进出口参与者 |
+| [storage.py](storage.py) | `StorageUnit`、`StorageDispatchResult` | 储能参与者参数与运行结果 |
+| [household.py](household.py) | `HouseholdUnit`、`HouseholdPlan`、`HouseholdDispatchResult`、`HouseholdResult`、`HouseholdSavingSummary` | 居民参数、计划、实际运行、基准对照和节省汇总 |
+| [industry.py](industry.py) | `IndustrialDevice`、`IndustrialUnit`、`IndustrialPlan`、`IndustrialDispatchResult`、`IndustrialOptimizationWindowResult` | 工业钢铁厂设备、生产计划、运行及滚动优化结果 |
+| [learning.py](learning.py) | `LearningConfig`、`LearningStepResult`、`LearningTransition` | 学习配置与数据时段、逐时段动作与奖励、经验回放记录 |
 | [orders.py](orders.py) | `DemandBid`、`SupplyOffer` | 出清前的买单与卖单 |
-| [clearing.py](clearing.py) | `ClearedDemandBid`、`ClearedSupplyOffer`、`Trade`、`MarketClearingResult`、`sum_cleared_demand()` | 订单成交结果、逐笔成交、单产品汇总与需求筛选求和 |
+| [clearing.py](clearing.py) | `ClearedDemandBid`、`ClearedSupplyOffer`、`Trade`、`MarketClearingResult` | 订单成交结果、逐笔成交、单产品汇总与需求筛选求和 |
 | [results.py](results.py) | `SimulationResult` | 一次仿真运行的完整内存结果 |
 | [__init__.py](__init__.py) | 统一导出接口 | 汇集以上模型，供其他模块导入 |
 
@@ -57,7 +57,7 @@ flowchart TD
 | 阶段 | 关键输入与作用 |
 | --- | --- |
 | 生成订单 | 结合交付产品、参与者参数、时序数据及报价策略；部分策略还使用预测、运行状态或历史成交安排 |
-| 市场出清 | 出清算法处理买卖订单；储能联合复杂出清还使用 `StorageClearingContext` 约束储能量变化 |
+| 市场出清 | 出清算法处理买卖订单；储能联合复杂出清直接接收 `(StorageUnit, 本次预计初始电量)`，约束储能量变化 |
 | 交付与调度 | 结合成交量、参与者参数、适用的原计划及运行状态，计算实际运行结果 |
 | 汇总结果 | 将市场结果、参与者调度结果，以及已启用的灵活性、工业窗口和学习记录一并保存 |
 
@@ -101,7 +101,7 @@ flowchart TD
 | `ClearedDemandBid` | `bid` 保留原始 `DemandBid` |
 | `Trade` | 用订单标识引用买卖双方，不直接保存订单对象；同一订单可以对应多笔成交 |
 
-当前 `pay_as_clear` 和 `pay_as_bid` 会记录实际发生的逐笔成交；`complex_clearing` 当前不生成 `Trade`，其 `trades` 为空元组。`HouseholdPlan`、`IndustrialPlan` 不直接作为字段保存在 `SimulationResult` 中，部分计划信息由调度结果保留。
+当前 `pay_as_clear` 和 `pay_as_bid` 会记录实际发生的逐笔成交；`complex_clearing` 当前不生成 `Trade`，其 `trades` 为空元组。居民和工业调度结果均通过 `plan` 引用完整的原计划，再汇入 `SimulationResult`。
 
 ## 4. 关键概念与字段约定
 
@@ -117,7 +117,7 @@ flowchart TD
 | `*_t` | 质量，单位吨 | `planned_steel_output_t` |
 | `*_soc`、`soc_before`、`soc_after` | 储能量占容量的比例，通常在 0～1 内 | `initial_soc=0.5` 表示 50% |
 
-电量与平均功率的关系是：`电量 MWh = 功率 MW × 时长 h`。例如，10 MW 持续 15 分钟对应 2.5 MWh。`accepted_power_mw`、`cleared_power_mw` 会将成交电量除以交付时长。
+电量与平均功率的关系是：`电量 MWh = 功率 MW × 时长 h`。例如，10 MW 持续 15 分钟对应 2.5 MWh。`accepted_power_mw` 会将成交电量除以交付时长；市场总成交功率可由 `cleared_energy_mwh / duration_hours` 计算。
 
 ### 4.2 开市与交付
 
@@ -149,7 +149,7 @@ flowchart TD
 | 字段组 | 用途 |
 | --- | --- |
 | `start`、`end`、`time_step` | 仿真起止时间与时间步长 |
-| `opening_frequency`、`opening_duration` | 开市频率与配置中的开市持续时间；当前事件调度尚未使用 `opening_duration` |
+| `opening_frequency` | 开市频率；`opening_duration` 仅在输入边界校验，不存入运行模型 |
 | `product_duration`、`product_count`、`first_delivery` | 每次开市提供的产品时长、数量及首个交付偏移 |
 | `maximum_bid_price`、`minimum_bid_price` | 市场报价上下限 |
 | `market_mechanism` | 出清机制：`pay_as_clear`、`complex_clearing` 或 `pay_as_bid` |
@@ -161,22 +161,24 @@ flowchart TD
 
 ### 5.2 发电、普通需求与交换：plants.py / demand.py
 
-- `PowerPlant`：保存机组技术类型、报价策略、燃料、排放因子、功率上下限、效率及成本参数。`start_cost_eur` 是整台机组的启动成本；`min_operating_time_hours` 是最小运行时间。`min_down_time_hours` 当前用于兼容加载和校验，最小停机时间约束尚未实际执行。
+- `PowerPlant`：保存机组技术类型、报价策略、燃料、排放因子、功率上下限、效率及成本参数。`start_cost_eur` 是整台机组的启动成本；`min_operating_time_hours` 是最小运行时间。输入列 `min_down_time` 仅在加载时校验，最小停机时间约束尚未实际执行，不存入运行模型。
 - `DemandUnit`：保存普通需求参与者的策略、负荷列名和可选弹性参数。负荷时序数据由其他模块提供。`is_elastic` 通过策略是否为 `demand_energy_heuristic_elastic` 判断。
 - `ExchangeUnit`：表示计划进口与出口的虚拟参与者，保存进出口报价。
-- `ExchangeSchedule`：保存单个交付小时的计划进口和出口功率，两个方向分别使用正值。进口在本地市场表现为卖单，出口表现为买单。
+- 逐小时进出口计划直接保存为 `(进口功率, 出口功率)`，两个方向分别使用正值。进口在本地市场表现为卖单，出口表现为买单。
 
 ### 5.3 储能：storage.py
 
 `StorageUnit` 保存储能的容量、充放电功率上限、效率、SOC 上下限、初始 SOC、附加成本和可选自然流入功率。`min_energy_mwh`、`max_energy_mwh`、`initial_energy_mwh` 将 SOC 换算为储存能量。
 
-`StorageClearingContext` 是一次联合复杂出清需要的物理上下文，包含初始能量、能量边界和充放电效率。它的 `initial_energy_mwh` 表示本次出清所用的初始状态，可能由已成交安排推算得到，不一定等于参与者配置中的仿真初始值。
+当前仅支持一种储能报价策略，加载时校验后不再保存 `bidding_strategy`。`StorageDispatchResult.unit` 引用参与者，身份、容量和单位成本从该引用读取，附加成本由实际成交量乘单位成本推导。
+
+复杂出清的 `storages` 参数是 `(StorageUnit, 本次预计初始电量)` 的元组序列。能量边界与效率直接读取参与者；动态初始电量由已成交安排推算，不使用参与者配置中的仿真初始值替代。
 
 `StorageDispatchResult` 对应一个储能单元在一个交付产品上的结果：
 
 - `offered_*_mwh` 与 `accepted_*_mwh` 分别保存申报和成交的充放电量。
 - `energy_before_mwh`、`energy_after_mwh` 及 `soc_before`、`soc_after` 描述运行前后的能量状态。
-- `charge_payment_eur`、`discharge_revenue_eur` 及附加成本字段用于计算 `net_cash_flow_eur`。
+- `charge_payment_eur`、`discharge_revenue_eur` 由实际成交电量与出清价推导，再与附加成本一起计算 `net_cash_flow_eur`。
 - 充电或放电报价字段允许为 `None`，表示没有对应方向的报价。
 
 ### 5.4 居民建筑：household.py
@@ -186,24 +188,28 @@ flowchart TD
 | 对象 | 保存的信息 |
 | --- | --- |
 | `HouseholdPlan` | 基于预测电价与热需求计算的电网用电、热泵功率和电池放电计划 |
-| `HouseholdDispatchResult` | 对应买单出清后的运行结果，包括设备功率、SOC 变化、未满足电量和未满足热量；同时保留部分预测及计划字段 |
-| `HouseholdCostResult` | 单个产品的实际成交电量与支付，以及不使用电池基准方案的成交电量、支付、缺供量、SOC 和按预测电价的计划节省；`actual_saving_eur = 基准支付 − 实际支付` |
-| `HouseholdSavingSummary` | 由 `summarize_household_savings` 按居民汇总的实际支付与节省，缺电量、缺热量与基准的净差及逐时段绝对差之和，以及期末 SOC 差；`comparable` 要求逐时段缺供完全一致且期末 SOC 不低于基准 |
-| `HouseholdFlexibilityResult` | 在成本容忍度内，单个已计划产品的电网功率上下界 |
+| `HouseholdDispatchResult` | 通过 `plan` 引用居民计划，只保存实际设备功率、SOC、未满足热量与灵活性上下界 |
+| `HouseholdResult` | 两次仿真完成后的最终记录；`dispatch` 引用优化方案调度，`baseline` 引用无电池基准调度，保存各自成交量与支付；预测节省由两个计划推导 |
+| `HouseholdSavingSummary` | 汇总实际支付与节省、缺热量与基准的净差及逐时段绝对差之和，以及期末 SOC 差；`comparable` 要求逐时段缺热相同且期末 SOC 不低于基准 |
+
+居民调度结果的 `grid_power_bounds_mw` 保存 `(最小电网功率, 最大电网功率)`；未评估灵活性的内部基准仿真使用 `None`。
+
+最终记录统一保存在 `SimulationResult.household_results`，报告、绘图和 `summarize_household_savings(results)` 直接消费同一序列，不再维护与匹配独立成本集合。汇总模型只计算数据，中文图表说明在绘图模块生成。
+
+居民模型不再保存或计算始终为零的固定负荷。既有 CSV 中的 `fixed_power_mw`、`unmet_electricity_mwh`、`baseline_unmet_electricity_mwh` 列在导出时写入零。
 
 `planned_*` 字段表示计划值。成交受限时，计划值与运行结果可能不同。
 
 ### 5.5 工业钢铁厂：industry.py
 
-`IndustrialDevice` 保存单台工业设备的功率边界、爬坡参数、效率及单位产出所需的物料或能量参数。
+`IndustrialDevice` 保存单台工业设备的功率边界、爬坡参数、效率及单位产出所需的物料或能量参数。DRI 的 `fuel_type=hydrogen` 仅在 CSV 输入边界校验，不存入设备模型。
 
-`IndustrialUnit` 将电解槽（`electrolyser`）、直接还原铁设备（`dri_plant`）和电弧炉（`eaf`）组合成钢铁厂，并保存产量目标、优化目标、成本容忍度与滚动优化设置。其中 `look_ahead`、`commit_horizon`、`rolling_step` 分别描述前瞻范围、承诺范围和滚动步长。
+`IndustrialUnit` 将电解槽（`electrolyser`）、直接还原铁设备（`dri_plant`）和电弧炉（`eaf`）组合成钢铁厂，并保存产量目标、成本容忍度与滚动优化设置。`look_ahead`、`commit_horizon` 分别描述前瞻范围与承诺范围。固定的策略、目标、灵活性模式和时域模式，以及等于承诺时长的滚动步长，只在输入边界校验，不重复保存。
 
 | 对象 | 保存的信息 |
 | --- | --- |
-| `IndustrialPlan` | 单个交付产品的设备功率、氢气和 DRI 产出、计划钢产量、用电量及预测成本 |
-| `IndustrialDispatchResult` | 保留计划及设备数据，并记录 `actual_grid_power_mw`、`actual_steel_output_t` |
-| `IndustrialFlexibilityResult` | 已承诺产品的基准功率与可行功率上下界，并提供 `flex_up_mw`、`flex_down_mw` |
+| `IndustrialPlan` | 单个承诺产品的设备功率、氢气和 DRI 产出、计划钢产量、用电量、预测成本及功率上下界 |
+| `IndustrialDispatchResult` | 通过 `plan` 引用承诺计划，并记录 `actual_grid_power_mw`、`actual_steel_output_t`，不复制计划字段 |
 | `IndustrialOptimizationWindowResult` | 一个滚动优化窗口的优化范围、承诺范围、整个优化窗口的基准可变成本及成本容忍度对应的成本上限 |
 
 `window_id` 将产品计划、运行结果和优化窗口联系起来。`baseline_variable_cost_eur` 按整个优化窗口计算，`maximum_flexible_variable_cost_eur` 等于基准可变成本乘以 `1 + cost_tolerance_percent / 100`，表示灵活性计算允许的成本上限。
@@ -212,7 +218,7 @@ flowchart TD
 
 ### 5.6 学习配置与记录：learning.py
 
-`LearningConfig` 保存第五版单智能体 MATD3 的配置，涵盖学习率、训练轮数、经验缓冲区、批大小、折扣系数、训练频率、探索噪声、目标网络更新、策略延迟，以及策略保存或加载路径等。学习模式还必须配置 `periods`：按交付时间定义的训练、验证、测试半开区间 `LearningPeriod(start, end)`，按顺序排列且互不重叠。
+`LearningConfig` 保存 MATD3 / GRPO 的训练配置。`periods` 是 `{"train": (start, end), "validation": (start, end), "test": (start, end)}` 映射，各交付时段采用半开区间，按顺序排列且互不重叠。固定支持的 `actor_architecture=mlp` 和 `action_noise_schedule=linear` 仅在输入边界校验，不存入运行模型。
 
 - `LearningStepResult`：单个交付时段的动作、可用功率、成交功率、出清价、利润、遗憾值和奖励，用于审计学习过程。
 - `LearningTransition`：一条 `(state, action, reward, next_state, done)` 经验记录。`action` 保留未排序的实际执行动作，类型为包含两个浮点数的元组。
@@ -221,25 +227,25 @@ flowchart TD
 
 ### 5.7 买卖订单：orders.py
 
-`DemandBid` 是买单，主要字段包括交付时段、购买电量 `volume_mwh` 和最高愿付价格 `price_eur_per_mwh`。`side` 返回 `"buy"`。
+`DemandBid` 是买单，主要字段包括交付时段、购买电量 `volume_mwh` 和最高愿付价格 `price_eur_per_mwh`。报表直接填写 `side="buy"`。
 
-买单的两个分类字段具有不同用途：
+买单只保存 `demand_type`；`bid_type` 由它推导，不能作为构造参数传入：
 
 | 字段 | 可选值 | 用途 |
 | --- | --- | --- |
-| `bid_type` | `local_load`、`export`、`storage_charge` | 市场侧角色，用于区分本地购买、出口和储能充电 |
+| `bid_type`（属性） | `local_load`、`export`、`storage_charge` | 出口和储能充电沿用 `demand_type`，其余类别统一为 `local_load` |
 | `demand_type` | `inelastic_load`、`elastic_load`、`household_load`、`industrial_load`、`export`、`storage_charge` | 需求性质或参与者类别，用于结果统计 |
 
-未指定 `demand_type` 时，普通本地买单默认使用 `inelastic_load`；出口和储能充电买单分别使用 `export`、`storage_charge`。出口与储能充电的两类标签必须相互匹配。
+未指定 `demand_type` 时默认使用 `inelastic_load`；出口和储能充电买单须分别指定 `demand_type="export"`、`demand_type="storage_charge"`。
 
-`SupplyOffer` 是卖单，主要字段包括申报功率、电量、报价、边际成本及订单标识。报价与边际成本分别用于市场成交和成本核算，可以不同。`side` 返回 `"sell"`。
+`SupplyOffer` 是卖单，主要字段包括申报功率、电量、报价、边际成本及订单标识。报价与边际成本分别用于市场成交和成本核算，可以不同。报表直接填写 `side="sell"`。
 
 - `offer_type` 区分 `power_plant`、`import` 和 `storage_discharge`，在市场结果组装时校验。
 - 卖单的 `bid_type` 使用 `SB`（普通报价）、`BB`（块报价）、`LB`（关联子报价），与买单的同名字段含义不同。
-- `min_acceptance_ratio` 是最小接受比例（MAR）。当前模型要求 BB 为 1，SB 和 LB 为 0。
+- `min_acceptance_ratio` 是最小接受比例（MAR）属性，由报价类型推导：BB 为 1，SB 和 LB 为 0，不再作为构造参数传入。
 - `parent_bid_id` 描述关联子报价的父订单，`offer_segment` 描述报价分段。
 
-通常应保证 `offered_energy_mwh = offered_power_mw × 交付小时数`；当前卖单构造函数分别校验功率与电量，但不自动检查两者的换算关系。
+卖单只保存 `offered_energy_mwh`，`offered_power_mw` 是由电量除以交付小时数得到的属性，不能作为构造参数传入。工业计划的 `planned_energy_mwh` 同样由计划功率乘以交付小时数推导。
 
 ### 5.8 出清结果：clearing.py
 
@@ -260,11 +266,13 @@ flowchart TD
 - `unserved_demand_mwh`：除储能充电以外所有买单的未成交电量之和。储能未成交充电是未执行的充电计划，不属于未满足需求。
 - `requested_storage_charge_mwh`、`unaccepted_storage_charge_mwh`：储能充电的申报电量和未成交电量。`requested_demand_mwh` 等于成交电量、`unserved_demand_mwh` 与 `unaccepted_storage_charge_mwh` 之和。
 - `unserved_load_mwh`：仅统计 `demand_type="inelastic_load"` 的未满足电量。弹性、居民、工业、出口和储能充电类别不计入该字段。
+
+`requested_demand_mwh`、`cleared_energy_mwh`、`unserved_load_mwh`、`unfulfilled_export_mwh` 均从订单结果推导，不作为构造参数传入。成交量以卖单汇总，结果校验独立比较买单与卖单的成交量。
 - `unaccepted_elastic_demand_mwh`：仅统计未成交的弹性需求，避免将价格响应误记为非自愿限电。
 - `unfulfilled_export_mwh`：未成交的出口电量。
 - `net_exchange_mwh`：成交进口电量减去成交出口电量，正值表示净进口。
 
-`demand_total(attribute, demand_type=None, bid_type=None)` 可以按类别求和，例如 `demand_total("accepted_energy_mwh", demand_type="industrial_load")`。模块级函数 `sum_cleared_demand()` 提供相同筛选方式，也支持 `"bid.volume_mwh"` 等嵌套属性路径。
+`demand_total(attribute, demand_type=None, bid_type=None)` 可以按类别求和，例如 `demand_total("accepted_energy_mwh", demand_type="industrial_load")`，也支持 `"bid.volume_mwh"` 等嵌套属性路径。
 
 配置中的 `market_mechanism` 与结果中的 `pricing_method` 使用不同名称：
 
@@ -287,14 +295,11 @@ flowchart TD
 | `settings` | 本次运行的 `MarketSettings` |
 | `market_results` | 各交付产品的 `MarketClearingResult` 序列 |
 | `storage_results` | 储能调度与 SOC 变化 |
-| `household_results` | 居民建筑运行结果 |
-| `household_flexibility_results` | 居民电网功率上下界 |
-| `industry_results` | 工业计划与实际运行结果 |
-| `industry_flexibility_results` | 工业基准功率、上下界及灵活性幅度 |
+| `household_results` | 居民最终记录，含优化与基准调度引用、各自成交量和支付 |
+| `industry_results` | 工业实际运行结果，通过 `plan` 引用计划、功率上下界及灵活性幅度 |
 | `industry_optimization_windows` | 工业滚动优化窗口与成本结果 |
 | `learning_steps` | 学习动作、成交结果与奖励 |
 | `learning_transitions` | 经验回放记录 |
-| `household_cost_results` | 居民实际支付与不使用电池基准方案的对比 |
 
 `settings` 和 `market_results` 是必填字段。其余结果序列默认是空元组 `()`。某个结果序列为空表示本次结果对象没有该类记录，读取时应按实际场景处理。学习观测已删除负荷输入，结果对象不再保存负荷归一化基数。
 
@@ -314,8 +319,8 @@ flowchart TD
 | `ClearedSupplyOffer.profit_eur` | `收入 − 总成本` |
 | `ClearedDemandBid.unserved_energy_mwh` | `申报电量 − 成交电量` |
 | `ClearedDemandBid.payment_eur` / `Trade.payment_eur` | `对应成交电量 × 对应结算价格` |
-| `IndustrialFlexibilityResult.flex_up_mw` | `maximum_power_mw − baseline_power_mw` |
-| `IndustrialFlexibilityResult.flex_down_mw` | `baseline_power_mw − minimum_power_mw` |
+| `IndustrialPlan.flex_up_mw` | `maximum_power_mw − planned_grid_power_mw` |
+| `IndustrialPlan.flex_down_mw` | `planned_grid_power_mw − minimum_power_mw` |
 
 `marginal_cost()` 要求价格字典包含 `"co2"`；未找到机组对应的燃料价格时，该燃料价格按 0 处理。价格允许为负，成交金额也可能为负；`Trade.payment_eur < 0` 表示该笔交易由卖方向买方支付。
 
@@ -323,8 +328,8 @@ flowchart TD
 
 ### 模型创建时
 
-- `DemandBid`：检查交付时长、有限且非负的电量、有限价格，以及买单类别之间的匹配关系。
-- `SupplyOffer`：检查交付时长、有限且非负的功率和电量、有限报价及成本，以及 SB / BB / LB 和 MAR 约定。
+- `DemandBid`：检查交付时长、有限且非负的电量、有限价格，以及唯一的需求分类。
+- `SupplyOffer`：检查交付时长、有限且非负的电量、有限报价及成本，以及 SB / BB / LB 和 MAR 约定。
 - `Trade`：保存算法生成的成交明细，构造时不重复校验时段、电量和价格。
 - `MarketClearingResult`：检查订单所属产品、成交量范围、卖单角色、结算价与结算方式的对应关系，以及买单成交量与市场出清电量的一致性。电量核对使用 `1e-7` MWh 的绝对容差。
 
@@ -373,7 +378,6 @@ offer = SupplyOffer(
     technology="gas",
     delivery_start=start,
     delivery_end=end,
-    offered_power_mw=12.0,
     offered_energy_mwh=12.0,
     bid_price_eur_per_mwh=60.0,
     marginal_cost_eur_per_mwh=40.0,
@@ -386,7 +390,6 @@ settings = MarketSettings(
     end=end,
     time_step=timedelta(hours=1),
     opening_frequency=timedelta(hours=1),
-    opening_duration=timedelta(minutes=5),
     product_duration=timedelta(hours=1),
     product_count=1,
     first_delivery=timedelta(0),
@@ -410,7 +413,7 @@ print(market_result.trades[0].payment_eur)      # 600.0
 
 ```python
 for market in result.market_results:
-    print(market.delivery_start, market.cleared_power_mw)
+    print(market.delivery_start, market.cleared_energy_mwh / market.duration_hours)
     print("刚性负荷未满足电量：", market.unserved_load_mwh)
     print("弹性需求未成交电量：", market.unaccepted_elastic_demand_mwh)
 
@@ -425,10 +428,10 @@ for market in result.market_results:
     print("工业成交电量：", industrial_energy)
 
 for storage in result.storage_results:
-    print(storage.unit_name, storage.soc_before, storage.soc_after)
+    print(storage.unit.name, storage.soc_before, storage.soc_after)
     print("储能净现金流：", storage.net_cash_flow_eur)
 
 for industry in result.industry_results:
-    print(industry.unit_name, industry.planned_steel_output_t)
+    print(industry.plan.unit_name, industry.plan.planned_steel_output_t)
     print("实际钢产量：", industry.actual_steel_output_t)
 ```

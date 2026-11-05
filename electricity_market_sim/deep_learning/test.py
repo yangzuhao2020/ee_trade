@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from .agent import (
-    create_agent,
+    load_policy,
     _RUN_MANIFEST,
     _default_checkpoint_root,
     _read_run_manifest,
@@ -18,7 +18,7 @@ from .learning_metrics import (
 )
 from ..models import LearningConfig, SimulationResult
 from ..reporting import write_results
-from ..simulation import LearningEpisodeRunner
+from ..simulation import simulate_learning_episode
 
 _EVALUATION_PERIODS = ("train", "validation")
 
@@ -41,7 +41,7 @@ def _marginal_cost_action(state: tuple[float, ...]) -> tuple[float, float]:
 
 def _evaluate_actor_and_baseline(
     *,
-    agent,
+    action_provider,
     input_path: Path,
     output_path: Path,
     scenario: str,
@@ -53,12 +53,13 @@ def _evaluate_actor_and_baseline(
     """在指定时段的全新市场上分别运行确定性 Actor 和边际成本基准策略。
     Actor 结果写入 output_path，基线结果写入 output_path/baseline；不更新任何参数。
     """
-    actor_result = LearningEpisodeRunner(
-        input_path, scenario=scenario, period=period
-    ).run_episode(agent.deterministic_action)
-    baseline_result = LearningEpisodeRunner(
-        input_path, scenario=scenario, period=period
-    ).run_episode(_marginal_cost_action, enforce_action_bounds=False)
+    actor_result = simulate_learning_episode(
+        input_path, action_provider, scenario=scenario, period=period
+    )
+    baseline_result = simulate_learning_episode(
+        input_path, _marginal_cost_action, scenario=scenario, period=period,
+        enforce_action_bounds=False,
+    )
 
     write_results(output_path, actor_result)
     write_results(output_path / "baseline", baseline_result)
@@ -91,28 +92,21 @@ def evaluate_learning_scenario(
     output_path = Path(output_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
     config = settings.learning_config
-    agent = create_agent(config)
     checkpoint = (
         Path(checkpoint_path)
         if checkpoint_path is not None
         else _default_evaluation_checkpoint(config, output_path)
     )
-    payload = agent.load_checkpoint(checkpoint)
-    saved_run = payload.get("run")
-    run = (
-        saved_run
-        if isinstance(saved_run, int) and not isinstance(saved_run, bool)
-        else 0
-    )
+    action_provider, payload = load_policy(config, checkpoint)
     result, comparison = _evaluate_actor_and_baseline(
-        agent=agent,
+        action_provider=action_provider,
         input_path=input_path,
         output_path=output_path / period,
         scenario=scenario,
         period=period,
         episode=int(payload["episode"]),
         gamma=config.gamma,
-        run=run,
+        run=payload["run"],
     )
     _write_metrics(output_path / "learning_evaluation_metrics.csv", comparison)
     write_results(output_path, result)
@@ -143,21 +137,20 @@ def run_learning_test(
             manifest_file = manifest_file / _RUN_MANIFEST
     manifest = _read_run_manifest(manifest_file, config)
     entries = manifest["runs"]
+    selected_run = manifest["selected_run"]
     metrics: list[_EpisodeMetrics] = []
-    results: dict[int, SimulationResult] = {}
     for entry in entries:
         run = entry["run"]
-        agent = create_agent(config)
-        payload = agent.load_checkpoint(
-            manifest_file.parent / entry["best_checkpoint"]
+        action_provider, payload = load_policy(
+            config, manifest_file.parent / entry["best_checkpoint"]
         )
         run_output = (
             output_path / "test"
             if len(entries) == 1
             else output_path / "test" / f"run_{run:02d}"
         )
-        results[run], comparison = _evaluate_actor_and_baseline(
-            agent=agent,
+        result, comparison = _evaluate_actor_and_baseline(
+            action_provider=action_provider,
             input_path=input_path,
             output_path=run_output,
             scenario=scenario,
@@ -167,8 +160,10 @@ def run_learning_test(
             run=run,
         )
         metrics.extend(comparison)
+        if run == selected_run:
+            selected = result
+        del result
     _write_metrics(output_path / "learning_test_metrics.csv", metrics)
     _write_run_summary(output_path / "learning_test_summary.csv", metrics)
-    selected = results.get(manifest.get("selected_run"), results[entries[0]["run"]])
     write_results(output_path, selected)
     return selected

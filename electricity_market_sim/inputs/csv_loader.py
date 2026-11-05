@@ -12,7 +12,6 @@ from ..errors import InputValidationError
 from ..config import parse_duration
 from ..models import (
     DemandUnit,
-    ExchangeSchedule,
     ExchangeUnit,
     HouseholdUnit,
     IndustrialDevice,
@@ -101,6 +100,8 @@ def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
                 f"{strategy!r}."
             )
 
+        # 当前不执行最小停机约束，仅在输入边界校验数值。
+        _optional_float(row, "min_down_time", 1.0, path, row_number)
         plant = PowerPlant(
             name=name,
             operator=_require(row, "unit_operator", path, row_number),
@@ -115,9 +116,6 @@ def load_powerplants(path: Path) -> tuple[PowerPlant, ...]:
             start_cost_eur=_optional_float(row, "start_cost", 0.0, path, row_number),
             min_operating_time_hours=_optional_float(
                 row, "min_operating_time", 1.0, path, row_number
-            ),
-            min_down_time_hours=_optional_float(
-                row, "min_down_time", 1.0, path, row_number
             ),
             bid_price_eur_per_mwh=(
                 _float(row, "bid_price", path, row_number)
@@ -165,7 +163,6 @@ def load_storage_units(path: Path) -> tuple[StorageUnit, ...]:
             name=name,
             operator=_require(row, "unit_operator", path, row_number),
             technology=_require(row, "technology", path, row_number),
-            bidding_strategy=strategy,
             max_power_charge_mw=_float(
                 row, "max_power_charge", path, row_number
             ),
@@ -257,11 +254,10 @@ def load_demand_units(path: Path) -> tuple[DemandUnit, ...]:
             bidding_strategy=strategy,
             max_power_mw=_float(row, "max_power", path, row_number),
             elasticity=elasticity,
-            elasticity_model=elasticity_model,
             max_price_eur_per_mwh=max_price,
             num_bids=int(num_bids_raw),
         )
-        if unit.elasticity_model != "isoelastic":
+        if elasticity_model != "isoelastic":
             raise InputValidationError(
                 f"{path.name}, row {row_number}: only 'isoelastic' is supported."
             )
@@ -387,21 +383,17 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
                 "cost_based_load_shift."
             )
 
+        # 尚未参与运行的热泵参数只在输入边界解析。
+        _float(heat, "min_power", path, heat_number)
+        _float(heat, "ramp_down", path, heat_number)
         household = HouseholdUnit(
             name=name,
             operator=_group_field(rows, "unit_operator", path, "building"),
             cost_tolerance_percent=cost_tolerance,
-            fixed_power_mw=0.0,
             heat_pump_max_power_mw=_float(
                 heat, "max_power", path, heat_number
             ),
-            heat_pump_min_power_mw=_float(
-                heat, "min_power", path, heat_number
-            ),
             heat_pump_ramp_up_mw=_float(heat, "ramp_up", path, heat_number),
-            heat_pump_ramp_down_mw=_float(
-                heat, "ramp_down", path, heat_number
-            ),
             cop=_float(heat, "cop", path, heat_number),
             battery_capacity_mwh=_float(
                 battery, "capacity", path, battery_number
@@ -496,9 +488,12 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
 
         def device(technology: str) -> IndustrialDevice:
             row_number, row = by_technology[technology]
+            if technology == "dri_plant" and (row.get("fuel_type") or "").strip() != "hydrogen":
+                raise InputValidationError(
+                    f"{path.name}: steel plant {name!r} DRI fuel_type must be hydrogen."
+                )
             result = IndustrialDevice(
                 technology=technology,
-                fuel_type=(row.get("fuel_type") or "").strip(),
                 max_power_mw=_float(row, "max_power", path, row_number),
                 min_power_mw=_float(row, "min_power", path, row_number),
                 ramp_up_mw=_float(row, "ramp_up", path, row_number),
@@ -534,14 +529,14 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
                 lime_co2_factor=_optional_float(
                     row, "lime_co2_factor", 0.0, path, row_number
                 ),
-                min_operating_time_hours=_optional_float(
-                    row, "min_operating_time", 0.0, path, row_number
-                ),
-                min_down_time_hours=_optional_float(
-                    row, "min_down_time", 0.0, path, row_number
-                ),
             )
-            if result.min_operating_time_hours != 0 or result.min_down_time_hours != 0:
+            min_operating_time = _optional_float(
+                row, "min_operating_time", 0.0, path, row_number
+            )
+            min_down_time = _optional_float(
+                row, "min_down_time", 0.0, path, row_number
+            )
+            if min_operating_time != 0 or min_down_time != 0:
                 raise InputValidationError(
                     f"{path.name}, row {row_number}: version four supports "
                     "industrial min_operating_time=min_down_time=0 only."
@@ -551,10 +546,6 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
         electrolyser = device("electrolyser")
         dri_plant = device("dri_plant")
         eaf = device("eaf")
-        if dri_plant.fuel_type != "hydrogen":
-            raise InputValidationError(
-                f"{path.name}: steel plant {name!r} DRI fuel_type must be hydrogen."
-            )
 
         cost_tolerance = numeric_plant_field(rows, "cost_tolerance")
         demand = numeric_plant_field(rows, "demand")
@@ -577,16 +568,11 @@ def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
             IndustrialUnit(
                 name=name,
                 operator=plant_field(rows, "unit_operator"),
-                bidding_strategy=strategy,
-                objective=objective,
-                flexibility_measure=flexibility,
                 cost_tolerance_percent=cost_tolerance,
                 demand_t=demand,
                 load_profile_deviation=deviation,
-                horizon_mode=horizon_mode,
                 look_ahead=look_ahead,
                 commit_horizon=commit_horizon,
-                rolling_step=rolling_step,
                 forecast_price_column=(
                     plant_field(rows, "forecast_electricity_price_update")
                 ),
@@ -970,7 +956,7 @@ def load_hourly_availability_profiles(
 
 def load_hourly_exchange_profiles(
     path: Path, exchange_unit: ExchangeUnit
-) -> dict[datetime, ExchangeSchedule]:
+) -> dict[datetime, tuple[float, float]]:
     """读取外部电网交换功率（MW），按小时对可用样本求等权平均。"""
 
     if not path.is_file():
@@ -994,9 +980,6 @@ def load_hourly_exchange_profiles(
     columns, rows = _read_time_series(path, select)
     hourly = _hourly_means(rows, columns)
     return {
-        hour: ExchangeSchedule(
-            import_power_mw=import_power,
-            export_power_mw=hourly[export_column][hour],
-        )
+        hour: (import_power, hourly[export_column][hour])
         for hour, import_power in hourly[import_column].items()
     }

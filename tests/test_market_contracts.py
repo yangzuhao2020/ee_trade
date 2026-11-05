@@ -26,7 +26,7 @@ from electricity_market_sim.models import (
     DemandUnit,
     ExchangeUnit,
     PowerPlant,
-    StorageClearingContext,
+    StorageUnit,
     SupplyOffer,
 )
 
@@ -37,6 +37,10 @@ PLANT = PowerPlant("plant", "operator", "gas", "powerplant_energy_naive",
                    "gas", 0.2, 10.0, 0.0, 0.5, 0.0)
 DEMAND = DemandUnit("load", "operator", profile_column="load")
 EXCHANGE = ExchangeUnit("grid", "operator", 0.0, 100.0)
+STORAGE = StorageUnit(
+    "storage", "operator", "battery",
+    10.0, 10.0, 1.0, 1.0, 0.0, 1.0, 10.0, 0.0, 0.0, 0.0,
+)
 
 
 def bid(name="load", volume=2.0, price=100.0, **kwargs):
@@ -45,7 +49,7 @@ def bid(name="load", volume=2.0, price=100.0, **kwargs):
 
 def offer(name="plant", volume=1.0, price=10.0, **kwargs):
     return SupplyOffer(name, "operator", "gas", START, START + HOUR,
-                       volume, volume, price, price, **kwargs)
+                       volume, price, price, **kwargs)
 
 
 class CsvContracts(unittest.TestCase):
@@ -66,7 +70,7 @@ class CsvContracts(unittest.TestCase):
             (lambda p: load_hourly_availability_profiles(p, (PLANT,)),
              "datetime,plant\n2024-01-01 00:00,0.2\n2024-01-01 00:45,0.8\n",
              {"plant": {START: 0.5}}),
-            (lambda p: load_hourly_exchange_profiles(p, EXCHANGE)[START].import_power_mw,
+            (lambda p: load_hourly_exchange_profiles(p, EXCHANGE)[START][0],
              "datetime,grid_import,grid_export\n2024-01-01 00:00,2,3\n"
              "2024-01-01 00:45,10,7\n", 6.0),
             (load_fuel_prices, "fuel,gas,co2\nprice,30,80\n",
@@ -120,6 +124,41 @@ class CsvContracts(unittest.TestCase):
 
 
 class ClearingContracts(unittest.TestCase):
+    def test_minimum_acceptance_ratio_follows_offer_type(self):
+        for kind, expected in (("SB", 0.0), ("LB", 0.0), ("BB", 1.0)):
+            with self.subTest(kind=kind):
+                self.assertEqual(offer(bid_type=kind).min_acceptance_ratio, expected)
+
+    def test_storage_clearing_uses_projected_energy_instead_of_initial_soc(self):
+        for energy, expected in ((0.0, 0.0), (1.0, 1.0)):
+            with self.subTest(projected_energy=energy):
+                (result,) = clear_complex_opening(
+                    [bid(volume=1.0)],
+                    [offer("storage", price=10.0, offer_type="storage_discharge")],
+                    storages=((STORAGE, energy),),
+                )
+                self.assertAlmostEqual(result.cleared_energy_mwh, expected)
+
+    def test_clearing_result_compares_supply_and_demand_independently(self):
+        result = clear_pay_as_clear([bid()], [offer()])
+        demand = replace(result.demand_bids[0], accepted_energy_mwh=0.0)
+        with self.assertRaisesRegex(ValueError, "买单成交电量"):
+            replace(result, demand_bids=(demand,))
+
+    def test_demand_category_determines_market_role_and_settlement(self):
+        for category, role in (
+            ("inelastic_load", "local_load"), ("elastic_load", "local_load"),
+            ("household_load", "local_load"), ("industrial_load", "local_load"),
+            ("export", "export"), ("storage_charge", "storage_charge"),
+        ):
+            with self.subTest(category=category):
+                demand = bid(demand_type=category)
+                self.assertEqual(demand.bid_type, role)
+                result = clear_pay_as_bid([demand], [offer()])
+                self.assertEqual(result.demand_bids[0].payment_eur, 10.0)
+        with self.assertRaisesRegex(ValueError, "demand_type"):
+            bid(demand_type="unknown")
+
     def test_small_trades_keep_their_energy_price_and_payment(self):
         for quantity in (5e-8, 1e-7, 2e-7):
             for clear, marginal_unit in (
@@ -168,16 +207,14 @@ class ClearingContracts(unittest.TestCase):
             bid("elastic", price=500, demand_type="elastic_load"),
             bid("household", price=400, demand_type="household_load"),
             bid("industry", price=300, demand_type="industrial_load"),
-            bid("export", price=200, bid_type="export"),
-            bid("storage", price=100, bid_type="storage_charge"),
+            bid("export", price=200, demand_type="export"),
+            bid("storage", price=100, demand_type="storage_charge"),
         ]
         for clear in (clear_pay_as_clear, clear_pay_as_bid, clear_complex_opening):
             with self.subTest(algorithm=clear.__name__):
                 kwargs = {}
                 if clear is clear_complex_opening:
-                    kwargs["storage_contexts"] = (
-                        StorageClearingContext("storage", 0.0, 0.0, 10.0, 1.0, 1.0),
-                    )
+                    kwargs["storages"] = ((STORAGE, 0.0),)
                 result = clear(bids, [offer()], **kwargs)
                 if isinstance(result, tuple):
                     result = result[0]

@@ -14,8 +14,6 @@ class MarketSettings:
     end: datetime
     time_step: timedelta
     opening_frequency: timedelta
-    # 加载时必填并校验；当前事件调度尚未使用该字段。
-    opening_duration: timedelta
     product_duration: timedelta
     product_count: int
     first_delivery: timedelta

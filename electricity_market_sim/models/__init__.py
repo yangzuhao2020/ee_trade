@@ -3,9 +3,9 @@
 - market：市场配置 MarketSettings 与开市安排 MarketOpening
 - learning：学习配置 LearningConfig 及学习步结果、经验回放记录
 - plants：可调度发电机组 PowerPlant
-- demand：需求 DemandUnit 与进出口交换 ExchangeUnit、ExchangeSchedule
+- demand：需求 DemandUnit 与进出口交换 ExchangeUnit
 - storage：储能参数、联合出清上下文及调度结果
-- household：居民参与者参数、运行计划、调度及灵活性结果
+- household：居民参数、计划、调度、基准对照与最终结算结果
 - industry：工业参与者参数、生产计划、调度、灵活性及滚动优化窗口结果
 - orders：出清前的市场买单 DemandBid 与卖单 SupplyOffer
 - clearing：出清后的订单结果、成交记录 Trade 及单时段出清结果 MarketClearingResult
@@ -19,13 +19,11 @@ from .clearing import (
     ClearedSupplyOffer,
     MarketClearingResult,
     Trade,
-    sum_cleared_demand,
 )
-from .demand import DemandUnit, ExchangeSchedule, ExchangeUnit
+from .demand import DemandUnit, ExchangeUnit
 from .household import (
-    HouseholdCostResult,
+    HouseholdResult,
     HouseholdDispatchResult,
-    HouseholdFlexibilityResult,
     HouseholdPlan,
     HouseholdSavingSummary,
     HouseholdUnit,
@@ -34,7 +32,6 @@ from .household import (
 from .industry import (
     IndustrialDevice,
     IndustrialDispatchResult,
-    IndustrialFlexibilityResult,
     IndustrialOptimizationWindowResult,
     IndustrialPlan,
     IndustrialUnit,
@@ -42,7 +39,6 @@ from .industry import (
 from .learning import (
     LEARNING_PERIOD_NAMES,
     LearningConfig,
-    LearningPeriod,
     LearningStepResult,
     LearningTransition,
 )
@@ -50,4 +46,4 @@ from .market import MarketOpening, MarketSettings
 from .orders import DemandBid, SupplyOffer
 from .plants import PowerPlant
 from .results import SimulationResult
-from .storage import StorageClearingContext, StorageDispatchResult, StorageUnit
+from .storage import StorageDispatchResult, StorageUnit

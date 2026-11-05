@@ -11,7 +11,6 @@ from .models import (
     DemandBid,
     IndustrialDevice,
     IndustrialDispatchResult,
-    IndustrialFlexibilityResult,
     IndustrialOptimizationWindowResult,
     IndustrialPlan,
     IndustrialUnit,
@@ -268,14 +267,17 @@ def _build_industry_problem(
             commit_profile_total / remaining_profile_total
             if remaining_profile_total > _TOLERANCE
             else (commit_end - commit_start) / (remaining_count - commit_start))
+        minimum_commit = sum(bound[0] for bound in bounds[commit_start:commit_end])
+        minimum_remaining = sum(bound[0] for bound in bounds[commit_start:remaining_count])
         for sign, allowance in ((-1.0, 1.0 - unit.load_profile_deviation),
                                 (1.0, 1.0 + unit.load_profile_deviation)):
             factor = ratio * allowance
-            # 后续区间的待安排量还须扣除前面区间的计划产量，保持线性关系。
+            # 先预留最低产量，再分配剩余任务；前面区间的计划产量移到左侧。
             terms = {variable: sign * factor for variable in range(commit_start)}
             terms.update({variable: sign for variable in range(commit_start, commit_end)})
             inequality_rows.append(_constraint_row(terms, variable_count))
-            inequality_values.append(sign * demand_to_schedule_t * factor)
+            inequality_values.append(
+                sign * (minimum_commit + (demand_to_schedule_t - minimum_remaining) * factor))
 
         commit_start = commit_end
         next_commit_end = remaining_products[commit_start][0] + unit.commit_horizon
@@ -349,13 +351,14 @@ def _build_industry_plans(
     problem: _IndustryProblem,
     steel: np.ndarray,
     window_id: str,
+    power_bounds_mw: tuple[tuple[float, float], ...],
 ) -> tuple[IndustrialPlan, ...]:
-    """按窗口钢产量生成逐时段生产计划，折算设备功率、产量与预测成本。"""
+    """生成承诺时段计划，保存设备功率、产量、预测成本及灵活性上下界。"""
     coefficients = process_coefficients(unit)
     plans: list[IndustrialPlan] = []
-    for index, (start, end) in enumerate(problem.products):
+    for index, (minimum_power, maximum_power) in enumerate(power_bounds_mw):
+        start, end = problem.products[index]
         steel_output = steel[index]
-        duration = problem.durations[index]
         grid_power = problem.grid_power_per_tonne[index] * steel_output
         plans.append(
             IndustrialPlan(
@@ -372,9 +375,10 @@ def _build_industry_plans(
                 eaf_power_mw=problem.eaf_power_per_tonne[index] * steel_output,
                 planned_steel_output_t=steel_output,
                 planned_grid_power_mw=grid_power,
-                planned_energy_mwh=grid_power * duration,
                 forecast_cost_eur=(
                     problem.variable_cost_per_tonne[index] * steel_output),
+                minimum_power_mw=minimum_power,
+                maximum_power_mw=maximum_power,
             )
         )
     return tuple(plans)
@@ -383,14 +387,14 @@ def _build_industry_plans(
 def _calculate_industry_flexibility(
     unit: IndustrialUnit,
     problem: _IndustryProblem,
-    committed_plans: tuple[IndustrialPlan, ...],
+    committed_steel: np.ndarray,
     variable_cost_limit: float,
-) -> tuple[IndustrialFlexibilityResult, ...]:
+) -> tuple[tuple[float, float], ...]:
     """在窗口可变成本上限内，逐承诺时段求购电功率的可达上下界。
-    committed_plans 为窗口起始的承诺计划，序号与决策变量中的钢产量一一对应。
+    committed_steel 为窗口起始的承诺钢产量，序号与决策变量一一对应。
     """
-    flexibility: list[IndustrialFlexibilityResult] = []
-    for index, plan in enumerate(committed_plans):
+    bounds: list[tuple[float, float]] = []
+    for index, steel in enumerate(committed_steel):
         minimum_objective = np.zeros(problem.objective.size)
         minimum_objective[index] = (
             problem.grid_power_per_tonne[index]
@@ -416,23 +420,14 @@ def _calculate_industry_flexibility(
             maximum_solution[index]
             * problem.grid_power_per_tonne[index]
         )
-        if minimum_power > plan.planned_grid_power_mw + _TOLERANCE or (
-            maximum_power < plan.planned_grid_power_mw - _TOLERANCE):
+        planned_power = problem.grid_power_per_tonne[index] * steel
+        if minimum_power > planned_power + _TOLERANCE or (
+            maximum_power < planned_power - _TOLERANCE):
             raise InputValidationError(
-                f"工业单元 {unit.name!r} 在 {plan.delivery_start.isoformat(sep=' ')} "
+                f"工业单元 {unit.name!r} 在 {problem.products[index][0].isoformat(sep=' ')} "
                 "时刻的灵活性上下界未包含基准计划功率。")
-        flexibility.append(
-            IndustrialFlexibilityResult(
-                window_id=plan.window_id,
-                delivery_start=plan.delivery_start,
-                delivery_end=plan.delivery_end,
-                unit_name=unit.name,
-                baseline_power_mw=plan.planned_grid_power_mw,
-                minimum_power_mw=minimum_power,
-                maximum_power_mw=maximum_power,
-            )
-        )
-    return tuple(flexibility)
+        bounds.append((minimum_power, maximum_power))
+    return tuple(bounds)
 
 
 def _power_coefficients(
@@ -494,7 +489,6 @@ def optimize_industry_window(
     initial_powers_mw: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> tuple[
     tuple[IndustrialPlan, ...],
-    tuple[IndustrialFlexibilityResult, ...],
     IndustrialOptimizationWindowResult,
 ]:
     """优化函数：求解一个滚动窗口的基准计划，以及逐时段的灵活性上下界。"""
@@ -527,10 +521,9 @@ def optimize_industry_window(
         1.0 + unit.cost_tolerance_percent / 100.0)
     
     window_id = f"{unit.name}::{products[0][0].isoformat()}"
-    plans = _build_industry_plans(unit, problem, steel, window_id)
-    
-    flexibility = _calculate_industry_flexibility(
-        unit, problem, plans[:commit_count], flexible_limit)
+    power_bounds = _calculate_industry_flexibility(
+        unit, problem, steel[:commit_count], flexible_limit)
+    plans = _build_industry_plans(unit, problem, steel, window_id, power_bounds)
     window = IndustrialOptimizationWindowResult(
         window_id=window_id,
         unit_name=unit.name,
@@ -541,7 +534,7 @@ def optimize_industry_window(
         baseline_variable_cost_eur=baseline_variable_cost,
         maximum_flexible_variable_cost_eur=flexible_limit,
     )
-    return plans, flexibility, window
+    return plans, window
 
 
 def _actual_steel_output(
@@ -563,21 +556,9 @@ def dispatch_industry(
     actual_steel = _actual_steel_output(plan, accepted_energy_mwh)
     duration = hours_between(plan.delivery_start, plan.delivery_end)
     return IndustrialDispatchResult(
-        window_id=plan.window_id,
-        delivery_start=plan.delivery_start,
-        delivery_end=plan.delivery_end,
-        unit_name=plan.unit_name,
-        electrolyser_power_mw=plan.electrolyser_power_mw,
-        hydrogen_output_mwh=plan.hydrogen_output_mwh,
-        dri_power_mw=plan.dri_power_mw,
-        dri_output_t=plan.dri_output_t,
-        eaf_power_mw=plan.eaf_power_mw,
-        planned_steel_output_t=plan.planned_steel_output_t,
-        planned_grid_power_mw=plan.planned_grid_power_mw,
-        planned_energy_mwh=plan.planned_energy_mwh,
+        plan=plan,
         actual_grid_power_mw=(accepted_energy_mwh / duration),
         actual_steel_output_t=actual_steel,
-        forecast_cost_eur=plan.forecast_cost_eur,
     )
 
 
@@ -611,12 +592,17 @@ class IndustryRollingCoordinator:
         self.plans: dict[tuple[str, datetime], IndustrialPlan] = {}
         # 实际钢产量（吨）和设备功率（MW）作为后续窗口的初始状态。
         self.actual_steel_t = {unit.name: 0.0 for unit in units}
-        self.last_actual_powers_mw = {
-            unit.name: (0.0, 0.0, 0.0) for unit in units
-        }
+        # 连续生产的设备在仿真开始前已按整条生产链的最低负荷运行。
+        self.last_actual_powers_mw: dict[str, tuple[float, float, float]] = {}
+        for unit in units:
+            coefficients = process_coefficients(unit)
+            minimum_steel = _steel_lower_bound(unit, coefficients, 1.0)
+            self.last_actual_powers_mw[unit.name] = tuple(
+                minimum_steel * power
+                for power in _power_coefficients(coefficients, 1.0)[:3]
+            )
         # 累积交付、灵活性和窗口成本记录，仿真结束时汇入结果。
         self.dispatch_results: list[IndustrialDispatchResult] = []
-        self.flexibility_results: list[IndustrialFlexibilityResult] = []
         self.window_results: list[IndustrialOptimizationWindowResult] = []
 
     def bids_for_products(
@@ -691,7 +677,7 @@ class IndustryRollingCoordinator:
             0.0, unit.demand_t - self.actual_steel_t[unit.name] - pending_steel)
 
         # ---- 3. 求解滚动窗口优化 ----
-        plans, flexibility, window = optimize_industry_window(
+        plans, window = optimize_industry_window(
             unit=unit,
             products=products,
             remaining_products=remaining_products,
@@ -705,9 +691,8 @@ class IndustryRollingCoordinator:
 
         # ---- 4. 锁定承诺区计划，记录评估结果 ----
         # 承诺区间供后续开市复用；其余前瞻计划留待下一轮重算。
-        for plan in plans[:commit_count]:
+        for plan in plans:
             self.plans[(unit.name, plan.delivery_start)] = plan
-        self.flexibility_results.extend(flexibility)
         self.window_results.append(window)
 
     def record_delivery(self, result: MarketClearingResult) -> None:

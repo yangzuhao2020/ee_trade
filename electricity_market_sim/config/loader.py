@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 import yaml
 from ..errors import InputValidationError
-from ..models import LEARNING_PERIOD_NAMES, LearningConfig, LearningPeriod, MarketSettings
+from ..models import LEARNING_PERIOD_NAMES, LearningConfig, MarketSettings
 
 _DURATION_PATTERN = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>min|m|h|d)$")
 _MATD3_DEFAULTS_PATH = Path(__file__).with_name("matd3.yaml")
@@ -116,7 +116,7 @@ def _parse_additional_fields(eom: dict[str, Any]) -> frozenset[str]:
 
 def _load_learning_periods(
     raw: Any, *, required: bool
-) -> tuple[tuple[str, LearningPeriod], ...] | None:
+) -> dict[str, tuple[datetime, datetime]] | None:
     """读取按交付时间定义的训练、验证、测试时段，并检查顺序与重叠。"""
     if raw is None:
         if required:
@@ -129,35 +129,34 @@ def _load_learning_periods(
         raise InputValidationError(
             "learning_config.periods 必须恰好包含 train、validation、test 三个时段。"
         )
-    periods = []
+    periods = {}
     for name in LEARNING_PERIOD_NAMES:
         value = raw[name]
         if not isinstance(value, dict) or set(value) != {"start", "end"}:
             raise InputValidationError(
                 f"learning_config.periods.{name} 必须只包含 start 和 end。"
             )
-        period = LearningPeriod(
-            start=_parse_datetime(value["start"], f"learning_config.periods.{name}.start"),
-            end=_parse_datetime(value["end"], f"learning_config.periods.{name}.end"),
-        )
-        if period.end <= period.start:
+        start = _parse_datetime(value["start"], f"learning_config.periods.{name}.start")
+        end = _parse_datetime(value["end"], f"learning_config.periods.{name}.end")
+        if end <= start:
             raise InputValidationError(
                 f"learning_config.periods.{name} 的 end 必须晚于 start。"
             )
-        periods.append((name, period))
-    for (earlier_name, earlier), (later_name, later) in zip(periods, periods[1:]):
-        if earlier.end > later.start:
+        periods[name] = (start, end)
+    ordered = list(periods.items())
+    for (earlier_name, earlier), (later_name, later) in zip(ordered, ordered[1:]):
+        if earlier[1] > later[0]:
             raise InputValidationError(
                 f"learning_config.periods.{earlier_name} 必须在 {later_name} "
                 "开始之前结束，三个时段不能重叠。"
             )
-    return tuple(periods)
+    return periods
 
 
 def _validate_learning_period_alignment(settings: MarketSettings) -> None:
     """检查各时段边界都落在交付产品的整数倍时刻上。"""
-    for name, period in settings.learning_config.periods:
-        for label, moment in (("start", period.start), ("end", period.end)):
+    for name, (start, end) in settings.learning_config.periods.items():
+        for label, moment in (("start", start), ("end", end)):
             since_midnight = moment - moment.replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
@@ -214,21 +213,27 @@ def _load_learning_config(
         learning_mode = required("learning_mode")
         if not isinstance(learning_mode, bool):
             raise InputValidationError("learning_config.learning_mode 必须是布尔值。")
-        grpo = required("algorithm") == "grpo"
+        algorithm = required("algorithm")
+        grpo = algorithm == "grpo"
+        if str(raw.get("actor_architecture", "mlp")) != "mlp":
+            raise InputValidationError("第五版仅支持 learning_config.actor_architecture: mlp。")
+        interval_name = "validation_groups_interval" if grpo else "validation_episodes_interval"
+        common = {
+            "learning_mode": learning_mode,
+            "algorithm": algorithm,
+            "learning_rate": float(required("learning_rate")),
+            "gamma": float(required("gamma")),
+            "validation_interval": _parse_integer(required(interval_name), f"learning_config.{interval_name}"),
+            "device": str(raw.get("device", "cpu")),
+            "trained_policies_save_path": optional_path("trained_policies_save_path"),
+            "trained_policies_load_path": optional_path("trained_policies_load_path"),
+            "max_bid_price": float(raw.get("max_bid_price", 100.0)),
+            "periods": _load_learning_periods(raw.get("periods"), required=learning_mode),
+        }
         # GRPO 不读取 TD3 专属字段；旧配置仍保持原必填校验。
         if grpo:
             config = LearningConfig(
-                learning_mode=learning_mode, algorithm="grpo",
-                learning_rate=float(required("learning_rate")), gamma=float(required("gamma")),
-                validation_interval=_parse_integer(
-                    required("validation_groups_interval"), "learning_config.validation_groups_interval"
-                ),
-                actor_architecture=str(raw.get("actor_architecture", "mlp")),
-                device=str(raw.get("device", "cpu")),
-                trained_policies_save_path=optional_path("trained_policies_save_path"),
-                trained_policies_load_path=optional_path("trained_policies_load_path"),
-                max_bid_price=float(raw.get("max_bid_price", 100.0)),
-                periods=_load_learning_periods(raw.get("periods"), required=learning_mode),
+                **common,
                 group_size=_parse_integer(required("group_size"), "learning_config.group_size", minimum=2),
                 **{name: _parse_integer(required(name), f"learning_config.{name}") for name in (
                     "training_steps", "sampling_workers", "update_epochs", "minibatch_size"
@@ -249,10 +254,10 @@ def _load_learning_config(
             raise InputValidationError(
                 "learning_config.train_freq 必须是 time_step 的整数倍。"
             )
+        if str(required("action_noise_schedule")) != "linear":
+            raise InputValidationError("第五版要求 learning_config.action_noise_schedule: linear。")
         config = LearningConfig(
-            learning_mode=learning_mode,
-            algorithm=str(required("algorithm")),
-            learning_rate=float(required("learning_rate")),
+            **common,
             training_episodes=_parse_integer(required("training_episodes"), "learning_config.training_episodes"),
             initial_experience_episodes=_parse_integer(
                 required("episodes_collecting_initial_experience"),
@@ -260,42 +265,21 @@ def _load_learning_config(
             ),
             replay_buffer_size=_parse_integer(required("replay_buffer_size"), "learning_config.replay_buffer_size"),
             batch_size=_parse_integer(required("batch_size"), "learning_config.batch_size"),
-            gamma=float(required("gamma")),
             train_frequency_steps=int(frequency_ratio),
             gradient_steps=_parse_integer(required("gradient_steps"), "learning_config.gradient_steps"),
-            validation_interval=_parse_integer(
-                required("validation_episodes_interval"), "learning_config.validation_episodes_interval"
-            ),
             exploration_noise_std=float(required("exploration_noise_std")),
             noise_sigma=float(required("noise_sigma")),
             noise_scale=float(required("noise_scale")),
             noise_dt=float(required("noise_dt")),
-            action_noise_schedule=str(required("action_noise_schedule")),
             tau=float(required("tau")),
             policy_delay=_parse_integer(required("policy_delay"), "learning_config.policy_delay"),
             target_policy_noise=float(required("target_policy_noise")),
             target_noise_clip=float(required("target_noise_clip")),
-            actor_architecture=str(raw.get("actor_architecture", "mlp")),
-            device=str(raw.get("device", "cpu")),
-            trained_policies_save_path=optional_path("trained_policies_save_path"),
-            trained_policies_load_path=optional_path("trained_policies_load_path"),
-            max_bid_price=float(raw.get("max_bid_price", 100.0)),
             training_steps=_parse_integer(raw.get("training_steps", 0), "learning_config.training_steps", minimum=0),
-            periods=_load_learning_periods(
-                raw.get("periods"), required=learning_mode
-            ),
         )
     except (TypeError, ValueError) as exc:
         raise InputValidationError(f"learning_config 无效：{exc}") from exc
 
-    if config.actor_architecture != "mlp":
-        raise InputValidationError(
-            "第五版仅支持 learning_config.actor_architecture: mlp。"
-        )
-    if config.action_noise_schedule != "linear":
-        raise InputValidationError(
-            "第五版要求 learning_config.action_noise_schedule: linear。"
-        )
     positive = {
         "learning_rate": config.learning_rate,
         "noise_dt": config.noise_dt,
@@ -338,8 +322,8 @@ def _validate_grpo_config(config):
         raise InputValidationError("GRPO 的学习率、标准差、报价上限和阈值必须为有限正数。")
     if not config.min_std <= config.initial_std <= config.max_std:
         raise InputValidationError("GRPO 必须满足 min_std <= initial_std <= max_std。")
-    if not 0 <= config.gamma <= 1 or config.actor_architecture != "mlp":
-        raise InputValidationError("GRPO 要求 gamma 在 [0, 1] 内，actor_architecture 为 mlp。")
+    if not 0 <= config.gamma <= 1:
+        raise InputValidationError("GRPO 要求 gamma 在 [0, 1] 内。")
 
 
 def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSettings:
@@ -387,15 +371,14 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
 
     try:
         time_step = parse_duration(data["time_step"], "time_step")
+        # 开市持续时间尚未用于事件调度，只校验输入。
+        parse_duration(eom["opening_duration"], "markets_config.EOM.opening_duration")
         settings = MarketSettings(
             start=market_start,
             end=_parse_datetime(data["end_date"], "end_date"),
             time_step=time_step,
             opening_frequency=parse_duration(
                 eom["opening_frequency"], "markets_config.EOM.opening_frequency"
-            ),
-            opening_duration=parse_duration(
-                eom["opening_duration"], "markets_config.EOM.opening_duration"
             ),
             product_duration=parse_duration(
                 product["duration"], "markets_config.EOM.products[0].duration"

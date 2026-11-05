@@ -100,8 +100,8 @@ def main(argv: list[str] | None = None) -> int:
         if is_learning: # 对应第五版学习场景，用于训练、评估和测试机组报价。
             print(f"强化学习设备：{settings.learning_config.device}")
             print(f"强化学习算法：{settings.learning_config.algorithm}")
-            for name, period in settings.learning_config.periods:
-                print(f"  {name}: [{period.start}, {period.end})")
+            for name, (start, end) in settings.learning_config.periods.items():
+                print(f"  {name}: [{start}, {end})")
             learning_mode = arguments.learning_mode or "train"
             if arguments.period is not None and learning_mode != "evaluate":
                 raise SimulationError("--period 只能与 --learning-mode evaluate 一起使用。")

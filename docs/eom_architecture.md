@@ -1,15 +1,15 @@
 # EOM 仿真分层
 
-V1/V2、V4、V5 共用常规市场。V1/V2 的入口 `simulate_v1_v2_market` 位于
-`eom.py`，V4 的入口在 `industry_market.py`，V5 保留在 `v5.py`。V1/V2、V5
+V1/V2、V4、V5 共用常规市场。V1/V2 在 `simulation.py` 中直接创建并准备
+`BaseMarket`，V4 的入口在 `industry_market.py`，V5 保留在 `v5.py`。V1/V2、V5
 共用事件引擎；V4 与 V3 一样在场景入口中直接组织运行流程。V4 调用基础市场
 完成常规报价、储能、出清及交付状态更新。
 
 ```text
 simulation.py
-  ├─ eom.py：共用事件引擎、扩展协议；simulate_v1_v2_market 为基础市场入口
+  ├─ V1/V2：创建 BaseMarket → prepare() → eom.py 共用事件引擎
   ├─ industry_market.py：simulate_v4_market 直接组织工业计划、出清和交付事件
-  ├─ v5.py：基础市场 + 学习扩展
+  ├─ v5.py：基础市场 + LearningEpisodeSession 学习会话
   └─ household_market.py：原有 V3 家庭仿真
 
 base_market/
@@ -19,16 +19,16 @@ base_market/
   ├─ storage.py：储能报价、承诺电量投影和 SOC 回写
   └─ forecasts.py：朴素价格预测、预测窗口及开放完整性检查
 
-eom.py：V1/V2、V5 的开市、交割开始/结束事件，结果队列、扩展协议和 V1/V2 入口
+eom.py：V1/V2、V5 的开市、交割开始/结束事件及结果队列
 ```
 
 具体报价公式保留在 `bidding.py`，出清算法保留在 `clearing_algorithm/`。
 
 ## 第四版直接调用流程
 
-`simulate_v4_market()` 创建 `BaseMarket`，通过 `prepare(input_loader=...)`
-加载工业预测和原料价格，再创建 `IndustryRollingCoordinator`。输入加载器仅用于
-准备数据，交易阶段直接调用协调器：
+`simulate_v4_market()` 创建 `BaseMarket`，调用 `_load_industry_inputs()` 加载工业预测
+和原料价格，通过 `prepare()` 的关键字参数传入，再创建 `IndustryRollingCoordinator`。
+交易阶段直接调用协调器：
 
 ```text
 simulate_v4_market()
@@ -51,17 +51,15 @@ simulate_v4_market()
 学习会话负责动作维度、有限值校验和按需裁剪，再把已处理动作传给 `learning_offers()`。
 经验记录保留动作原顺序，只有生成报价时对价格排序。
 
-## 共用事件引擎的扩展生命周期
+## 学习场景与共用事件引擎
 
-1. 基础市场读取机组、储能、需求曲线和可用率，调用扩展的 `prepare(market)`。
-   扩展声明额外参与者、燃料/价格数据和预测时刻偏移；V5 在这里校验学习机组。
-2. 基础市场检查开放窗口并生成预测、初始化运行状态，调用 `initialize(market)`。
-   V5 以有效交割时段计算剩余负荷及归一化基准，然后建立学习会话。
-3. 每次开市先收集 `bids_for_products` 的额外需求；逐台机组调用
-   `offers_for_plant`。返回 `None` 表示使用常规报价，返回空元组表示不报价，
-   返回订单表示完整替换该机组报价。预测价格始终按原有边际成本计算。
-4. 交割开始附加启动成本后调用 `record_delivery_start`；交割结束由基础市场回写常规状态；
-   最终调用 `finalize` 附加各扩展的结果。
+1. `BaseMarket` 构造时读取机组、储能、需求曲线和可用率。
+2. V5 校验学习机组并创建 `LearningEpisodeSession`；随后调用基础市场的
+   `prepare(learning_session=...)`，检查开市窗口、准备对手需要的预测并初始化设备状态。
+3. 开市时，学习机组直接调用会话的 `offers_for_product()`；其他机组沿用常规报价。
+   会话持有最近 12 个已开始交付的市场结果，直接构造观测，不转换成字典或重新排序。
+4. 交割开始附加启动成本后调用会话的 `record_result()`，计算奖励并更新历史；交割结束由基础市场回写常规状态。
+   事件引擎返回后，V5 入口结束学习会话并将学习结果附加到仿真结果。
 
 同一时刻的顺序保持为：
 
@@ -70,8 +68,10 @@ simulate_v4_market()
 | V1/V2、V4 | 交割结束 → 开市 → 交割开始 |
 | V5 | 交割结束 → 交割开始及奖励记录 → 开市及下一动作 |
 
-V1/V2、V5 的事件引擎通过 `settle_before_opening` 声明这个顺序；
+共用事件引擎在启用学习会话时先处理交割开始，其余场景先开市；
 V4 在自己的事件循环中明确按“交割结束 → 开市 → 交割开始”执行。
+`scheduled_results` 仅保留尚未结束交付的产品，交割结束时移除；完整结果另行保存，
+学习会话单独维护最近 12 个已开始交付的市场结果。
 
 ## 回归验证
 

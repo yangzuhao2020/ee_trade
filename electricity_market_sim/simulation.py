@@ -10,14 +10,15 @@ from .models import LEARNING_PERIOD_NAMES, MarketOpening, MarketSettings, Simula
 from .reporting import write_results
 from .simulators.v5 import simulate_v5_market
 from .simulators.household_market import simulate_household_market
-from .simulators.eom import simulate_v1_v2_market
+from .simulators.base_market import BaseMarket
+from .simulators.eom import simulate_eom_market
 from .simulators.industry_market import simulate_v4_market
 
 
 def learning_period_settings(settings: MarketSettings, period: str) -> MarketSettings:
     """把按交付时间配置的学习时段换算为市场的开市起止时间。
-    第一次开市提前 first_delivery，使首个交付时段恰好从 period.start 开始；
-    最后一个交付时段在 period.end 结束。顶层 start_date 和 EOM.start_date 不再生效。
+    第一次开市提前 first_delivery，使首个交付时段恰好从所选时段起点开始；
+    最后一个交付时段在时段终点结束。顶层 start_date 和 EOM.start_date 不再生效。
     """
     if period not in LEARNING_PERIOD_NAMES:
         raise InputValidationError(
@@ -25,45 +26,12 @@ def learning_period_settings(settings: MarketSettings, period: str) -> MarketSet
         )
     if settings.learning_config is None:
         raise InputValidationError("learning period 需要 learning_config。")
-    try:
-        delivery = settings.learning_config.period(period)
-    except ValueError as exc:
-        raise InputValidationError(str(exc)) from exc
+    if settings.learning_config.periods is None:
+        raise InputValidationError("learning_config.periods 未配置交付时段。")
+    start, end = settings.learning_config.periods[period]
     return replace(
-        settings, start=delivery.start - settings.first_delivery, end=delivery.end
+        settings, start=start - settings.first_delivery, end=end
     )
-
-
-class LearningEpisodeRunner:
-    """用同一输入目录、场景和数据时段重复运行回合。"""
-    def __init__(
-        self,
-        input_dir: str | Path,
-        scenario: str = "base",
-        *,
-        period: str,
-    ) -> None:
-        self.input_dir = Path(input_dir)
-        self.scenario = scenario
-        self.period = period
-
-    def run_episode(
-        self,
-        action_provider: ActionProvider,
-        transition_consumer: TransitionConsumer | None = None,
-        *,
-        enforce_action_bounds: bool = True,
-    ) -> SimulationResult:
-        """重新初始化市场，使用传入的策略运行一轮仿真。"""
-
-        return simulate_learning_episode(
-            self.input_dir,
-            action_provider,
-            scenario=self.scenario,
-            transition_consumer=transition_consumer,
-            enforce_action_bounds=enforce_action_bounds,
-            period=self.period,
-        )
 
 
 def market_openings(settings: MarketSettings) -> list[MarketOpening]:
@@ -148,7 +116,9 @@ def simulate(
     elif settings.market_mechanism == "pay_as_bid":
         return simulate_household_market(input_path, settings, openings) # 第三版本
     else:
-        return simulate_v1_v2_market(input_path, settings, openings) # 第一、二版本
+        market = BaseMarket(input_path, settings, openings)
+        market.prepare()
+        return simulate_eom_market(market) # 第一、二版本
 
 
 def simulate_learning_episode(
