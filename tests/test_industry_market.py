@@ -7,7 +7,10 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 from electricity_market_sim.errors import InputValidationError
+from electricity_market_sim.industry import _ramp_constraint_rows
 from electricity_market_sim.models import (
     DemandUnit, IndustrialDevice, IndustrialUnit, MarketOpening,
     MarketSettings, PowerPlant,
@@ -45,6 +48,30 @@ UNIT = IndustrialUnit(
 
 
 class IndustryMarketContracts(unittest.TestCase):
+    def test_ramps_follow_production_rates_across_unequal_duration_products(self):
+        devices = (
+            IndustrialDevice("electrolyser", 10.0, 0.0, 0.8, 0.5),
+            IndustrialDevice("dri_plant", 20.0, 0.0, 0.6, 0.8),
+            IndustrialDevice("eaf", 30.0, 0.0, 1.5, 0.3),
+        )
+        durations = np.array([0.25, 1.0, 0.5])
+        power_coefficients = np.array([1.0, 2.0, 3.0]) / durations[:, None]
+        rows, limits = _ramp_constraint_rows(
+            devices, power_coefficients, (1.0, 2.2, 3.0), row_width=3)
+        # DRI 限制上升速度，EAF 限制下降速度；首时段保留各设备初始功率。
+        cases = (
+            ("within_limits", [1.4, 1.7, 1.6], True),
+            ("initial_ramp_up", [1.41, 1.7, 1.6], False),
+            ("initial_ramp_down", [0.89, 1.1, 1.2], False),
+            ("later_ramp_up", [1.4, 1.71, 1.61], False),
+            ("later_ramp_down", [1.4, 1.7, 1.59], False),
+        )
+        for name, rates, feasible in cases:
+            with self.subTest(name=name):
+                steel = np.array(rates) * durations
+                self.assertEqual(bool(np.all(np.array(rows) @ steel <= np.array(limits) + 1e-10)),
+                                 feasible)
+
     def continuous_unit(self, *, demand_t=1.5, minimum_power=0.2):
         devices = {
             name: replace(getattr(UNIT, name), min_power_mw=minimum_power,

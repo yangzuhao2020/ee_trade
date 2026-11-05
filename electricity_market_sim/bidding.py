@@ -12,17 +12,6 @@ _FORECAST_HOURS = 12
 
 
 @dataclass
-class PlantRuntimeState:
-    """``powerplant_energy_heuristic_flexable`` 所需的时序运行状态。
-    V2 约定机组初始处于停机状态，出力为零。本版本的调度约束
-    有意不包含爬坡约束、热电联产（CHP）的供热承诺，
-    以及最小连续运行和停机时间约束。
-    """
-
-    is_running: bool
-
-
-@dataclass
 class StorageRuntimeState:
     """单个储能单元在已完成交付后的实际储能量。
     未来已成交的产品由仿真调度器保存，并单独推算其影响。
@@ -226,7 +215,7 @@ def segment_supply_offers(
 
 def heuristic_segment_specs(
     plant: PowerPlant,
-    state: PlantRuntimeState,
+    is_running: bool,
     delivery_start: datetime,
     delivery_end: datetime,
     available_power: float,
@@ -251,7 +240,7 @@ def heuristic_segment_specs(
 
     segment_specs = []
     if inflexible_power > _POWER_TOLERANCE_MW:
-        if state.is_running:
+        if is_running:
             future_expected_profit = sum(
                 price_forecast[delivery_start + timedelta(hours=hour)] - marginal_cost
                 for hour in range(_FORECAST_HOURS + 1)
@@ -275,7 +264,7 @@ def heuristic_segment_specs(
 
 def heuristic_block_offers(
     plant: PowerPlant,
-    state: PlantRuntimeState,
+    is_running: bool,
     products: tuple[tuple[datetime, datetime], ...],
     available_powers_mw: dict[datetime, float],
     marginal_cost: float,
@@ -285,8 +274,7 @@ def heuristic_block_offers(
 ) -> list[SupplyOffer]:
     """为一次开市创建一个最低出力块报价（BB）及其逐小时灵活出力报价。
 
-    构建报价时有意不更新 ``state``：V2 使用报价截止时的状态快照，
-    为同一次日前开市的所有产品定价。
+    V2 使用报价截止时的运行状态，为同一次日前开市的所有产品定价。
     """
 
     inflexible_legs = []
@@ -294,7 +282,7 @@ def heuristic_block_offers(
     for delivery_start, delivery_end in products:
         segments = heuristic_segment_specs(
             plant,
-            state,
+            is_running,
             delivery_start,
             delivery_end,
             available_powers_mw[delivery_start],

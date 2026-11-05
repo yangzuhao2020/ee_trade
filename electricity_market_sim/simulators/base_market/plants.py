@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING
 from ...bidding import (
-    PlantRuntimeState, available_power_mw, heuristic_block_offers,
+    available_power_mw, heuristic_block_offers,
     heuristic_segment_specs, naive_offer, segment_supply_offers,
 )
 from ...errors import InputValidationError
@@ -61,7 +61,7 @@ def _validate_strategy_configuration(
 def _apply_startup_costs(
     market_result: MarketClearingResult,
     plants: tuple[PowerPlant, ...],
-    runtime_states: dict[str, PlantRuntimeState],
+    runtime_states: dict[str, bool],
 ) -> MarketClearingResult:
     """已成交的产品开始交付时，为需要启动的机组计入启动成本。"""
 
@@ -71,8 +71,8 @@ def _apply_startup_costs(
             accepted_by_plant[cleared.offer.unit_name] += cleared.accepted_energy_mwh
     started_names = {
         name
-        for name, state in runtime_states.items()
-        if not state.is_running and accepted_by_plant[name] > _POWER_TOLERANCE_MW
+        for name, is_running in runtime_states.items()
+        if not is_running and accepted_by_plant[name] > _POWER_TOLERANCE_MW
     }
     if not started_names:
         return market_result
@@ -106,7 +106,7 @@ def _apply_startup_costs(
 
 def _record_runtime_states(
     market_result: MarketClearingResult,
-    runtime_states: dict[str, PlantRuntimeState],
+    runtime_states: dict[str, bool],
 ) -> None:
     """仅在产品的交付时段结束后，才将实际调度结果写入机组运行状态。"""
 
@@ -114,8 +114,8 @@ def _record_runtime_states(
     for cleared in market_result.offers:
         if cleared.offer.unit_name in runtime_states:
             accepted_by_plant[cleared.offer.unit_name] += cleared.accepted_energy_mwh
-    for plant_name, state in runtime_states.items():
-        state.is_running = (
+    for plant_name in runtime_states:
+        runtime_states[plant_name] = (
             accepted_by_plant[plant_name] / market_result.duration_hours > _POWER_TOLERANCE_MW
         )
 
@@ -124,7 +124,7 @@ def _offers_for_opening(
     *,
     opening: MarketOpening,
     plants: tuple[PowerPlant, ...],
-    runtime_states: dict[str, PlantRuntimeState],
+    runtime_states: dict[str, bool],
     availability_profiles: dict[str, dict[datetime, float]],
     marginal_costs: dict[str, float],
     fuel_price_profiles: dict[datetime, dict[str, float]] | None,

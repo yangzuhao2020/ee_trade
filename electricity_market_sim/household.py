@@ -3,7 +3,6 @@
 出清后按实际成交电量安排热泵和电池运行，更新电池 SOC，并记录未满足的用电与供热需求。
 """
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 import numpy as np
@@ -34,22 +33,7 @@ class _HouseholdProblem:
     discharge: np.ndarray
     bounds: Bounds
     integrality: np.ndarray
-    matrix: np.ndarray
-    constraint_lower: np.ndarray
-    constraint_upper: np.ndarray
-
-
-@dataclass(frozen=True)
-class _HouseholdVariables:
-    """优化变量分块的列索引、取值范围和整数标记。"""
-    variable_count: int
-    grid: np.ndarray
-    charge: np.ndarray
-    discharge: np.ndarray
-    energy: np.ndarray
-    mode: np.ndarray
-    bounds: Bounds
-    integrality: np.ndarray
+    constraint: LinearConstraint
 
 
 def _build_household_problem(
@@ -62,6 +46,7 @@ def _build_household_problem(
     initial_battery_discharge_power_mw: float,
 ) -> _HouseholdProblem:
     """准备预测并组装变量与约束。"""
+    # 1. 按交付时段排列预测数据，计算热泵功率。
     durations = np.array([hours_between(*product) for product in products])
     prices = np.array([price_forecast[start] for start, _ in products], dtype=float)
     heat_demands = np.array([heat_forecast[start] for start, _ in products], dtype=float)
@@ -70,39 +55,8 @@ def _build_household_problem(
         raise InputValidationError(
             f"家庭用户 {household.name!r} 的热需求所需热泵功率超出功率上限。"
         )
-    variables = _build_household_variables(household, heat_powers)
-    matrix, constraint_lower, constraint_upper = _build_household_constraints(
-        household,
-        durations,
-        heat_powers,
-        variables,
-        initial_energy_mwh,
-        initial_battery_charge_power_mw,
-        initial_battery_discharge_power_mw,
-    )
-    return _HouseholdProblem(
-        products=products,
-        durations=durations,
-        prices=prices,
-        heat_demands=heat_demands,
-        heat_powers=heat_powers,
-        variable_count=variables.variable_count,
-        grid=variables.grid,
-        charge=variables.charge,
-        discharge=variables.discharge,
-        bounds=variables.bounds,
-        integrality=variables.integrality,
-        matrix=matrix,
-        constraint_lower=constraint_lower,
-        constraint_upper=constraint_upper,
-    )
 
-
-def _build_household_variables(
-    household: HouseholdUnit,
-    heat_powers: np.ndarray,
-) -> _HouseholdVariables:
-    """为 grid 购电、充电、放电、能量和充放电模式定义变量。"""
+    # 2. 定义购电、充电、放电、能量和充放电模式的索引与变量边界。
     count = len(heat_powers)
     grid, charge, discharge, energy, mode = (
         np.arange(k * count, (k + 1) * count) for k in range(5))
@@ -120,45 +74,17 @@ def _build_household_variables(
     integrality = np.zeros(variable_count, dtype=int)
     integrality[mode] = 1 # 不同同时充放电。
 
-    return _HouseholdVariables(
-        variable_count=variable_count,
-        grid=grid,
-        charge=charge,
-        discharge=discharge,
-        energy=energy,
-        mode=mode,
-        bounds=Bounds(lower, upper),
-        integrality=integrality,
-    )
-
-
-def _build_household_constraints(
-    household: HouseholdUnit,
-    durations: np.ndarray,
-    heat_powers: np.ndarray,
-    variables: _HouseholdVariables,
-    initial_energy_mwh: float,
-    initial_battery_charge_power_mw: float,
-    initial_battery_discharge_power_mw: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """把家庭用电和电池运行必须遵守的规则，转换成优化求解器能够使用的线性约束。
-    | 规则 | 被约束的表达式 | 下界 | 上界 |
-    |---|---|---|---|
-    | 功率平衡 | `购电 − 充电 + 放电` | 家庭用电需求 | 家庭用电需求 |
-    | 放电模式控制 | `放电 + 最大放电功率 × mode` | 无限制 | 最大放电功率 |
-    | 末端电量要求 | `最后时段的电池储能量` | 初始储能量 | 无限制 |
-    """
-    count = len(durations)
+    # 3. 构建功率平衡、电池能量、充放电互斥和爬坡约束。
     rows: list[np.ndarray] = []
     row_lower: list[float] = []
     row_upper: list[float] = []
 
     def add_constraint(
-        coefficients: dict[int, float], 
+        coefficients: dict[int, float],
         minimum: float, maximum: float
     ) -> None:
         # minimum ≤ 各变量乘以对应系数后的总和 ≤ maximum
-        row = np.zeros(variables.variable_count)
+        row = np.zeros(variable_count)
         for variable, coefficient in coefficients.items():
             row[variable] = coefficient
 
@@ -169,106 +95,79 @@ def _build_household_constraints(
     for index in range(count):
         add_constraint(
             {
-                variables.grid[index]: 1.0,
-                variables.charge[index]: -1.0,
-                variables.discharge[index]: 1.0,
+                grid[index]: 1.0,
+                charge[index]: -1.0,
+                discharge[index]: 1.0,
             },
             heat_powers[index],
             heat_powers[index],
         )
 
-        _add_battery_energy_constraint(
-            add_constraint,
-            household,
-            variables,
-            index,
-            durations[index],
-            initial_energy_mwh,
-        )
+        # 当前电量 = 上期保留电量 + 充电实际存入电量 − 放电实际消耗电量。
+        duration = durations[index]
+        retention = (1.0 - household.battery_loss_rate) ** duration
+        energy_coefficients = {
+            energy[index]: 1.0,
+            charge[index]: -household.battery_efficiency_charge * duration,
+            discharge[index]: duration / household.battery_efficiency_discharge,
+        }
+        if index:
+            energy_coefficients[energy[index - 1]] = -retention
+            energy_rhs = 0.0
+        else:
+            energy_rhs = retention * initial_energy_mwh
+        add_constraint(energy_coefficients, energy_rhs, energy_rhs)
 
         # 充放电模式为 1 时允许充电，为 0 时允许放电。
         add_constraint(
             {
-                variables.charge[index]: 1.0,
-                variables.mode[index]: -household.battery_max_charge_power_mw,
+                charge[index]: 1.0,
+                mode[index]: -household.battery_max_charge_power_mw,
             }, -np.inf, 0.0,)
         add_constraint(
             {
-                variables.discharge[index]: 1.0,
-                variables.mode[index]: household.battery_max_discharge_power_mw,
+                discharge[index]: 1.0,
+                mode[index]: household.battery_max_discharge_power_mw,
             }, -np.inf, household.battery_max_discharge_power_mw,)
 
-        _add_battery_ramp_constraints(
-            add_constraint,
-            household,
-            variables,
-            index,
-            initial_battery_charge_power_mw,
-            initial_battery_discharge_power_mw,
-        )
+        # 首时段与上次实际功率衔接，其余时段限制相邻计划功率之差。
+        for indices, initial_power in (
+            (charge, initial_battery_charge_power_mw),
+            (discharge, initial_battery_discharge_power_mw),
+        ):
+            if index:
+                add_constraint(
+                    {indices[index]: 1.0, indices[index - 1]: -1.0},
+                    -household.battery_ramp_down_mw,
+                    household.battery_ramp_up_mw,
+                )
+            else:
+                add_constraint(
+                    {indices[0]: 1.0},
+                    initial_power - household.battery_ramp_down_mw,
+                    initial_power + household.battery_ramp_up_mw,
+                )
 
     add_constraint(
-        {variables.energy[-1]: 1.0},
+        # 最后时段结束时的储能量不低于本次开市的初始储能量。
+        {energy[-1]: 1.0},
         initial_energy_mwh,
         np.inf,
     )
-    return np.vstack(rows), np.array(row_lower), np.array(row_upper)
-
-
-def _add_battery_energy_constraint(
-    add_constraint: Callable[[dict[int, float], float, float], None],
-    household: HouseholdUnit,
-    variables: _HouseholdVariables,
-    index: int,
-    duration: float,
-    initial_energy_mwh: float,
-) -> None:
-    """根据充放电效率和自放电率连接相邻时段的电池能量。
-    当前时段结束的电量 = 上一时段保留下来的电量 + 充电实际存入的电量− 放电实际消耗的电量
-    """
-    retention = (1.0 - household.battery_loss_rate) ** duration
-    energy_coefficients = {
-        variables.energy[index]: 1.0,
-        variables.charge[index]: (
-            -household.battery_efficiency_charge * duration
-        ),
-        variables.discharge[index]: (
-            duration / household.battery_efficiency_discharge
-        ),
-    } # 当前电量 − 充电功率 × 时长 × 充电效率 + 放电功率 × 时长 ÷ 放电效率
-    if index:
-        energy_coefficients[variables.energy[index - 1]] = -retention
-        energy_rhs = 0.0
-    else:
-        energy_rhs = retention * initial_energy_mwh
-    add_constraint(energy_coefficients, energy_rhs, energy_rhs)
-
-
-def _add_battery_ramp_constraints(
-    add_constraint: Callable[[dict[int, float], float, float], None],
-    household: HouseholdUnit,
-    variables: _HouseholdVariables,
-    index: int,
-    initial_battery_charge_power_mw: float,
-    initial_battery_discharge_power_mw: float,
-) -> None:
-    """限制电池充电、放电功率的变化幅度，避免相邻时段的功率跳变过大。"""
-    for indices, initial_power in (
-        (variables.charge, initial_battery_charge_power_mw),
-        (variables.discharge, initial_battery_discharge_power_mw),
-    ):
-        if index:
-            add_constraint(
-                {indices[index]: 1.0, indices[index - 1]: -1.0},
-                -household.battery_ramp_down_mw,
-                household.battery_ramp_up_mw,
-            )
-        else:
-            add_constraint(
-                {indices[0]: 1.0},
-                initial_power - household.battery_ramp_down_mw,
-                initial_power + household.battery_ramp_up_mw,
-            )
+    return _HouseholdProblem(
+        products=products,
+        durations=durations,
+        prices=prices,
+        heat_demands=heat_demands,
+        heat_powers=heat_powers,
+        variable_count=variable_count,
+        grid=grid,
+        charge=charge,
+        discharge=discharge,
+        bounds=Bounds(lower, upper),
+        integrality=integrality,
+        constraint=LinearConstraint(np.vstack(rows), np.array(row_lower), np.array(row_upper)),
+    )
 
 
 def _solve_household_problem(
@@ -294,14 +193,6 @@ def _solve_household_problem(
     # result.x 按变量索引保存各时段的购电、充放电功率、储能量和模式。
     # 将数值计算产生的接近零的小数归零，其他变量取值保持原值。
     return np.where(np.abs(result.x) < _TOLERANCE, 0.0, result.x)
-
-
-def _baseline_objective(problem: _HouseholdProblem) -> np.ndarray:
-    # 固定负荷和热泵费用是常数，只计算电池充放电引起的费用变化。
-    objective = np.zeros(problem.variable_count)
-    objective[problem.charge] = problem.prices * problem.durations
-    objective[problem.discharge] = -problem.prices * problem.durations
-    return objective
 
 
 def _household_plans(
@@ -346,9 +237,9 @@ def _flexibility_bounds(
     cost_row = np.zeros(problem.variable_count)
     cost_row[problem.grid] = problem.prices * problem.durations
     constraint = LinearConstraint(
-        np.vstack((problem.matrix, cost_row)),
-        np.append(problem.constraint_lower, -np.inf),
-        np.append(problem.constraint_upper, cost_limit + _TOLERANCE),
+        np.vstack((problem.constraint.A, cost_row)),
+        np.append(problem.constraint.lb, -np.inf),
+        np.append(problem.constraint.ub, cost_limit + _TOLERANCE),
     )
     # 根据基准总费用和成本容忍度计算费用上限，
     # 并向优化模型添加“整个计划周期的总购电费用不得超过该上限”的约束。
@@ -407,16 +298,18 @@ def plan_household_opening(
             initial_battery_charge_power_mw[household.name],
             initial_battery_discharge_power_mw[household.name],
         ) # 准备模型数据
+        # 固定负荷和热泵费用是常数，只计算电池充放电引起的费用变化。
+        objective = np.zeros(problem.variable_count)
+        objective[problem.charge] = problem.prices * problem.durations
+        objective[problem.discharge] = -problem.prices * problem.durations
         plans_by_household[household.name] = _household_plans(
             household,
             problem,
             _solve_household_problem(
                 household,
                 problem,
-                _baseline_objective(problem),
-                LinearConstraint(
-                    problem.matrix, problem.constraint_lower, problem.constraint_upper
-                ),
+                objective,
+                problem.constraint,
             ), 
         )
 

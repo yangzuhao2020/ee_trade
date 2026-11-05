@@ -5,7 +5,7 @@ import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-from ...bidding import PlantRuntimeState, StorageRuntimeState, storage_heuristic_orders
+from ...bidding import StorageRuntimeState, storage_heuristic_orders
 from ...clearing_algorithm import (
     clear_complex_opening, clear_pay_as_clear,
     validate_demand_prices, validate_offer_prices,
@@ -140,8 +140,9 @@ class BaseMarket:
         } if fuel_price_profiles is None else {}
         self._validate_marginal_costs()
         self._prepare_openings_and_forecasts(market_price_forecasts)
-        self.runtime_states = {
-            plant.name: PlantRuntimeState(is_running=False) for plant in self.runtime_plants
+        # 机组初始停机；当前不施加爬坡、CHP 供热承诺及最小连续运行/停机时间约束。
+        self.runtime_states: dict[str, bool] = {
+            plant.name: False for plant in self.runtime_plants
         }
         self.storage_states = {
             storage.name: StorageRuntimeState(energy_mwh=storage.initial_energy_mwh)

@@ -8,7 +8,6 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
-from electricity_market_sim.bidding import PlantRuntimeState
 from electricity_market_sim.clearing_algorithm import clear_pay_as_clear
 from electricity_market_sim.deep_learning.learning import LearningEpisodeSession
 from electricity_market_sim.errors import InputValidationError
@@ -66,7 +65,7 @@ class TraceMarket:
                           ((START + (i + 1) * HOUR, START + (i + 2) * HOUR),))
             for i in range(3)
         )
-        self.runtime_states = {PLANT.name: PlantRuntimeState(is_running=False)}
+        self.runtime_states = {PLANT.name: False}
         self.observed_costs = []
         self.scheduled_counts = []
 
@@ -113,7 +112,7 @@ class EventContracts(unittest.TestCase):
         market = TraceMarket(True)
         result = simulate_eom_market(market)
         self.assertEqual(market.learning_session.startup_costs, [17.0, 0.0, 0.0])
-        self.assertTrue(market.runtime_states[PLANT.name].is_running)
+        self.assertTrue(market.runtime_states[PLANT.name])
         self.assertEqual([item.offers[0].startup_cost_eur for item in result.market_results],
                          market.learning_session.startup_costs)
 
@@ -154,7 +153,7 @@ class SupplySessionContracts(unittest.TestCase):
         with self.assertRaisesRegex(InputValidationError, "requires a learning session"):
             _offers_for_opening(
                 opening=MarketOpening(START, ((START + HOUR, START + 2 * HOUR),)),
-                plants=(plant,), runtime_states={plant.name: PlantRuntimeState(is_running=False)},
+                plants=(plant,), runtime_states={plant.name: False},
                 availability_profiles={}, marginal_costs={plant.name: 10.0},
                 fuel_price_profiles=None, price_forecasts={},
                 exchange_unit=None, exchange_profiles={},

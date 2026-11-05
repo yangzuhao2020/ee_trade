@@ -39,7 +39,6 @@ class _ProcessCoefficients:
 @dataclass(frozen=True)
 class _IndustryProblem:
     products: tuple[tuple[datetime, datetime], ...]
-    durations: np.ndarray
     variable_cost_per_tonne: np.ndarray
     grid_power_per_tonne: np.ndarray
     electrolyser_power_per_tonne: np.ndarray
@@ -125,25 +124,24 @@ def _ramp_constraint_rows(
     *,
     row_width: int,
 ) -> tuple[list[np.ndarray], list[float]]:
-    """约束函数：每台设备、每个时段生成两条约束：功率上升不能太快，功率下降也不能太快，并返回给线性规划求解器使用。"""
+    """设备功率按固定工艺比例联动，每时段只保留最严格的升、降约束。"""
     rows: list[np.ndarray] = []
     limits: list[float] = []
-    for index in range(len(power_coefficients)):
-        for device_index, device in enumerate(devices):
-            coefficient = power_coefficients[index, device_index]  # 功率系数（MW/吨钢）
-            increase = {index: coefficient}  # 上升：本期功率 - 上期功率
-            if index:
-                previous = power_coefficients[index - 1, device_index]
-                increase[index - 1] = -previous
-                initial = 0.0  # 上期功率已计入左侧
-            else:
-                initial = initial_powers_mw[device_index]  # 首时段使用初始功率
-            # 保存约束系数及右侧上限。
-            row = _constraint_row(increase, row_width)
-            # 下降：上期功率 - 本期功率
-            rows.extend((row, -row))
-            limits.extend(
-                (device.ramp_up_mw + initial, device.ramp_down_mw - initial))
+    for index, coefficients in enumerate(power_coefficients):
+        row = np.zeros(row_width)
+        row[index] = 1.0
+        initial = initial_powers_mw
+        if index:
+            # 除以本期功率系数后，上期产量按两时段的时长比换算。
+            row[index - 1] = -power_coefficients[index - 1, 0] / coefficients[0]
+            initial = (0.0, 0.0, 0.0)
+        rows.extend((row, -row))
+        limits.extend((
+            min((device.ramp_up_mw + power) / coefficient
+                for device, power, coefficient in zip(devices, initial, coefficients)),
+            min((device.ramp_down_mw - power) / coefficient
+                for device, power, coefficient in zip(devices, initial, coefficients)),
+        ))
     return rows, limits
 
 
@@ -292,7 +290,6 @@ def _build_industry_problem(
     window_power_coefficients = remaining_power_coefficients[:count]
     return _IndustryProblem(
         products=products,
-        durations=remaining_durations[:count],
         variable_cost_per_tonne=variable_costs,
         grid_power_per_tonne=window_power_coefficients[:, 3],
         electrolyser_power_per_tonne=window_power_coefficients[:, 0],
@@ -581,9 +578,8 @@ class IndustryRollingCoordinator:
         预测电价用于优化生产成本，maximum_bid_price 用于购电申报。
         """
         self.units = units
-        # 上游已完成交付时段的唯一性校验和排序；集合用于筛选本次开市的有效产品。
+        # 上游已完成交付时段的唯一性校验和排序。
         self.all_products = all_products
-        self.product_set = frozenset(self.all_products)
         self.price_forecasts = price_forecasts
         self.normalized_load_profiles = normalized_load_profiles
         self.fuel_price_profiles = fuel_price_profiles
@@ -614,22 +610,16 @@ class IndustryRollingCoordinator:
         申报电量取计划购电量，价格取市场最高限价；零电量不申报。
         """
         bids: list[DemandBid] = []
-        eligible_products = tuple(
-            product for product in products if product in self.product_set)
-
-        if not eligible_products:
-            return bids
-
         for unit in self.units:
             # 首个未承诺产品作为新滚动窗口的起点。
             missing_product = next(
-                (product for product in eligible_products
+                (product for product in products
                  if (unit.name, product[0]) not in self.plans),
                 None,
             )
             if missing_product is not None:
                 self._plan_window(unit, missing_product, scheduled_results)
-            for start, end in eligible_products:
+            for start, end in products:
                 plan = self.plans[(unit.name, start)]
                 if plan.planned_energy_mwh <= _TOLERANCE:
                     continue
