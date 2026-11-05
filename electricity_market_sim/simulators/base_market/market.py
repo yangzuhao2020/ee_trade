@@ -5,7 +5,7 @@ import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-from ...bidding import StorageRuntimeState, storage_heuristic_orders
+from ...bidding import storage_heuristic_orders
 from ...clearing_algorithm import (
     clear_complex_opening, clear_pay_as_clear,
     validate_demand_prices, validate_offer_prices,
@@ -33,6 +33,7 @@ from .plants import (
     _record_runtime_states, _validate_strategy_configuration,
 )
 from .storage import (
+    StorageRuntimeState,
     _project_storage_energies, _record_storage_states,
     _validate_storage_configuration,
 )

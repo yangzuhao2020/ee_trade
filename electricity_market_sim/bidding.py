@@ -1,53 +1,13 @@
-"""发电机组与储能的运行状态管理、机组可用容量计算及报价生成。"""
+"""发电机组与储能的报价策略、机组可用容量计算及订单生成。"""
 
 from __future__ import annotations
 from collections.abc import Iterable
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from .models import DemandBid, PowerPlant, StorageUnit, SupplyOffer
 from .utils import hours_between
 
 _POWER_TOLERANCE_MW = 1e-9
 _FORECAST_HOURS = 12
-
-
-@dataclass
-class StorageRuntimeState:
-    """单个储能单元在已完成交付后的实际储能量。
-    未来已成交的产品由仿真调度器保存，并单独推算其影响。
-    此状态仅在交付时段结束后更新。
-    """
-
-    energy_mwh: float
-
-    def record_dispatch(
-        self,
-        storage: StorageUnit,
-        accepted_charge_mwh: float,
-        accepted_discharge_mwh: float,
-        duration_hours: float,
-    ) -> tuple[float, float]:
-        """执行一个已交付产品的调度，并返回调度前后的储能量。"""
-
-        before = self.energy_mwh
-        after = (
-            before
-            + storage.natural_inflow_mw * duration_hours
-            + accepted_charge_mwh * storage.efficiency_charge
-            - accepted_discharge_mwh / storage.efficiency_discharge
-        )
-        tolerance = 1e-7
-        if after < storage.min_energy_mwh - tolerance:
-            raise ValueError(
-                f"Storage {storage.name!r} dispatch falls below min_soc: "
-                f"{after:.9f} MWh < {storage.min_energy_mwh:.9f} MWh."
-            )
-        # 自然流入超过剩余储能容量的部分会被弃用。
-        # 提交的充电订单电量已在计入自然流入后确定。
-        self.energy_mwh = min(
-            storage.max_energy_mwh, max(storage.min_energy_mwh, after)
-        )
-        return before, self.energy_mwh
 
 
 def storage_heuristic_orders(
