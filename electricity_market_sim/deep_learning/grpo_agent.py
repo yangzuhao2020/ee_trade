@@ -1,8 +1,8 @@
 """连续两段报价的随机策略、组回报和 GRPO 更新。"""
 
 from dataclasses import dataclass
+from functools import partial
 from math import log
-from pathlib import Path
 
 import torch
 from torch import nn
@@ -11,7 +11,7 @@ from torch.nn import functional as F
 
 from ..errors import InputValidationError
 from ..models import LearningConfig
-from .agent import _initialize_linear, _periods_payload, _read_checkpoint_payload
+from .agent import _deterministic_action, _initialize_linear
 from .learning import ACTION_SIZE, OBSERVATION_SIZE
 
 
@@ -103,28 +103,21 @@ def collect_group(agent, runner, on_episode):
 
 
 class GRPOAgent:
-    def __init__(self, config: LearningConfig, *, seed=None, run=0):
+    def __init__(self, config: LearningConfig, *, seed: int, run: int):
         self.config, self.seed, self.run = config, seed, run
         self.device = torch.device(config.device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise InputValidationError("GRPO device requires an available GPU.")
-        if seed is not None:
-            torch.manual_seed(seed)
+        torch.manual_seed(seed)
         self.actor = GaussianActor(config.initial_std).to(self.device)
+        self.deterministic_action = partial(_deterministic_action, self.actor, self.device)
         self.optimizer = torch.optim.AdamW(
             self.actor.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
         )
         self.rng = torch.Generator(device=self.device)
-        self.rng.manual_seed(seed if seed is not None else torch.seed())
-        self.interaction_steps = 0
-        self.gradient_updates = 0
+        self.rng.manual_seed(seed)
 
-    def deterministic_action(self, state):
-        with torch.no_grad():
-            observation = torch.tensor(state, dtype=torch.float32, device=self.device)
-            return tuple(self.actor(observation).cpu().tolist())
-
-    def update(self, batch: GroupBatch):
+    def update(self, batch: GroupBatch) -> None:
         cfg = self.config
         advantages, active = group_advantages(
             batch.rewards, batch.dones, cfg.gamma, cfg.advantage_threshold
@@ -136,14 +129,10 @@ class GRPOAgent:
             )
         )
         advantages = advantages.flatten()[mask].to(self.device)
-        kl, clipped, loss_value, grad_norm = 0.0, 0.0, 0.0, 0.0
         count = len(advantages)
-        updates = 0
-        stop_reason = "update_epochs" if count else "no_valid_samples"
         for _ in range(cfg.update_epochs if count else 0):
             indices = torch.randperm(count, generator=self.rng, device=self.device)
             self.optimizer.zero_grad(set_to_none=True)
-            loss_value = 0.0
             for index in indices.split(cfg.minibatch_size):
                 distribution = self.actor.distribution(states[index])
                 ratio = (action_log_prob(distribution, latent[index]) - old_log_prob[index]).exp()
@@ -154,51 +143,12 @@ class GRPOAgent:
                 # 分批累积整组均值梯度；尾批也按实际样本数加权。
                 loss = -surrogate.sum() / count
                 loss.backward()
-                loss_value += loss.item()
-            grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), cfg.max_grad_norm).item()
+            nn.utils.clip_grad_norm_(self.actor.parameters(), cfg.max_grad_norm)
             self.optimizer.step()
-            self.gradient_updates += 1
-            updates += 1
             with torch.no_grad():
                 self.actor.log_std.clamp_(log(cfg.min_std), log(cfg.max_std))
                 distribution = self.actor.distribution(states)
                 kl = kl_divergence(Normal(old_mean, old_std), distribution).sum(-1).mean().item()
-                ratio = (action_log_prob(distribution, latent) - old_log_prob).exp()
-                clipped = ((ratio - 1).abs() > cfg.clip_epsilon).float().mean().item()
             if kl > cfg.target_kl:
-                stop_reason = "target_kl"
                 break
         self.optimizer.zero_grad(set_to_none=True)
-        self.interaction_steps += batch.rewards.numel()
-        return {
-            "interaction_steps": self.interaction_steps,
-            "gradient_updates": self.gradient_updates,
-            "updates_this_group": updates, "eligible_samples": count,
-            "sample_coverage": float(updates > 0), "stop_reason": stop_reason,
-            "learning_rate": self.optimizer.param_groups[0]["lr"], "grad_norm": grad_norm,
-            "loss": loss_value, "kl": kl, "clip_fraction": clipped,
-            "policy_std": self.actor.log_std.exp().mean().item(),
-            "low_variance_fraction": (~active).float().mean().item(),
-        }
-
-    def save_checkpoint(self, path: Path, *, episode, validation_total_reward):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "checkpoint_version": 3, "algorithm": "grpo",
-            "state_version": "v5-observation-16", "distribution": "softsign-normal-v1",
-            "advantage_version": "group-time-return-v1",
-            "observation_size": OBSERVATION_SIZE, "action_size": ACTION_SIZE,
-            "periods": _periods_payload(self.config), "max_bid_price": self.config.max_bid_price,
-            "episode": episode, "validation_total_reward": validation_total_reward,
-            "seed": self.seed, "run": self.run,
-            "interaction_steps": self.interaction_steps, "gradient_updates": self.gradient_updates,
-            "actor": self.actor.state_dict(),
-        }
-        temporary = path.with_suffix(".pt.tmp")
-        torch.save(payload, temporary)
-        temporary.replace(path)
-
-    def load_checkpoint(self, path: Path):
-        payload = _read_checkpoint_payload(path, self.device, self.config, algorithm="grpo")
-        self.actor.load_state_dict(payload["actor"])
-        return payload

@@ -9,12 +9,14 @@ from typing import Any
 import numpy as np
 from .agent import (
     MATD3Agent,
+    load_policy,
+    save_checkpoint,
     _default_checkpoint_root,
     _write_run_manifest,
 )
 from ..config import load_market_settings
 from ..errors import InputValidationError
-from .learning_metrics import _EpisodeMetrics, _metrics, _write_metrics, _write_run_summary, _write_records
+from .learning_metrics import _EpisodeMetrics, _metrics, _write_metrics, _write_run_summary
 from ..models import MarketSettings, SimulationResult
 from ..reporting import write_results
 from ..simulation import simulate_learning_episode, learning_period_settings, market_openings
@@ -132,9 +134,6 @@ def _train_single_run(
     validation_episode = partial(simulate_learning_episode, input_path, scenario=scenario, period="validation")
     metrics: list[_EpisodeMetrics] = []
     best_total_reward = float("-inf")
-    progress = []
-    started = monotonic()
-    validation_seconds = 0.0
     for episode in _training_progress(episode_count, run):
         initial_experience = episode <= config.initial_experience_episodes
         training_result = train_episode(
@@ -158,9 +157,7 @@ def _train_single_run(
         is_last_episode = episode == episode_count
         should_validate = is_validation_due or is_last_episode
         if should_validate:
-            validation_started = monotonic()
             validation_result = validation_episode(agent.deterministic_action)
-            validation_seconds += monotonic() - validation_started
             validation_metrics = _metrics(
                 validation_result,
                 run=run,
@@ -169,18 +166,14 @@ def _train_single_run(
                 gamma=config.gamma,
             )
             metrics.append(validation_metrics)
-            progress.append({
-                "episode": episode, "interaction_steps": episode * steps_per_episode,
-                "elapsed_seconds": monotonic() - started, "validation_seconds": validation_seconds,
-                "total_reward": validation_metrics.total_reward,
-            })
             # 按验证时段总奖励选模型；打平时保留更早的检查点。
             if (
                 not initial_experience
                 and validation_metrics.total_reward > best_total_reward
             ):
                 best_total_reward = validation_metrics.total_reward
-                agent.save_checkpoint(
+                save_checkpoint(
+                    agent,
                     best_path,
                     episode=episode,
                     validation_total_reward=best_total_reward,
@@ -192,19 +185,18 @@ def _train_single_run(
             "or reduce episodes_collecting_initial_experience."
         )
 
-    best_payload = agent.load_checkpoint(best_path)
+    action_provider, best_payload = load_policy(config, best_path)
     validation_result, comparison = _evaluate_actor_and_baseline(
-        action_provider=agent.deterministic_action,
+        action_provider=action_provider,
         input_path=input_path,
         output_path=output_path / "validation",
         scenario=scenario,
         period="validation",
-        episode=int(best_payload["episode"]),
+        episode=best_payload["episode"],
         gamma=config.gamma,
         run=run,
     )
     metrics.extend(comparison)
-    _write_records(output_path / "learning_progress.csv", progress)
     return (
         validation_result,
         metrics,

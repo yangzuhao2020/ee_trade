@@ -5,13 +5,13 @@ from contextlib import nullcontext
 from functools import partial
 from multiprocessing import get_context
 from math import cos, pi
-from time import monotonic
 
 from ..errors import InputValidationError
 from ..simulation import simulate_learning_episode
+from .agent import load_policy, save_checkpoint
 from .grpo_agent import GRPOAgent, collect_group
 from .grpo_sampling import collect_parallel_group
-from .learning_metrics import _metrics, _write_records
+from .learning_metrics import _metrics
 from .test import _evaluate_actor_and_baseline
 
 
@@ -33,9 +33,7 @@ def train_single_run(input_path, output_path, checkpoint_root, scenario, *,
 
     runner = partial(simulate_learning_episode, input_path, scenario=scenario, period="train")
     validation = partial(simulate_learning_episode, input_path, scenario=scenario, period="validation")
-    metrics, diagnostics, progress = [], [], []
-    started = monotonic()
-    validation_seconds = 0.0
+    metrics = []
     workers = min(config.sampling_workers, config.group_size) if agent.device.type == "cpu" else 1
     print(f"GRPO 训练轮次：{groups}（每轮 {config.group_size} 条轨迹，{group_steps} 次交互）")
     print(f"GRPO 采样进程：{workers}")
@@ -63,32 +61,23 @@ def train_single_run(input_path, output_path, checkpoint_root, scenario, *,
             lr_ratio = config.min_lr_ratio + (1 - config.min_lr_ratio) * (1 + cos(pi * fraction)) / 2
             for parameters in agent.optimizer.param_groups:
                 parameters["lr"] = config.learning_rate * lr_ratio
-            diagnostics.append({"group": group, **agent.update(batch)})
+            agent.update(batch)
             # 按组间隔验证，最后一组始终验证；只保存验证奖励最高的策略。
             if group % config.validation_interval != 0 and group != groups:
                 continue
-            validation_start = monotonic()
             result = validation(agent.deterministic_action)
-            validation_seconds += monotonic() - validation_start
             score = _metrics(result, run=run, phase="validation", episode=episode, gamma=config.gamma)
             metrics.append(score)
-            progress.append({
-                "episode": episode, "interaction_steps": agent.interaction_steps,
-                "elapsed_seconds": monotonic() - started, "validation_seconds": validation_seconds,
-                "total_reward": score.total_reward,
-            })
             if score.total_reward > best_reward:
                 best_reward = score.total_reward
-                agent.save_checkpoint(best, episode=episode, validation_total_reward=best_reward)
+                save_checkpoint(agent, best, episode=episode, validation_total_reward=best_reward)
 
-    payload = agent.load_checkpoint(best)
+    action_provider, payload = load_policy(config, best)
     result, comparison = _evaluate_actor_and_baseline(
-        action_provider=agent.deterministic_action,
+        action_provider=action_provider,
         input_path=input_path, output_path=output_path / "validation",
         scenario=scenario, period="validation", episode=payload["episode"],
         gamma=config.gamma, run=run,
     )
     metrics.extend(comparison)
-    _write_records(output_path / "grpo_diagnostics.csv", diagnostics)
-    _write_records(output_path / "learning_progress.csv", progress)
     return result, metrics, best, best_reward

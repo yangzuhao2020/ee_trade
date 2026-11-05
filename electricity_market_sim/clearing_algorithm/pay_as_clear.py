@@ -22,13 +22,14 @@ from .common import (
 def clear_pay_as_clear(
     demand_bids: list[DemandBid], supply_offers: list[SupplyOffer]
 ) -> MarketClearingResult:
-    """按稳定的报价优先顺序对单个产品进行出清，并采用统一价格结算。
+    """按报价撮合单个交付时段的买卖订单，并以统一出清价结算。
 
-    供给按 `(price, unit_name)` 排序，需求按 `(-price, unit_name)` 排序。
-    这些稳定的排序键有意替代 ASSUME 在同价时的随机排序方式，
-    使学习场景的结果可复现。同价时，学习机组的最小出力报价段
-    优先于其灵活出力报价段出清，从而使成交电量的报价段归属确定。
-    这种同价排序规则并不强制机组达到最小调度出力。
+    卖单按报价升序、机组名称升序排序；同价同机组时，
+    最小出力报价段（learning_minimum）优先，再按订单标识排序。
+    买单按愿付价格降序、参与者名称升序排序，仍相同时保持输入顺序。
+
+    允许部分成交，报价段排序不构成最小出力约束。
+    统一出清价为已成交卖单的最高报价；无成交时为 0。
     """
 
     if not demand_bids and not supply_offers:
@@ -72,15 +73,15 @@ def clear_pay_as_clear(
             accepted_by_demand_index[demand_index] += accepted
             if accepted > _EPSILON:
                 matched_orders.append((demand, offer, accepted))
+
             remaining_demand -= accepted # 这个需求单还剩多少电量没满足。
             remaining_supply -= accepted # 这个供给报价还剩多少电量没成交。
             if accepted > _EPSILON:
-                # This offer is the latest accepted offer in the deterministic
-                # merit order, so it is the product's marginal unit so far.
                 marginal_unit_name = offer.unit_name
+
             if remaining_supply <= _EPSILON:
                 supply_index += 1
-                if supply_index < len(ordered_supply):
+                if supply_index < len(ordered_supply): # 避免最后一单越界
                     remaining_supply = ordered_supply[supply_index].offered_energy_mwh
 
     accepted_prices = [
@@ -118,7 +119,7 @@ def clear_pay_as_clear(
             trade_price_eur_per_mwh=clearing_price,
         )
         for demand, offer, energy in matched_orders
-    )
+    ) # 实际成交记录的集合，一笔买单与一笔卖单之间，实际成交了多少电、按什么价格结算。
 
     return MarketClearingResult(
         delivery_start=delivery_start,

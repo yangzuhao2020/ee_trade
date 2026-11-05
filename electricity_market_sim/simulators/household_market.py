@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from ..bidding import available_power_mw, naive_offer
-from ..clearing_algorithm import clear_pay_as_bid, validate_demand_prices, validate_offer_prices
+from ..clearing_algorithm import clear_pay_as_bid, validate_order_prices
 from ..errors import InputValidationError
 from ..household import dispatch_household, plan_household_opening
 from ..inputs import (
@@ -168,8 +168,7 @@ def simulate_household_market(
                             available_power,
                             marginal_cost,))
 
-                validate_demand_prices(demand_bids, settings)
-                validate_offer_prices(offers, settings)
+                validate_order_prices(demand_bids, offers, settings)
                 result = clear_pay_as_bid(demand_bids, offers)
                 opening_results.append(replace(result, opening_time=opening.opening_time))
 

@@ -11,25 +11,15 @@ from ..config import load_market_settings
 from ..errors import InputValidationError
 from .learning_metrics import (
     _EpisodeMetrics,
-    _comparison_phases,
     _metrics,
     _write_metrics,
     _write_run_summary,
 )
-from ..models import LearningConfig, SimulationResult
+from ..models import SimulationResult
 from ..reporting import write_results
 from ..simulation import simulate_learning_episode
 
 _EVALUATION_PERIODS = ("train", "validation")
-
-
-def _default_evaluation_checkpoint(config: LearningConfig, output_path: Path) -> Path:
-    if config.trained_policies_load_path is not None:
-        configured = Path(config.trained_policies_load_path)
-        return configured if configured.suffix == ".pt" else configured / "best.pt"
-    if config.trained_policies_save_path is not None:
-        return Path(config.trained_policies_save_path) / "best.pt"
-    return output_path / "checkpoints" / "best.pt"
 
 
 def _marginal_cost_action(state: tuple[float, ...]) -> tuple[float, float]:
@@ -63,11 +53,10 @@ def _evaluate_actor_and_baseline(
 
     write_results(output_path, actor_result)
     write_results(output_path / "baseline", baseline_result)
-    actor_phase, baseline_phase = _comparison_phases(period)
     comparison = [
-        _metrics(actor_result, run=run, phase=actor_phase, episode=episode, gamma=gamma),
+        _metrics(actor_result, run=run, phase=f"{period}_actor", episode=episode, gamma=gamma),
         _metrics(
-            baseline_result, run=run, phase=baseline_phase, episode=episode, gamma=gamma
+            baseline_result, run=run, phase=f"{period}_baseline", episode=episode, gamma=gamma
         ),
     ]
     return actor_result, comparison
@@ -90,13 +79,15 @@ def evaluate_learning_scenario(
         )
     input_path = Path(input_dir)
     output_path = Path(output_dir)
-    settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
-    config = settings.learning_config
-    checkpoint = (
-        Path(checkpoint_path)
-        if checkpoint_path is not None
-        else _default_evaluation_checkpoint(config, output_path)
-    )
+    config = load_market_settings(input_path / "config.yaml", scenario=scenario).learning_config
+    if checkpoint_path is not None:
+        checkpoint = Path(checkpoint_path)
+    elif config.trained_policies_load_path is not None:
+        checkpoint = Path(config.trained_policies_load_path)
+        if checkpoint.suffix != ".pt":
+            checkpoint = checkpoint / "best.pt"
+    else:
+        checkpoint = _default_checkpoint_root(config, output_path) / "best.pt"
     action_provider, payload = load_policy(config, checkpoint)
     result, comparison = _evaluate_actor_and_baseline(
         action_provider=action_provider,
@@ -104,7 +95,7 @@ def evaluate_learning_scenario(
         output_path=output_path / period,
         scenario=scenario,
         period=period,
-        episode=int(payload["episode"]),
+        episode=payload["episode"],
         gamma=config.gamma,
         run=payload["run"],
     )
@@ -127,8 +118,7 @@ def run_learning_test(
 
     input_path = Path(input_dir)
     output_path = Path(output_dir)
-    settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
-    config = settings.learning_config
+    config = load_market_settings(input_path / "config.yaml", scenario=scenario).learning_config
     if manifest_path is None:
         manifest_file = _default_checkpoint_root(config, output_path) / _RUN_MANIFEST
     else:
@@ -155,7 +145,7 @@ def run_learning_test(
             output_path=run_output,
             scenario=scenario,
             period="test",
-            episode=int(payload["episode"]),
+            episode=payload["episode"],
             gamma=config.gamma,
             run=run,
         )

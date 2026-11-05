@@ -2,34 +2,27 @@
 
 from collections import defaultdict
 import numpy as np
-from scipy.optimize import Bounds, LinearConstraint, OptimizeResult, linprog, milp
+from scipy.optimize import Bounds, LinearConstraint, linprog, milp
 from ..models import (
     ClearedDemandBid,
     ClearedSupplyOffer,
-    DemandBid,
     MarketClearingResult,
-    StorageUnit,
-    SupplyOffer,
 )
 from .common import _EPSILON
 
 
-def clear_complex_opening(
-    demand_bids: list[DemandBid],
-    supply_offers: list[SupplyOffer],
-    storages: tuple[tuple[StorageUnit, float], ...] = (),
-) -> tuple[MarketClearingResult, ...]:
-    """对一次复杂 EOM 开市中的所有产品进行联合出清。
-
-    求解流程与 V2 兼容 ASSUME 的做法一致：先求解订单簿 MILP，固定块报价的接受/拒绝决策，
-    再从所得 LP 的供需平衡约束对偶值中恢复各交付时段的价格；必要时每轮只移除一个
-    剩余（surplus）最低的已接受块报价（BB）或关联报价族，然后重新出清。
+def clear_complex_opening(demand_bids, supply_offers, storages=()):
+    """联合出清本次开市的所有产品，考虑块报价、关联报价和储能电量约束。
+    先求解混合整数规划确定成交方案，再固定块报价的接受决策，
+    通过线性规划的供需平衡约束对偶值计算各时段出清价。
+    若已接受块报价及其关联报价的合计价差收益为负，
+    每轮剔除收益最低的一组并重新出清，直到不存在负收益组。
     """
 
     products = tuple(
         sorted({(bid.delivery_start, bid.delivery_end) for bid in demand_bids}|{(offer.delivery_start, offer.delivery_end) for offer in supply_offers}))
     if not products:
-        raise ValueError("Cannot clear an empty complex market opening.")
+        raise ValueError("本次开市没有买卖订单，无法进行复杂出清。")
     product_rows = {product: index for index, product in enumerate(products)}
     _validate_complex_offers(supply_offers)
     storage_order_names = {
@@ -41,7 +34,7 @@ def clear_complex_opening(
         for offer in supply_offers
         if offer.offer_type == "storage_discharge"
     }
-    context_names: set[str] = set()
+    context_names = set()
     for storage, initial_energy in storages:
         if storage.name in context_names:
             raise ValueError(
@@ -59,12 +52,12 @@ def clear_complex_opening(
     missing_contexts = sorted(storage_order_names - context_names)
     if missing_contexts:
         raise ValueError(
-            "Storage orders require physical clearing contexts for: "
+            "以下储能订单缺少物理出清参数："
             + ", ".join(missing_contexts)
-            + "."
+            + "。"
         )
 
-    disabled_parent_bids: set[str] = set()
+    disabled_parent_bids = set()
     while True:
         active_offers = [
             offer
@@ -101,10 +94,9 @@ def clear_complex_opening(
         disabled_parent_bids.add(negative_parent)
 
 
-def _validate_complex_offers(supply_offers: list[SupplyOffer]) -> None:
-    """校验只在复杂开市中才存在的报价关系。"""
-
-    offer_ids_by_product: dict[tuple, set[str]] = defaultdict(set)
+def _validate_complex_offers(supply_offers):
+    """检查同一交付产品内的卖单标识是否唯一，以及关联报价（LB）引用的父块报价（BB）是否存在。"""
+    offer_ids_by_product = defaultdict(set)
     parent_ids = {
         offer.complex_identifier
         for offer in supply_offers
@@ -123,14 +115,9 @@ def _validate_complex_offers(supply_offers: list[SupplyOffer]) -> None:
 
 
 def _solve_complex_order_book(
-    demand_bids: list[DemandBid],
-    supply_offers: list[SupplyOffer],
-    products: tuple[tuple, ...],
-    product_rows: dict[tuple, int],
-    storages: tuple[tuple[StorageUnit, float], ...] = (),
-) -> tuple[dict[str, float], list[float], dict[tuple, float]]:
+    demand_bids, supply_offers, products, product_rows, storages=()
+):
     """先求解 MILP，固定 BB 决策后求解 LP，返回成交电量和对偶价格。"""
-
     variables, objective, bounds, constraints, integrality = _build_complex_matrices(
         demand_bids, supply_offers, products, product_rows, storages
     )
@@ -140,15 +127,16 @@ def _solve_complex_order_book(
         bounds=bounds,
         constraints=constraints,
         options={"disp": False},
-    )
+    )  # TODO: 调用求解器，求解。
     if not mip_result.success:
-        raise ValueError(f"Complex MILP clearing failed: {mip_result.message}")
+        raise ValueError(f"复杂出清的混合整数线性规划求解失败：{mip_result.message}")
 
     lp_bounds = list(zip(bounds.lb, bounds.ub))
     for variable_index, variable in enumerate(variables):
         if variable["bid_type"] == "BB":
             fixed = float(round(float(mip_result.x[variable_index])))
             lp_bounds[variable_index] = (fixed, fixed)
+
     equality, *inequalities = constraints
     lp_result = linprog(
         c=objective,
@@ -160,22 +148,16 @@ def _solve_complex_order_book(
         method="highs",
     )
     if not lp_result.success:
-        raise ValueError(f"Complex LP price recovery failed: {lp_result.message}")
+        raise ValueError(f"复杂出清的线性规划定价失败：{lp_result.message}")
 
     return _decode_complex_solution(
         demand_bids, supply_offers, products, product_rows, variables, lp_result
     )
 
 
-def _build_complex_variables(
-    demand_bids: list[DemandBid],
-    supply_offers: list[SupplyOffer],
-    products: tuple[tuple, ...],
-    storages: tuple[tuple[StorageUnit, float], ...],
-) -> tuple[list[dict], dict[tuple[str, tuple], int]]:
-    """按需求、BB、SB/LB、储能状态的顺序建立优化变量及储能状态索引。"""
-
-    variables: list[dict] = []
+def _build_complex_variables(demand_bids, supply_offers, products, storages):
+    """列出订单接受比例和储能期末电量变量，记录对应订单及储能变量索引。"""
+    variables = []
     for demand_index, bid in enumerate(demand_bids):
         variables.append(
             {
@@ -187,8 +169,8 @@ def _build_complex_variables(
             }
         )
 
-    block_legs: dict[str, list[int]] = defaultdict(list)
-    simple_legs: list[int] = []
+    block_legs = defaultdict(list)
+    simple_legs = []
     for offer_index, offer in enumerate(supply_offers):
         if offer.bid_type == "BB":
             block_legs[offer.complex_identifier].append(offer_index)
@@ -216,7 +198,7 @@ def _build_complex_variables(
             }
         )
 
-    storage_state_variables: dict[tuple[str, tuple], int] = {}
+    storage_state_variables = {}
     for storage, _ in storages:
         for product in products:
             storage_state_variables[(storage.name, product)] = len(variables)
@@ -234,43 +216,42 @@ def _build_complex_variables(
 
 
 def _build_complex_matrices(
-    demand_bids: list[DemandBid],
-    supply_offers: list[SupplyOffer],
-    products: tuple[tuple, ...],
-    product_rows: dict[tuple, int],
-    storages: tuple[tuple[StorageUnit, float], ...],
+    demand_bids, supply_offers, products, product_rows, storages
 ):
-    """构建目标函数、变量边界、供需平衡、储能 SOC 和父子报价约束。
-    储能状态表示每个产品结束时的电量，平衡方程只计入实际成交的充放电量。
+    """构建目标函数、变量边界、供需平衡、储能电量和父子报价约束。
+    储能变量表示各产品结束时的电量，按成交充放电量及效率更新。
     """
-
     variables, storage_state_variables = _build_complex_variables(
-        demand_bids, supply_offers, products, storages
-    )
+        demand_bids, supply_offers, products, storages)
     storages_by_name = {storage.name: storage for storage, _ in storages}
     number_variables = len(variables)
     objective = np.zeros(number_variables)
     balance = np.zeros((len(products), number_variables))
     lower_bounds = np.zeros(number_variables)
     upper_bounds = np.ones(number_variables)
-    parent_variable: dict[str, int] = {}
-    demand_variable: dict[int, int] = {}
-    supply_variable: dict[int, int] = {}
+    parent_variable = {}
+    demand_variable = {}
+    supply_variable = {}
+    
     for variable_index, variable in enumerate(variables):
         if variable["kind"] == "demand":
             demand_index = variable["indices"][0]
             demand_variable[demand_index] = variable_index
             bid = demand_bids[demand_index]
+            # 买方申报价值取负，平衡式中的需求取正。
             objective[variable_index] = -bid.price_eur_per_mwh * bid.volume_mwh
             balance[
                 product_rows[(bid.delivery_start, bid.delivery_end)], variable_index
             ] = bid.volume_mwh
+
         elif variable["kind"] == "supply":
             offers = [supply_offers[index] for index in variable["indices"]]
+            # 合计卖单各段的报价金额，作为目标系数。
             objective[variable_index] = sum(
                 offer.bid_price_eur_per_mwh * offer.offered_energy_mwh
                 for offer in offers
             )
+            # 平衡式中的供给取负。
             for offer_index, offer in zip(variable["indices"], offers):
                 supply_variable[offer_index] = variable_index
                 balance[
@@ -278,26 +259,33 @@ def _build_complex_matrices(
                     variable_index,
                 ] -= offer.offered_energy_mwh
             if variable["bid_type"] == "BB":
+                # 保存父块变量索引，供关联报价约束使用。
                 parent_variable[variable["bid_id"]] = variable_index
+
         else:
+            # 储能变量表示电量，设置其上下限。
             storage = storages_by_name[variable["storage_name"]]
             lower_bounds[variable_index] = storage.min_energy_mwh
             upper_bounds[variable_index] = storage.max_energy_mwh
 
-    storage_balance_rows: list[np.ndarray] = []
-    storage_balance_rhs: list[float] = []
+    storage_balance_rows = []
+    storage_balance_rhs = []
+    
+    # 电量平衡：期末 = 期初 + 充电量×效率 - 放电量/效率。
     for storage, initial_energy in storages:
-        previous_state_index: int | None = None
+        previous_state_index = None
         for product in products:
             row = np.zeros(number_variables)
             state_index = storage_state_variables[(storage.name, product)]
             row[state_index] = 1.0
+            # 首时段使用初始电量，后续衔接上一时段。
             if previous_state_index is None:
                 right_hand_side = initial_energy
             else:
                 row[previous_state_index] = -1.0
                 right_hand_side = 0.0
 
+            # 成交充电量乘以效率，得到入库电量。
             for demand_index, bid in enumerate(demand_bids):
                 if (
                     bid.unit_name == storage.name
@@ -307,6 +295,7 @@ def _build_complex_matrices(
                     row[demand_variable[demand_index]] -= (
                         bid.volume_mwh * storage.efficiency_charge
                     )
+            # 成交放电量除以效率，得到出库电量。
             for offer_index, offer in enumerate(supply_offers):
                 if (
                     offer.unit_name == storage.name
@@ -320,7 +309,7 @@ def _build_complex_matrices(
             storage_balance_rhs.append(right_hand_side)
             previous_state_index = state_index
 
-    child_constraints: list[np.ndarray] = []
+    child_constraints = []
     for variable_index, variable in enumerate(variables):
         if variable["bid_type"] != "LB":
             continue
@@ -335,8 +324,7 @@ def _build_complex_matrices(
     if storage_balance_rows:
         equality = np.vstack([balance, *storage_balance_rows])
         equality_rhs = np.concatenate(
-            [np.zeros(len(products)), np.asarray(storage_balance_rhs)]
-        )
+            [np.zeros(len(products)), np.asarray(storage_balance_rhs)])
 
     constraints = [LinearConstraint(equality, equality_rhs, equality_rhs)]
     if child_constraints:
@@ -351,16 +339,12 @@ def _build_complex_matrices(
 
 
 def _decode_complex_solution(
-    demand_bids: list[DemandBid],
-    supply_offers: list[SupplyOffer],
-    products: tuple[tuple, ...],
-    product_rows: dict[tuple, int],
-    variables: list[dict],
-    lp_result: OptimizeResult,
+    demand_bids, supply_offers, 
+    products, product_rows, 
+    variables, lp_result
 ):
     """将 LP 接受比例和供需平衡对偶值还原为成交电量及各产品出清价。"""
-
-    accepted_supply: dict[str, float] = {}
+    accepted_supply = {}
     accepted_demand = [0.0] * len(demand_bids)
     for variable_index, variable in enumerate(variables):
         acceptance = max(0.0, min(1.0, float(lp_result.x[variable_index])))
@@ -378,22 +362,17 @@ def _decode_complex_solution(
     return accepted_supply, accepted_demand, prices
 
 
-def _lowest_negative_parent_bid(
-    supply_offers: list[SupplyOffer],
-    accepted_supply: dict[str, float],
-    prices: dict[tuple, float],
-) -> str | None:
-    """返回本轮重新出清需要移除的父块报价或独立块报价（BB）。"""
-
-    blocks: dict[str, list[SupplyOffer]] = defaultdict(list)
-    children: dict[str, list[SupplyOffer]] = defaultdict(list)
+def _lowest_negative_parent_bid(supply_offers, accepted_supply, prices):
+    """返回已接受报价组中合计价差收益最负的 BB 标识；计入关联 LB，无负收益组时返回 None。"""
+    blocks = defaultdict(list)
+    children = defaultdict(list)
     for offer in supply_offers:
         if offer.bid_type == "BB":
             blocks[offer.complex_identifier].append(offer)
         elif offer.bid_type == "LB":
             children[offer.parent_bid_id].append(offer)
 
-    negative: list[tuple[float, str]] = []
+    negative = []
     for parent_id, legs in blocks.items():
         if sum(accepted_supply[leg.identifier] for leg in legs) <= _EPSILON:
             continue
@@ -419,16 +398,10 @@ def _lowest_negative_parent_bid(
 
 
 def _complex_results(
-    demand_bids: list[DemandBid],
-    supply_offers: list[SupplyOffer],
-    accepted_supply: dict[str, float],
-    accepted_demand: list[float],
-    prices: dict[tuple, float],
-    products: tuple[tuple, ...],
-) -> tuple[MarketClearingResult, ...]:
+    demand_bids, supply_offers, accepted_supply, accepted_demand, prices, products
+):
     """将联合求解的开市结果拆分回每个产品各自的出清结果。"""
-
-    results: list[MarketClearingResult] = []
+    results = []
     for delivery_start, delivery_end in products:
         product = (delivery_start, delivery_end)
         offers = [

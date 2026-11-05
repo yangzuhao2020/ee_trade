@@ -1,6 +1,7 @@
 """第五版学习策略的网络、经验池、参数更新，以及检查点和运行清单持久化。"""
 
 import json
+from functools import partial
 from pathlib import Path
 from typing import Any
 import numpy as np
@@ -70,71 +71,36 @@ def _initialize_linear(module: nn.Module) -> None:
         nn.init.zeros_(module.bias)
 
 
-def _read_checkpoint_payload(
-    path: Path, device: torch.device | str, config: LearningConfig, *, algorithm="matd3"
-) -> dict[str, Any]:
-    payload = torch.load(path, map_location=device, weights_only=True)
-    if (
-        payload.get("checkpoint_version") != (3 if algorithm == "grpo" else _CHECKPOINT_VERSION)
-        or payload.get("algorithm") != algorithm
-        or payload.get("state_version") != _STATE_VERSION
-        or payload.get("observation_size") != OBSERVATION_SIZE
-        or payload.get("action_size") != ACTION_SIZE
-    ):
-        raise InputValidationError(
-            f"Learning checkpoint {path} is incompatible with Version 5."
-        )
-    if algorithm == "grpo" and payload.get("distribution") != "softsign-normal-v1":
-        raise InputValidationError(f"Incompatible GRPO checkpoint: {path}")
-    if payload.get("max_bid_price") != config.max_bid_price:
-        raise InputValidationError(
-            f"Learning checkpoint {path} was trained with max_bid_price="
-            f"{payload.get('max_bid_price')!r}, but learning_config.max_bid_price="
-            f"{config.max_bid_price!r}."
-        )
-    if payload.get("periods") != _periods_payload(config):
-        raise InputValidationError(
-            f"Learning checkpoint {path} 的训练、验证、测试时段与当前 "
-            "learning_config.periods 不一致。"
-        )
-    if type(payload.get("run")) is not int:
-        raise InputValidationError(f"Learning checkpoint {path} must include an integer run.")
-    return payload
+@torch.no_grad()
+def _deterministic_action(
+    actor: nn.Module, device: torch.device, state: tuple[float, ...]
+) -> tuple[float, float]:
+    observation = torch.as_tensor(state, dtype=torch.float32, device=device)
+    return tuple(actor(observation).cpu().tolist())
 
 
 class _ReplayBuffer:
     def __init__(self, capacity: int, rng: np.random.Generator) -> None:
         self.capacity = capacity
         self.rng = rng
-        self.states = np.empty((capacity, OBSERVATION_SIZE), dtype=np.float32)
-        self.actions = np.empty((capacity, ACTION_SIZE), dtype=np.float32)
-        self.rewards = np.empty((capacity, 1), dtype=np.float32)
-        self.next_states = np.empty((capacity, OBSERVATION_SIZE), dtype=np.float32)
-        self.dones = np.empty((capacity, 1), dtype=np.float32)
+        self.values = np.empty(
+            (capacity, 2 * OBSERVATION_SIZE + ACTION_SIZE + 2), dtype=np.float32
+        )
         self.position = 0
         self.size = 0
 
     def append(self, transition: LearningTransition) -> None:
-        index = self.position
-        self.states[index] = transition.state
-        self.actions[index] = transition.action
-        self.rewards[index, 0] = transition.reward
-        self.next_states[index] = transition.next_state
-        self.dones[index, 0] = float(transition.done)
-        self.position = (index + 1) % self.capacity
+        self.values[self.position] = (
+            *transition.state, *transition.action, transition.reward,
+            *transition.next_state, transition.done,
+        )
+        self.position = (self.position + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
     def sample(self, batch_size: int, device: torch.device) -> tuple[Tensor, ...]:
         indices = self.rng.integers(0, self.size, size=batch_size)
-        return tuple(
-            torch.as_tensor(values[indices], device=device)
-            for values in (
-                self.states,
-                self.actions,
-                self.rewards,
-                self.next_states,
-                self.dones,
-            )
+        return torch.as_tensor(self.values[indices], device=device).split(
+            (OBSERVATION_SIZE, ACTION_SIZE, 1, OBSERVATION_SIZE, 1), dim=1
         )
 
 
@@ -145,8 +111,8 @@ class MATD3Agent:
         config: LearningConfig,
         *,
         total_regular_steps: int,
-        seed: int | None = None,
-        run: int = 0,
+        seed: int,
+        run: int,
     ) -> None:
         self.device = torch.device(config.device)
         self.config = config
@@ -154,10 +120,10 @@ class MATD3Agent:
         self.run = run
         self.total_regular_steps = total_regular_steps
         self.rng = np.random.default_rng(seed)
-        if seed is not None:
-            torch.manual_seed(seed)
+        torch.manual_seed(seed)
 
         self.actor = _Actor().to(self.device)
+        self.deterministic_action = partial(_deterministic_action, self.actor, self.device)
         self.actor_target = _Actor().to(self.device)
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.actor_target.eval()
@@ -176,29 +142,18 @@ class MATD3Agent:
         self.gradient_updates = 0
         self.noise_factor = config.noise_dt
 
-    def deterministic_action(self, state: tuple[float, ...]) -> tuple[float, float]:
-        state_tensor = torch.as_tensor(
-            state, dtype=torch.float32, device=self.device
-        ).unsqueeze(0)
-        self.actor.eval()
-        with torch.no_grad():
-            action = self.actor(state_tensor).squeeze(0).cpu().numpy()
-        return float(action[0]), float(action[1])
-
     def exploration_action(
         self, state: tuple[float, ...], *, initial_experience: bool
     ) -> tuple[float, float]:
         if initial_experience:
             action = np.full(ACTION_SIZE, state[-1], dtype=np.float64)
-            action += self.rng.normal(
-                0.0, self.config.exploration_noise_std, size=ACTION_SIZE
-            )
+            standard_deviation = self.config.exploration_noise_std
         else:
             action = np.asarray(self.deterministic_action(state), dtype=np.float64)
             standard_deviation = (
                 self.config.noise_sigma * self.config.noise_scale * self.noise_factor
             )
-            action += self.rng.normal(0.0, standard_deviation, size=ACTION_SIZE)
+        action += self.rng.normal(0.0, standard_deviation, size=ACTION_SIZE)
         return float(action[0]), float(action[1])
 
     def observe(self, transition: LearningTransition, *, train: bool) -> None:
@@ -258,36 +213,39 @@ class MATD3Agent:
                 target_parameter.mul_(1.0 - self.config.tau)
                 target_parameter.add_(source_parameter, alpha=self.config.tau)
 
-    def save_checkpoint(
-        self,
-        path: Path,
-        *,
-        episode: int,
-        validation_total_reward: float | None,
-    ) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "checkpoint_version": _CHECKPOINT_VERSION,
-            "algorithm": "matd3",
-            "state_version": _STATE_VERSION,
-            "observation_size": OBSERVATION_SIZE,
-            "action_size": ACTION_SIZE,
-            "episode": episode,
-            "validation_total_reward": validation_total_reward,
-            "periods": _periods_payload(self.config),
-            "max_bid_price": self.config.max_bid_price,
-            "seed": self.seed,
-            "run": self.run,
-            "actor": self.actor.state_dict(),
-        }
-        temporary_path = path.with_suffix(path.suffix + ".tmp")
-        torch.save(payload, temporary_path)
-        temporary_path.replace(path)
 
-    def load_checkpoint(self, path: Path) -> dict[str, Any]:
-        payload = _read_checkpoint_payload(path, self.device, self.config)
-        self.actor.load_state_dict(payload["actor"])
-        return payload
+def save_checkpoint(
+    agent,
+    path: Path,
+    *,
+    episode: int,
+    validation_total_reward: float | None,
+) -> None:
+    config = agent.config
+    grpo = config.algorithm == "grpo"
+    payload = {
+        "checkpoint_version": 3 if grpo else _CHECKPOINT_VERSION,
+        "algorithm": config.algorithm,
+        "state_version": _STATE_VERSION,
+        "observation_size": OBSERVATION_SIZE,
+        "action_size": ACTION_SIZE,
+        "episode": episode,
+        "validation_total_reward": validation_total_reward,
+        "periods": _periods_payload(config),
+        "max_bid_price": config.max_bid_price,
+        "seed": agent.seed,
+        "run": agent.run,
+        "actor": agent.actor.state_dict(),
+    }
+    if grpo:
+        payload.update(
+            distribution="softsign-normal-v1",
+            advantage_version="group-time-return-v1",
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, temporary_path)
+    temporary_path.replace(path)
 
 
 def _write_run_manifest(
@@ -333,10 +291,37 @@ def _default_checkpoint_root(config: LearningConfig, output_path: Path) -> Path:
 
 
 def load_policy(config: LearningConfig, path: Path):
-    """只加载评估所需的 Actor，返回确定性策略和检查点元数据。"""
+    """读取并校验检查点，返回确定性 Actor 策略和元数据。"""
     device = torch.device(config.device)
-    payload = _read_checkpoint_payload(path, device, config, algorithm=config.algorithm)
-    if config.algorithm == "grpo":
+    algorithm = config.algorithm
+    payload = torch.load(path, map_location=device, weights_only=True)
+    if (
+        payload.get("checkpoint_version") != (3 if algorithm == "grpo" else _CHECKPOINT_VERSION)
+        or payload.get("algorithm") != algorithm
+        or payload.get("state_version") != _STATE_VERSION
+        or payload.get("observation_size") != OBSERVATION_SIZE
+        or payload.get("action_size") != ACTION_SIZE
+    ):
+        raise InputValidationError(
+            f"Learning checkpoint {path} is incompatible with Version 5."
+        )
+    if algorithm == "grpo" and payload.get("distribution") != "softsign-normal-v1":
+        raise InputValidationError(f"Incompatible GRPO checkpoint: {path}")
+    if payload.get("max_bid_price") != config.max_bid_price:
+        raise InputValidationError(
+            f"Learning checkpoint {path} was trained with max_bid_price="
+            f"{payload.get('max_bid_price')!r}, but learning_config.max_bid_price="
+            f"{config.max_bid_price!r}."
+        )
+    if payload.get("periods") != _periods_payload(config):
+        raise InputValidationError(
+            f"Learning checkpoint {path} 的训练、验证、测试时段与当前 "
+            "learning_config.periods 不一致。"
+        )
+    for field in ("run", "episode"):
+        if type(payload.get(field)) is not int:
+            raise InputValidationError(f"Learning checkpoint {path} must include an integer {field}.")
+    if algorithm == "grpo":
         from .grpo_agent import GaussianActor
         actor = GaussianActor(config.initial_std)
     else:
@@ -344,11 +329,4 @@ def load_policy(config: LearningConfig, path: Path):
     actor.to(device).eval()
     actor.load_state_dict(payload["actor"])
 
-    def action(state):
-        observation = torch.as_tensor(state, dtype=torch.float32, device=device)
-        if config.algorithm == "matd3":
-            observation = observation.unsqueeze(0)
-        with torch.no_grad():
-            return tuple(actor(observation).reshape(-1).cpu().tolist())
-
-    return action, payload
+    return partial(_deterministic_action, actor, device), payload

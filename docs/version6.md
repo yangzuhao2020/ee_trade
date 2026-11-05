@@ -235,14 +235,11 @@ python -m electricity_market_sim.main --input-dir examples/input/example_02a --s
 
 `electricity_market_sim/config/grpo.yaml` 中的 `validation_groups_interval` 控制每隔多少个 GRPO 组（训练轮次）验证一次，必须为正整数，默认值为 5；场景的 `learning_config` 可覆盖。最后一组始终验证，设为 1 即每组验证。训练结束后仍使用最佳模型进行验证期策略与基线对比。
 
-GRPO 输出学习指标、`best.pt` 和 `runs.json`，以及：
+GRPO 输出学习指标、`best.pt` 和 `runs.json`。
 
-- `learning_progress.csv`：验证点的累计交互数、耗时和验证奖励；两种算法都有。
-- `grpo_diagnostics.csv`：组编号、累计优化器更新数 `gradient_updates`、本组更新数 `updates_this_group`、有效样本数 `eligible_samples`、样本覆盖率 `sample_coverage`、停止原因 `stop_reason`、实际学习率、末遍损失和裁剪前梯度范数，以及整组 KL、裁剪比例、策略标准差和低方差时点比例。
+一次优化器更新对应一遍完整有效数据；达到遍数上限或整组 KL 超限时停止更新，无有效样本时跳过更新。奖励、回报和优势定义保持不变。
 
-`sample_coverage` 指至少参与一次已执行优化器更新的不同有效样本占比；整组梯度更新时为 1，无有效样本时为 0。停止原因取 `update_epochs`（达到遍数上限）、`target_kl`（KL 超限）或 `no_valid_samples`。一次优化器更新现在对应一遍完整有效数据，更新次数不能与旧版每个 minibatch 更新一次的计数直接比较。奖励、回报和优势定义保持不变。
-
-多次运行时这些明细保存在各自的 `runs/run_XX/` 下。每次训练重新写出记录；耗时曲线记录训练与选模验证，最终基线对照及文件写出不计入该曲线。GRPO 模型文件版本为 3，MATD3 为版本 2，两种算法均只保存最佳策略模型。
+多次运行时各次学习指标保存在各自的 `runs/run_XX/` 下，每次训练重新写出记录。GRPO 模型文件版本为 3，MATD3 为版本 2，两种算法均只保存最佳策略模型。
 
 ## 参考
 

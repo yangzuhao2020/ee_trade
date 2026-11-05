@@ -1,7 +1,7 @@
 """第五版训练、评估、测试和绘图共享的回合指标、CSV 写出及跨运行统计。"""
 
 import csv
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import fmean, pstdev
 from ..models import SimulationResult
@@ -39,24 +39,20 @@ class _EpisodeMetrics:
 def _metrics(
     result: SimulationResult, *, run: int, phase: str, episode: int, gamma: float
 ) -> _EpisodeMetrics:
+    """统计学习入口已限定为每个产品 1 小时的回合指标。"""
     total_reward = 0.0
     discounted_reward = 0.0
     total_profit = 0.0
     accepted_energy = 0.0
-    total_hours = 0.0
     segment_totals = {
         "learning_minimum": {"offered": 0.0, "accepted": 0.0, "price": 0.0},
         "learning_flexible": {"offered": 0.0, "accepted": 0.0, "price": 0.0},
-    }
-    durations = {
-        market.delivery_start: market.duration_hours for market in result.market_results
     }
     for index, step in enumerate(result.learning_steps):
         total_reward += step.reward
         discounted_reward += gamma**index * step.reward
         total_profit += step.profit_eur
-        accepted_energy += step.accepted_power_mw * durations[step.delivery_start]
-        total_hours += durations[step.delivery_start]
+        accepted_energy += step.accepted_power_mw
     for market in result.market_results:
         for cleared in market.offers:
             segment = cleared.offer.offer_segment
@@ -68,27 +64,25 @@ def _metrics(
             totals["accepted"] += cleared.accepted_energy_mwh
             totals["price"] += cleared.offer.bid_price_eur_per_mwh * offered
 
-    def average_price(segment: str) -> float:
+    def segment_ratio(segment: str, field: str) -> float:
         totals = segment_totals[segment]
-        return totals["price"] / totals["offered"] if totals["offered"] else 0.0
-
-    def acceptance_ratio(segment: str) -> float:
-        totals = segment_totals[segment]
-        return totals["accepted"] / totals["offered"] if totals["offered"] else 0.0
+        return totals[field] / totals["offered"] if totals["offered"] else 0.0
 
     return _EpisodeMetrics(
         run=run,
         phase=phase,
         episode=episode,
         total_reward=total_reward,
-        mean_reward_per_hour=total_reward / total_hours if total_hours else 0.0,
+        mean_reward_per_hour=(
+            total_reward / len(result.learning_steps) if result.learning_steps else 0.0
+        ),
         discounted_reward=discounted_reward,
         total_profit_eur=total_profit,
         accepted_energy_mwh=accepted_energy,
-        minimum_segment_average_bid_eur_per_mwh=average_price("learning_minimum"),
-        flexible_segment_average_bid_eur_per_mwh=average_price("learning_flexible"),
-        minimum_segment_acceptance_ratio=acceptance_ratio("learning_minimum"),
-        flexible_segment_acceptance_ratio=acceptance_ratio("learning_flexible"),
+        minimum_segment_average_bid_eur_per_mwh=segment_ratio("learning_minimum", "price"),
+        flexible_segment_average_bid_eur_per_mwh=segment_ratio("learning_flexible", "price"),
+        minimum_segment_acceptance_ratio=segment_ratio("learning_minimum", "accepted"),
+        flexible_segment_acceptance_ratio=segment_ratio("learning_flexible", "accepted"),
     )
 
 
@@ -100,41 +94,20 @@ def _write_metrics(path: Path, metrics: list[_EpisodeMetrics]) -> None:
         )
         writer.writeheader()
         for item in metrics:
-            writer.writerow(
-                {
-                    "run": item.run,
-                    "phase": item.phase,
-                    "episode": item.episode,
-                    **{
-                        name: f"{getattr(item, name):.{decimals}f}"
-                        for name, decimals in LEARNING_METRIC_DECIMALS.items()
-                    },
-                }
-            )
-
-
-def _write_records(path: Path, rows: list[dict]) -> None:
-    if not rows:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def _comparison_phases(period: str) -> tuple[str, str]:
-    """返回某个数据时段上 Actor 与边际成本基线对比的阶段名。"""
-
-    return f"{period}_actor", f"{period}_baseline"
+            row = asdict(item)
+            row.update({
+                name: f"{row[name]:.{decimals}f}"
+                for name, decimals in LEARNING_METRIC_DECIMALS.items()
+            })
+            writer.writerow(row)
 
 
 def _write_run_summary(path: Path, metrics: list[_EpisodeMetrics]) -> None:
     """写出 Actor 与基线对比指标在各独立运行间的均值和总体标准差。"""
-    phases = list(dict.fromkeys(
-        item.phase for item in metrics
-        if item.phase.endswith(("_actor", "_baseline"))
-    ))
+    phase_groups: dict[str, list[_EpisodeMetrics]] = {}
+    for item in metrics:
+        if item.phase.endswith(("_actor", "_baseline")):
+            phase_groups.setdefault(item.phase, []).append(item)
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = ["phase", "run_count"]
     for name in LEARNING_METRIC_FIELDS:
@@ -142,14 +115,13 @@ def _write_run_summary(path: Path, metrics: list[_EpisodeMetrics]) -> None:
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
-        for phase in phases:
-            phase_metrics = [item for item in metrics if item.phase == phase]
+        for phase, phase_metrics in phase_groups.items():
             row: dict[str, str | int] = {
                 "phase": phase,
                 "run_count": len(phase_metrics),
             }
             for name in LEARNING_METRIC_FIELDS:
-                values = [float(getattr(item, name)) for item in phase_metrics]
+                values = [getattr(item, name) for item in phase_metrics]
                 row[f"{name}_mean"] = f"{fmean(values):.12f}"
                 row[f"{name}_std"] = f"{pstdev(values):.12f}"
             writer.writerow(row)

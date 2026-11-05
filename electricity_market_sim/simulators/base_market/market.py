@@ -7,8 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from ...bidding import storage_heuristic_orders
 from ...clearing_algorithm import (
-    clear_complex_opening, clear_pay_as_clear,
-    validate_demand_prices, validate_offer_prices,
+    clear_complex_opening, clear_pay_as_clear, validate_order_prices,
 )
 from ...errors import InputValidationError
 from ...inputs import (
@@ -325,8 +324,7 @@ class BaseMarket:
             all_demand_bids.extend(storage_bids)
             offers.extend(storage_offers)
 
-        validate_demand_prices(all_demand_bids, settings) # 验证买单报价
-        validate_offer_prices(offers, settings) # 验证卖单报价
+        validate_order_prices(all_demand_bids, offers, settings)
         # 按配置的市场机制执行出清。返回的是市场出清结果；
         # 交付开始时需要计入的机组启动成本由 start_delivery 后续补计。
         if settings.market_mechanism == "complex_clearing":
