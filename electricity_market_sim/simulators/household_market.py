@@ -1,6 +1,6 @@
 """第三版居民购电计划优化、灵活性评估及采用按报价结算的市场仿真。"""
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from ..bidding import available_power_mw, naive_offer
@@ -17,30 +17,36 @@ from ..inputs import (
 )
 from ..models import (
     DemandBid,
+    DemandUnit,
     HouseholdResult,
     HouseholdDispatchResult,
     HouseholdUnit,
     MarketClearingResult,
-    MarketOpening,
-    MarketSettings,
+    PowerPlant,
     SimulationResult,
     SupplyOffer,
 )
-from ..utils import (
-    format_timestamp, hours_between, validate_fuel_coverage, validate_unique_names,)
+from ..utils import (format_timestamp, hours_between,
+                     validate_fuel_coverage, validate_unique_names,)
 
 
 _POWER_TOLERANCE_MW = 1e-9
 
 
-def simulate_household_market(
-    input_path: Path,
-    settings: MarketSettings,
-    openings: tuple[MarketOpening, ...],
-) -> SimulationResult:
-    """运行 V3 的 15 分钟家庭用户及按报价结算（pay-as-bid）交易流程。
-    随后以相同输入再完整仿真一次不使用电池的基准方案，只用于计算居民的实际节省。
-    """
+@dataclass
+class HouseholdMarketInputs:
+    """家庭市场已加载并完成场景校验的输入数据。"""
+    plants: tuple[PowerPlant, ...]
+    demand_units: tuple[DemandUnit, ...]
+    households: tuple[HouseholdUnit, ...]
+    demand_profiles: dict[str, dict[datetime, float]]
+    forecasts: dict[str, dict[datetime, float]]
+    fuel_prices: dict[datetime, dict[str, float]]
+    availability: dict[str, dict[datetime, float]]
+
+
+def load_household_market_inputs(input_path: Path, openings) -> HouseholdMarketInputs:
+    """读取家庭市场输入，并检查参与者、交付产品及燃料价格。"""
     plants = load_powerplants(input_path / "powerplant_units.csv")
     demand_units = load_demand_units(input_path / "demand_units.csv")
     if any(unit.is_elastic for unit in demand_units):
@@ -77,142 +83,148 @@ def simulate_household_market(
             raise InputValidationError(
                 f"fuel_prices_df.csv 中缺少 {format_timestamp(delivery_start)} 时刻的燃料价格。")
 
-    def run_openings(
-        households: tuple[HouseholdUnit, ...],
-        evaluate_flexibility: bool,
-    ) -> tuple[
-        list[MarketClearingResult],
-        list[HouseholdDispatchResult],
-    ]:
-        """按开市顺序完成居民优化、报价、出清及设备调度，返回全部结果。"""
-        household_energy = {household.name: household.initial_energy_mwh for household in households}
-        household_heat_pump_power = {household.name: 0.0 for household in households}
-        household_charge_power = {household.name: 0.0 for household in households}
-        household_discharge_power = {household.name: 0.0 for household in households} 
-        # 以上为初始化变量
-        
-        market_results: list[MarketClearingResult] = []
-        household_results = []
-        for opening in openings:
-            plans_by_household, bounds_by_household = plan_household_opening(
-                households,
-                opening.products,
-                forecasts["price_EOM"],
-                forecasts,
-                household_energy,
-                household_charge_power,
-                household_discharge_power,
-                evaluate_flexibility=evaluate_flexibility,
-            )
-            # 已经优化完成的购电计划，这几行负责把结果整理成方便查询的字典
-            plan_by_product = {}
-            for household_plans in plans_by_household.values():
-                for plan in household_plans:
-                    plan_key = (plan.unit_name, plan.delivery_start)
-                    plan_by_product[plan_key] = plan
+    return HouseholdMarketInputs(
+        plants=plants,
+        demand_units=demand_units,
+        households=households,
+        demand_profiles=demand_profiles,
+        forecasts=forecasts,
+        fuel_prices=fuel_prices,
+        availability=availability,
+    )
 
-            opening_results: list[MarketClearingResult] = []
-            for delivery_start, delivery_end in opening.products:
-                duration_hours = hours_between(delivery_start, delivery_end)
-                demand_bids: list[DemandBid] = []
-                for unit in demand_units:
-                    power = demand_profiles[unit.profile_column][delivery_start]
-                    demand_bids.append(
-                        DemandBid(
-                            unit_name=unit.name,
-                            operator=unit.operator,
-                            delivery_start=delivery_start,
-                            delivery_end=delivery_end,
-                            volume_mwh=power * duration_hours,
-                            price_eur_per_mwh=(
-                                unit.price_eur_per_mwh
-                                if unit.price_eur_per_mwh is not None
-                                else settings.maximum_bid_price
-                            ),
-                            bid_id=f"{unit.name}::load::{delivery_start.isoformat()}",
-                            demand_type="inelastic_load",
-                        )
-                    ) # 生成一条买单，普通负荷。
 
-                for household in households:
-                    plan = plan_by_product[(household.name, delivery_start)]
-                    volume = plan.planned_grid_power_mw * duration_hours
-                    if volume <= _POWER_TOLERANCE_MW:
-                        continue
-                    demand_bids.append(
-                        DemandBid(
-                            unit_name=household.name,
-                            operator=household.operator,
-                            delivery_start=delivery_start,
-                            delivery_end=delivery_end,
-                            volume_mwh=volume,
-                            price_eur_per_mwh=household.bid_price_eur_per_mwh,
-                            bid_id=(
-                                f"{household.name}::household::{delivery_start.isoformat()}"
-                            ),
-                            demand_type="household_load",
-                        )
-                    ) # 生成一条买单，家庭负荷。
+def _run_household_openings(inputs, settings, openings, households, evaluate_flexibility):
+    """按开市顺序完成居民优化、报价、出清及设备调度，返回全部结果。"""
+    household_energy = {household.name: household.initial_energy_mwh for household in households}
+    household_heat_pump_power = {household.name: 0.0 for household in households}
+    household_charge_power = {household.name: 0.0 for household in households}
+    household_discharge_power = {household.name: 0.0 for household in households}
+    # 以上为初始化变量
 
-                product_fuel_prices = fuel_prices[delivery_start]
-                    
-                offers: list[SupplyOffer] = []
-                for plant in plants:
-                    available_power = available_power_mw(plant, delivery_start, availability)
-                    marginal_cost = plant.marginal_cost(product_fuel_prices)
-                    offers.append(
-                        naive_offer(
-                            plant,
-                            delivery_start,
-                            delivery_end,
-                            available_power,
-                            marginal_cost,))
+    market_results = []
+    household_results = []
+    for opening in openings:
+        plans_by_household, bounds_by_household = plan_household_opening(
+            households,
+            opening.products,
+            inputs.forecasts["price_EOM"],
+            inputs.forecasts,
+            household_energy,
+            household_charge_power,
+            household_discharge_power,
+            evaluate_flexibility=evaluate_flexibility,
+        )
+        # 已经优化完成的购电计划，这几行负责把结果整理成方便查询的字典
+        plan_by_product = {}
+        for household_plans in plans_by_household.values():
+            for plan in household_plans:
+                plan_key = (plan.unit_name, plan.delivery_start)
+                plan_by_product[plan_key] = plan
 
-                validate_order_prices(demand_bids, offers, settings)
-                result = clear_pay_as_bid(demand_bids, offers)
-                opening_results.append(replace(result, opening_time=opening.opening_time))
-
-            purchases = _household_purchases(opening_results)
-            for household in households:
-                accepted_grid_energy = {
-                    start: purchases.get((household.name, start), (0.0, 0.0))[0]
-                    for start, _ in opening.products
-                }
-
-                dispatch = dispatch_household(
-                    household,
-                    plans_by_household[household.name], # 购电、充放点计划
-                    accepted_grid_energy,
-                    household_energy[household.name], # 取出当前家庭电池已经储存的电量
-                    grid_power_bounds_mw=bounds_by_household[household.name],
-                    initial_heat_pump_power_mw=household_heat_pump_power[household.name],
-                    initial_battery_charge_power_mw=household_charge_power[household.name],
-                    initial_battery_discharge_power_mw=household_discharge_power[household.name],
-                )
-                household_results.extend(dispatch)
-
-                if dispatch: # 保存当前家庭在本批产品调度结束后的实际状态，作为下一次开市优化的初始状态。
-                    household_energy[household.name] = (
-                        dispatch[-1].soc_after * household.battery_capacity_mwh
+        opening_results = []
+        # 为本次开市的每个交付时段，将各普通负荷的需求功率换算为购电量，并生成对应的买单。
+        for delivery_start, delivery_end in opening.products:
+            duration_hours = hours_between(delivery_start, delivery_end)
+            demand_bids = []
+            for unit in inputs.demand_units:
+                power = inputs.demand_profiles[unit.profile_column][delivery_start]
+                demand_bids.append(
+                    DemandBid(
+                        unit_name=unit.name,
+                        operator=unit.operator,
+                        delivery_start=delivery_start,
+                        delivery_end=delivery_end,
+                        volume_mwh=power * duration_hours,
+                        price_eur_per_mwh=(
+                            unit.price_eur_per_mwh
+                            if unit.price_eur_per_mwh is not None
+                            else settings.maximum_bid_price
+                        ),
+                        bid_id=f"{unit.name}::load::{delivery_start.isoformat()}",
+                        demand_type="inelastic_load",
                     )
-                    household_heat_pump_power[household.name] = dispatch[
-                        -1
-                    ].heat_pump_power_mw
-                    household_charge_power[household.name] = dispatch[
-                        -1
-                    ].battery_charge_power_mw
-                    household_discharge_power[household.name] = dispatch[
-                        -1
-                    ].battery_discharge_power_mw
+                ) # 生成一条买单，普通负荷。
 
-            market_results.extend(opening_results)
-        return market_results, household_results
+            for household in households:
+                plan = plan_by_product[(household.name, delivery_start)]
+                volume = plan.planned_grid_power_mw * duration_hours
+                if volume <= _POWER_TOLERANCE_MW:
+                    continue
+                demand_bids.append(
+                    DemandBid(
+                        unit_name=household.name,
+                        operator=household.operator,
+                        delivery_start=delivery_start,
+                        delivery_end=delivery_end,
+                        volume_mwh=volume,
+                        price_eur_per_mwh=household.bid_price_eur_per_mwh,
+                        bid_id=(
+                            f"{household.name}::household::{delivery_start.isoformat()}"
+                        ),
+                        demand_type="household_load",
+                    )
+                ) # 生成一条买单，家庭负荷。
 
-    market_results, household_results = run_openings(
-        households, evaluate_flexibility=True)
-    # 基准方案：电池不参与运行，充放电功率上限和自放电率均设为 0，储能量保持初始值；
-    # 其余输入和流程完全相同。保留自放电会使储能量低于最低 SOC 而又无法充电，导致求解不可行。
-    # 基准结果仅用于计算节省，不进入本次仿真的市场、订单及设备结果。
+            product_fuel_prices = inputs.fuel_prices[delivery_start]
+
+            offers = []
+            for plant in inputs.plants:
+                available_power = available_power_mw(plant, delivery_start, inputs.availability)
+                marginal_cost = plant.marginal_cost(product_fuel_prices)
+                offers.append(naive_offer(plant, delivery_start,
+                        delivery_end, available_power, marginal_cost,))
+
+            validate_order_prices(demand_bids, offers, settings) # TODO: 关键的地方
+            result = clear_pay_as_bid(demand_bids, offers)
+            opening_results.append(replace(result, opening_time=opening.opening_time))
+
+        purchases = _household_purchases(opening_results)
+
+        for household in households:
+            accepted_grid_energy = {
+                start: purchases.get((household.name, start), (0.0, 0.0))[0]
+                for start, _ in opening.products
+            }
+
+            # 返回按交付时段排列的调度结果元组，包含热泵与电池实际功率、SOC 及未满足热需求。
+            dispatch = dispatch_household(
+                household,
+                plans_by_household[household.name], # 购电、充放点计划
+                accepted_grid_energy,
+                household_energy[household.name], # 取出当前家庭电池已经储存的电量
+                grid_power_bounds_mw=bounds_by_household[household.name],
+                initial_heat_pump_power_mw=household_heat_pump_power[household.name],
+                initial_battery_charge_power_mw=household_charge_power[household.name],
+                initial_battery_discharge_power_mw=household_discharge_power[household.name],
+            )
+            household_results.extend(dispatch)
+
+            if dispatch: # 保存当前家庭在本批产品调度结束后的实际状态，作为下一次开市优化的初始状态。
+                household_energy[household.name] = (
+                    dispatch[-1].soc_after * household.battery_capacity_mwh
+                )
+                household_heat_pump_power[household.name] = dispatch[
+                    -1
+                ].heat_pump_power_mw
+                household_charge_power[household.name] = dispatch[
+                    -1
+                ].battery_charge_power_mw
+                household_discharge_power[household.name] = dispatch[
+                    -1
+                ].battery_discharge_power_mw
+
+        market_results.extend(opening_results)
+    return market_results, household_results
+
+
+def simulate_household_market(inputs, settings, openings):
+    """使用已加载并校验的输入运行 V3 家庭用户及按报价结算（pay-as-bid）交易流程。
+    对比随后以相同输入再完整仿真一次不使用电池的基准方案，只用于计算居民的实际节省。
+    """
+    market_results, household_results = _run_household_openings(
+        inputs, settings, openings,
+        inputs.households, evaluate_flexibility=True)
     baseline_households = tuple(
         replace(
             household,
@@ -220,10 +232,11 @@ def simulate_household_market(
             battery_max_discharge_power_mw=0.0,
             battery_loss_rate=0.0,
         )
-        for household in households
+        for household in inputs.households
     )
-    baseline_market_results, baseline_household_results = run_openings(
-        baseline_households, evaluate_flexibility=False)
+    baseline_market_results, baseline_household_results = _run_household_openings(
+        inputs, settings, openings,
+        baseline_households, evaluate_flexibility=False) # TODO: 不使用电池方案情况下。
 
     return SimulationResult(
         settings=settings,
@@ -257,12 +270,7 @@ def _household_results(
     baseline_household_results: list[HouseholdDispatchResult],
     baseline_market_results: list[MarketClearingResult],
 ) -> tuple[HouseholdResult, ...]:
-    """对比优化方案与基准方案每个产品的实际支付，以及按预测电价的计划节省，
-    并保留基准方案的缺供量和 SOC，用于检查两者是否提供了同等服务。
-
-    未提交或未成交的买单按成交电量和支付均为 0 处理。
-    计划节省 = 预测电价 × (基准计划购电量 − 优化计划购电量)。
-    """
+    """逐产品对比优化与基准方案的实际支付，按预测电价计算计划购电节省，并保留基准缺供量和 SOC 供服务水平核对。"""
     purchases = _household_purchases(market_results)
     baseline_purchases = _household_purchases(baseline_market_results)
     baseline_dispatch = {

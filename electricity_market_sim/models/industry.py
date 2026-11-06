@@ -52,10 +52,13 @@ class IndustrialPlan:
     dri_output_t: float
     eaf_power_mw: float
     planned_steel_output_t: float
-    planned_grid_power_mw: float
     forecast_cost_eur: float
     minimum_power_mw: float
     maximum_power_mw: float
+
+    @property
+    def planned_grid_power_mw(self) -> float:
+        return self.electrolyser_power_mw + self.dri_power_mw + self.eaf_power_mw
 
     @property
     def planned_energy_mwh(self) -> float:

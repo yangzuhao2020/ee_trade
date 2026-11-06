@@ -156,7 +156,7 @@ def _solve_complex_order_book(
 
 
 def _build_complex_variables(demand_bids, supply_offers, products, storages):
-    """列出订单接受比例和储能期末电量变量，记录对应订单及储能变量索引。"""
+    """列出订单接受比例和储能期末电量变量"""
     variables = []
     for demand_index, bid in enumerate(demand_bids):
         variables.append(
@@ -220,6 +220,7 @@ def _build_complex_matrices(
 ):
     """构建目标函数、变量边界、供需平衡、储能电量和父子报价约束。
     储能变量表示各产品结束时的电量，按成交充放电量及效率更新。
+    TODO: 第二关键的地方。
     """
     variables, storage_state_variables = _build_complex_variables(
         demand_bids, supply_offers, products, storages)

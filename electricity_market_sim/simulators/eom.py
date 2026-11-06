@@ -5,44 +5,32 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime
-from typing import TYPE_CHECKING
+from ..models import SimulationResult
 
-from ..models import (
-    MarketClearingResult,
-    MarketOpening,
-    SimulationResult,
-    StorageDispatchResult,
-)
-
-if TYPE_CHECKING:
-    from .base_market import BaseMarket
 
 ScheduledProductKey = tuple[datetime, datetime, datetime]
 
 
-def simulate_eom_market(market: BaseMarket) -> SimulationResult:
+def simulate_eom_market(market):
     """按时间顺序模拟一个市场从开市、出清、开始交付到结束交付的完整过程."""
     learning_session = market.learning_session
     settle_before_opening = learning_session is not None
-    openings_by_time: dict[datetime, list[MarketOpening]] = defaultdict(list)
+    openings_by_time= defaultdict(list)
     for opening in market.valid_openings:
         openings_by_time[opening.opening_time].append(opening) # 按照它们的开市时间分组保存
 
     # Preserve the opening identity even when delivery timestamps coincide.
-    scheduled_results: dict[ScheduledProductKey, MarketClearingResult] = {} # 仅保存尚未结束交付的产品结果。
-    pending_starts: dict[datetime, list[ScheduledProductKey]] = defaultdict(list) # 按开始时间安排交付
-    pending_ends: dict[datetime, list[ScheduledProductKey]] = defaultdict(list) # 按结束时间安排结束
-    results: list[MarketClearingResult] = [] # 最终市场结果
-    storage_results: list[StorageDispatchResult] = [] # 最终储能调度结果
+    scheduled_results = {} # 仅保存尚未结束交付的产品结果。
+    pending_starts = defaultdict(list) # 按开始时间安排交付
+    pending_ends = defaultdict(list) # 按结束时间安排结束
+    results = [] # 最终市场结果
+    storage_results = [] # 最终储能调度结果
 
-    def finalize_product_starts(keys: list[ScheduledProductKey]) -> None:
-        # keys 是当前时刻待开始交付的产品标识，每个标识包含开市时间、交付开始时间和结束时间。
+    def finalize_product_starts(keys):
+        # 处理当前开始交付的产品，补计机组启动成本、更新并汇总市场结果，并在启用学习时记录交付反馈。
         for key in keys:
-            # 根据机组此前的运行状态，为本次交付中需要启动的机组补计启动成本。
             result = market.start_delivery(scheduled_results[key])
-            # 将补计成本后的结果写回，供后续交付结束事件使用。
             scheduled_results[key] = result
-            # 纳入最终市场结果，此时结果已包含本次交付应计的启动成本。
             results.append(result)
             if learning_session is not None:
                 learning_session.record_result(result)

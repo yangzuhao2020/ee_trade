@@ -161,13 +161,7 @@ class BaseMarket:
     def _prepare_openings_and_forecasts(
         self, market_price_forecasts,
     ):
-        """筛选可用的开市，并准备机组和储能所需的电价预测。
-        检查各开市的交付时段是否越界，以及交付和预测窗口所需的数据是否齐全。
-        发现问题时，学习场景抛出 InputValidationError，其余场景警告并跳过该次开市。
-        将通过检查的开市保存到 self.valid_openings，保持原有顺序。
-        需要电价预测时，优先使用扩展提供的预测，否则根据有效开市生成朴素出清价格预测。
-        预测保存为“时段开始时间 -> 电价（EUR/MWh）”的 self.price_forecasts；无需预测时为空字典。
-        """
+        """检查交付范围和数据覆盖，保存有效开市，并按需采用外部预测或生成机组与储能所需的电价预测。"""
         settings = self.settings
         valid_openings = []
         for opening in self.openings:
@@ -366,5 +360,8 @@ class BaseMarket:
         return replace(result, offers=tuple(cleared_offers))
 
     def end_delivery(self, result):
+        """交付结束后更新设备状态，并返回本时段的储能调度记录。"""
+        # 根据本时段实际成交电量，更新所跟踪机组的运行/停机状态。
         _record_runtime_states(result, self.runtime_states)
+        # 根据自然流入和实际充放电量更新储能电量，并返回调度明细供结果汇总。
         return _record_storage_states(result, self.storages, self.storage_states)

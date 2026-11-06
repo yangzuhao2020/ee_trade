@@ -9,7 +9,7 @@ from .deep_learning.learning import ActionProvider, TransitionConsumer
 from .models import LEARNING_PERIOD_NAMES, MarketOpening, MarketSettings, SimulationResult
 from .reporting import write_results
 from .simulators.v5 import simulate_v5_market
-from .simulators.household_market import simulate_household_market
+from .simulators.household_market import load_household_market_inputs, simulate_household_market
 from .simulators.base_market import BaseMarket
 from .simulators.eom import simulate_eom_market
 from .simulators.industry_market import simulate_v4_market
@@ -114,7 +114,8 @@ def simulate(
     if settings.industrial_dsm_units_file is not None:
         return simulate_v4_market(input_path, settings, openings) # 第四版本
     elif settings.market_mechanism == "pay_as_bid":
-        return simulate_household_market(input_path, settings, openings) # 第三版本
+        inputs = load_household_market_inputs(input_path, openings)
+        return simulate_household_market(inputs, settings, openings) # 第三版本
     else:
         market = BaseMarket(input_path, settings, openings)
         market.prepare()

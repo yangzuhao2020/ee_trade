@@ -37,15 +37,15 @@ class _HouseholdProblem:
 
 
 def _build_household_problem(
-    household: HouseholdUnit,
-    products: tuple[tuple[datetime, datetime], ...],
-    price_forecast: dict[datetime, float],
-    heat_forecast: dict[datetime, float],
-    initial_energy_mwh: float,
-    initial_battery_charge_power_mw: float,
-    initial_battery_discharge_power_mw: float,
-) -> _HouseholdProblem:
-    """准备预测并组装变量与约束。"""
+    household,
+    products,
+    price_forecast,
+    heat_forecast,
+    initial_energy_mwh,
+    initial_battery_charge_power_mw,
+    initial_battery_discharge_power_mw,
+):
+    """根据家庭设备参数、交付时段、预测电价与热需求及电池初始状态，组装购电和电池充放电优化所需的数据、变量边界与运行约束。"""
     # 1. 按交付时段排列预测数据，计算热泵功率。
     durations = np.array([hours_between(*product) for product in products])
     prices = np.array([price_forecast[start] for start, _ in products], dtype=float)
@@ -53,8 +53,7 @@ def _build_household_problem(
     heat_powers = heat_demands / household.cop
     if np.any(heat_powers > household.heat_pump_max_power_mw + _TOLERANCE):
         raise InputValidationError(
-            f"家庭用户 {household.name!r} 的热需求所需热泵功率超出功率上限。"
-        )
+            f"家庭用户 {household.name!r} 的热需求所需热泵功率超出功率上限。")
 
     # 2. 定义购电、充电、放电、能量和充放电模式的索引与变量边界。
     count = len(heat_powers)
@@ -195,11 +194,7 @@ def _solve_household_problem(
     return np.where(np.abs(result.x) < _TOLERANCE, 0.0, result.x)
 
 
-def _household_plans(
-    household: HouseholdUnit,
-    problem: _HouseholdProblem,
-    solution: np.ndarray, # 求解器计算出的各个优化变量的值
-) -> tuple[HouseholdPlan, ...]:
+def _household_plans(household, problem, solution):
     # 把优化求解器输出的数值数组，按交付时段整理成家庭运行计划。
     return tuple(
         HouseholdPlan(
@@ -216,50 +211,6 @@ def _household_plans(
         )
         for index, (start, end) in enumerate(problem.products)
     )
-
-
-def _flexibility_bounds(
-    household: HouseholdUnit,
-    problem: _HouseholdProblem,
-    baseline_plans: tuple[HouseholdPlan, ...],
-) -> tuple[tuple[float, float], ...]:
-    """在满足设备运行约束、且总购电费用不超过
-    基准费用加上成本容忍度允许增量的条件下，
-    计算各时段购电功率的最小值和最大值。
-    """
-    baseline_cost = sum(
-        problem.prices[index] * plan.planned_grid_power_mw * problem.durations[index]
-        for index, plan in enumerate(baseline_plans)
-    )
-
-    cost_limit = baseline_cost + abs(baseline_cost) * (
-        household.cost_tolerance_percent / 100)
-    cost_row = np.zeros(problem.variable_count)
-    cost_row[problem.grid] = problem.prices * problem.durations
-    constraint = LinearConstraint(
-        np.vstack((problem.constraint.A, cost_row)),
-        np.append(problem.constraint.lb, -np.inf),
-        np.append(problem.constraint.ub, cost_limit + _TOLERANCE),
-    )
-    # 根据基准总费用和成本容忍度计算费用上限，
-    # 并向优化模型添加“整个计划周期的总购电费用不得超过该上限”的约束。
-
-    results: list[tuple[float, float]] = []
-    # 在设备约束和总费用上限内，计算每个时段购电功率的上下限，并整理返回。
-    for index in range(len(problem.products)):
-        bounds: list[float] = []
-        for direction in (1.0, -1.0):
-            objective = np.zeros(problem.variable_count)
-            objective[problem.grid[index]] = direction
-            bounds.append(_solve_household_problem(
-                    household,
-                    problem,
-                    objective,
-                    constraint,
-                )[problem.grid[index]])
-            
-        results.append((bounds[0], bounds[1]))
-    return tuple(results)
 
 
 def plan_household_opening(
@@ -301,10 +252,9 @@ def plan_household_opening(
         # 固定负荷和热泵费用是常数，只计算电池充放电引起的费用变化。
         objective = np.zeros(problem.variable_count)
         objective[problem.charge] = problem.prices * problem.durations
-        objective[problem.discharge] = -problem.prices * problem.durations
+        objective[problem.discharge] = -problem.prices * problem.durations # TODO: 目标函数
         plans_by_household[household.name] = _household_plans(
-            household,
-            problem,
+            household, problem,
             _solve_household_problem(
                 household,
                 problem,
@@ -315,10 +265,50 @@ def plan_household_opening(
 
         bounds_by_household[household.name] = (
             _flexibility_bounds(household, problem, plans_by_household[household.name])
-            if evaluate_flexibility else None
-        )
+            if evaluate_flexibility else None)
 
     return plans_by_household, bounds_by_household
+
+
+def _flexibility_bounds(
+    household: HouseholdUnit,
+    problem: _HouseholdProblem,
+    baseline_plans: tuple[HouseholdPlan, ...],
+) -> tuple[tuple[float, float], ...]:
+    """在满足设备运行约束、且总购电费用不超过
+    基准费用加上成本容忍度允许增量的条件下，
+    计算各时段购电功率的最小值和最大值。
+    """
+    baseline_cost = sum(
+        problem.prices[index] * plan.planned_grid_power_mw * problem.durations[index]
+        for index, plan in enumerate(baseline_plans)
+    )
+
+    cost_limit = baseline_cost + abs(baseline_cost) * (
+        household.cost_tolerance_percent / 100)
+    cost_row = np.zeros(problem.variable_count)
+    cost_row[problem.grid] = problem.prices * problem.durations
+    constraint = LinearConstraint(
+        np.vstack((problem.constraint.A, cost_row)),
+        np.append(problem.constraint.lb, -np.inf),
+        np.append(problem.constraint.ub, cost_limit + _TOLERANCE),
+    )
+    # 根据基准总费用和成本容忍度计算费用上限，
+    # 并向优化模型添加“整个计划周期的总购电费用不得超过该上限”的约束。
+
+    results: list[tuple[float, float]] = []
+    # 在设备约束和总费用上限内，计算每个时段购电功率的上下限，并整理返回。
+    for index in range(len(problem.products)):
+        bounds: list[float] = []
+        for direction in (1.0, -1.0):
+            objective = np.zeros(problem.variable_count)
+            objective[problem.grid[index]] = direction
+            bounds.append(_solve_household_problem(
+                    household, problem,
+                    objective, constraint,)[problem.grid[index]])
+            
+        results.append((bounds[0], bounds[1]))
+    return tuple(results)
 
 
 def dispatch_household(
@@ -332,16 +322,14 @@ def dispatch_household(
     initial_battery_charge_power_mw: float = 0.0,
     initial_battery_discharge_power_mw: float = 0.0,
 ) -> tuple[HouseholdDispatchResult, ...]:
-    """结合原定运行计划和市场实际成交电量，按时间顺序模拟家庭设备运行，并更新电池 SOC。
-    1. 优化求解 → 得到最低费用运行计划 plans
-    2. 提交购电订单并出清 → 得到实际成交电量
-    3. 调用 dispatch_household() → 根据计划和成交电量模拟实际运行
+    """在购电计划优化和市场出清完成后调用，根据计划和实际成交电量模拟设备运行。
+    返回各交付时段的热泵与电池实际功率、SOC 和未满足热需求，不再进行优化求解。
     """
     energy = initial_energy_mwh
     previous_heat_pump = initial_heat_pump_power_mw
     previous_charge = initial_battery_charge_power_mw
     previous_discharge = initial_battery_discharge_power_mw
-    records: list[HouseholdDispatchResult] = []
+    records = []
     
     for index, plan in enumerate(plans): # 按时间顺序处理每个交付时段的计划
         duration = hours_between(plan.delivery_start, plan.delivery_end)
@@ -358,9 +346,7 @@ def dispatch_household(
             0.0, retained_energy - household.min_energy_mwh)
         discharge_energy_limit_mw = (
             available_discharge_energy_mwh
-            * household.battery_efficiency_discharge
-            / duration
-        )
+            * household.battery_efficiency_discharge / duration)
         maximum_discharge = min(
             household.battery_max_discharge_power_mw,
             discharge_ramp_limit_mw,
@@ -439,4 +425,5 @@ def dispatch_household(
         previous_heat_pump = heat_pump_power
         previous_charge = charge
         previous_discharge = discharge
+        
     return tuple(records)

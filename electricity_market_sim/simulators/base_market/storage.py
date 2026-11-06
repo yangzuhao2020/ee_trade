@@ -17,10 +17,7 @@ _POWER_TOLERANCE_MW = 1e-9
 
 @dataclass
 class StorageRuntimeState:
-    """单个储能单元在已完成交付后的实际储能量。
-    未来已成交的产品由仿真调度器保存，并单独推算其影响。
-    此状态仅在交付时段结束后更新。
-    """
+    """记录储能单元的实际电量，仅在交付结束后更新，未来成交产品的影响另行推算。"""
 
     energy_mwh: float
 
@@ -100,15 +97,7 @@ def _project_storage_energies(
     storage_states: dict[str, StorageRuntimeState],
     scheduled_results: dict[tuple[datetime, datetime, datetime], MarketClearingResult],
 ) -> dict[str, float]:
-    """根据当前电量和已成交的交付安排，推算本次开市首个交付时段开始前的储能量。
-
-    计入开市后至首个交付时段开始时结束的交易，依次考虑自然流入、充放电成交电量和效率。
-    推算结果超出 SOC 允许范围时抛出 InputValidationError。
-    返回以储能名称为键、预计储能量（MWh）为值的字典。
-    """
-
-    if not storages:
-        return {}
+    """根据当前电量及首个交付时段开始前会完成的已成交交易，计入自然流入和充放电效率，推算各储能单元的交付初始电量。"""
 
     first_delivery = opening.products[0][0]
     pending_before_delivery = sorted(
@@ -119,35 +108,39 @@ def _project_storage_energies(
         ),
         key=lambda result: (result.delivery_end, result.delivery_start),
     )
-    projected: dict[str, float] = {}
+    projected = {}
     for storage in storages:
+        # 从当前实际电量开始推算。
         energy = storage_states[storage.name].energy_mwh
         for market_result in pending_before_delivery:
+            # 计入该交付时段的自然流入，超过容量的部分弃用。
             energy = min(
                 storage.max_energy_mwh,
                 energy + storage.natural_inflow_mw * market_result.duration_hours,
             )
+            # 充电成交量乘以效率，得到实际存入电量。
             energy += sum(
                 item.accepted_energy_mwh for item in market_result.demand_bids
                 if item.bid.unit_name == storage.name and item.bid.demand_type == "storage_charge"
             ) * storage.efficiency_charge
+            # 放电成交量除以效率，得到实际消耗电量。
             energy -= sum(
                 item.accepted_energy_mwh for item in market_result.offers
                 if item.offer.unit_name == storage.name and item.offer.offer_type == "storage_discharge"
             ) / storage.efficiency_discharge
+            
         tolerance = 1e-7
         if not (
             storage.min_energy_mwh - tolerance
             <= energy
             <= storage.max_energy_mwh + tolerance
-        ):
+        ): # 最小电量 - 容差 <= 当前电量 <= 最大电量 + 容差
             raise InputValidationError(
                 f"根据已成交交易推算，储能 {storage.name!r} 在本次开市首个交付时段"
                 f"开始前（{format_timestamp(first_delivery)}）的预计电量超出了 SOC 允许范围。"
             )
         projected[storage.name] = min(
-            storage.max_energy_mwh, max(storage.min_energy_mwh, energy)
-        )
+            storage.max_energy_mwh, max(storage.min_energy_mwh, energy))
     return projected
 
 
@@ -156,10 +149,7 @@ def _record_storage_states(
     storages: tuple[StorageUnit, ...],
     storage_states: dict[str, StorageRuntimeState],
 ) -> list[StorageDispatchResult]:
-    """在交付时段结束后，根据自然流入和实际成交的充放电量更新各储能单元的电量。
-
-    返回交付前后电量、充放电报价与成交电量，以及交易收支等记录，供 SOC 核对和结果输出使用。
-    """
+    """交付结束后，根据自然流入和充放电成交量更新储能电量，并返回供状态核对和结果输出使用的调度记录。"""
 
     records: list[StorageDispatchResult] = []
     for storage in storages:
