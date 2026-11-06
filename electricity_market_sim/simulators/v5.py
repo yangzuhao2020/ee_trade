@@ -4,7 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 from ..errors import InputValidationError
 from ..deep_learning.learning import (
-    ActionProvider, LearningEpisodeSession, TransitionConsumer,
+    OBSERVATION_SIZE, ActionProvider, LearningEpisodeSession, TransitionConsumer,
 )
 from ..models import (
     MarketOpening,
@@ -16,11 +16,8 @@ from .base_market import BaseMarket
 from .eom import simulate_eom_market
 
 
-def _learning_plant(
-    settings: MarketSettings, plants: tuple[PowerPlant, ...]
-) -> PowerPlant:
+def _learning_plant(settings, plants):
     """校验并返回第五版唯一的学习型参与者。"""
-
     learning_plants = tuple(
         plant
         for plant in plants
@@ -70,5 +67,7 @@ def simulate_v5_market(
     )
     market.prepare(learning_session=session)
     result = simulate_eom_market(market)
-    steps, transitions = session.finalize()
+    session._emit_transition(next_state=(0.0,) * OBSERVATION_SIZE, done=True)
+    steps = tuple(session._steps)
+    transitions = tuple(session._transitions)
     return replace(result, learning_steps=steps, learning_transitions=transitions)

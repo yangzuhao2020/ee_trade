@@ -39,7 +39,7 @@ class _EpisodeMetrics:
 def _metrics(
     result: SimulationResult, *, run: int, phase: str, episode: int, gamma: float
 ) -> _EpisodeMetrics:
-    """统计学习入口已限定为每个产品 1 小时的回合指标。"""
+    """汇总一个回合的奖励、利润、成交电量及两段报价表现；每个交付产品按 1 小时计算。"""
     total_reward = 0.0
     discounted_reward = 0.0
     total_profit = 0.0
@@ -102,7 +102,7 @@ def _write_metrics(path: Path, metrics: list[_EpisodeMetrics]) -> None:
             writer.writerow(row)
 
 
-def _write_run_summary(path: Path, metrics: list[_EpisodeMetrics]) -> None:
+def _write_run_summary(path: Path, metrics):
     """写出 Actor 与基线对比指标在各独立运行间的均值和总体标准差。"""
     phase_groups: dict[str, list[_EpisodeMetrics]] = {}
     for item in metrics:

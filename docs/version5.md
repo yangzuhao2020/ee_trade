@@ -129,7 +129,7 @@ learning_config:
 - **严格时界**：学习场景把时段边界当作信息时界，所有前瞻窗口一律截取在时段 `end` 之前。启发式机组未来 13 小时的预测和储能的对称窗口，都不再跨越边界读取后一时段的真实需求或可用率。因此混合场景下每个时段只要求自身数据，也不经对手报价把后续行情泄漏进本时段出清。副作用是启发式对手在时段末约 12 小时的前瞻逐步缩短，与 ASSUME 在仿真末尾的截断处理一致；若需让对手在边界处仍有预测，应提供报价时可获得的独立预测输入，而非复用真实数据。
 - 测试段提供的是未见过的市场条件，价格和收益仍由冻结的 Actor 与市场重新交互产生；环境仍需读取测试段需求才能出清。`example_02a` 中燃料价格为静态值，没有可用率数据，也没有风光或 exchange，因此测试段实际只提供新的需求曲线（及交付小时）。对手仍使用相同的简单报价策略，所以测到的是对新时段行情的适应能力；对不同对手策略的适应需另行设计测试场景。
 - 验证段（秋季）与测试段（冬季）的需求水平不同，按验证段选出的模型在测试段上不一定最好，结果应如实报告。
-- 训练开始前预检三个时段的需求、已提供的可用率和已启用的交换数据覆盖，包括中间缺失的小时。预检只扫描表头、时间戳和必填单元格是否存在，不解析时序数值、不生成预测、不运行测试段，也不参与选模。每小时至少有一个样本即视为覆盖，时序数值合法性仍由实际运行时的加载器校验。测试段缺数据会在训练前报错；仅改变测试段数值不会影响训练权重。
+- 数据校验复用输入加载器和市场准备流程：加载时检查文件、列、时间戳及数值，准备市场时检查当前时段的交付及预测数据覆盖。每小时至少有一个样本即视为覆盖；验证段或测试段缺少所需小时的数据，会在运行对应时段时报告。
 
 ## 5. 训练配置与流程
 公共训练参数保存在 `electricity_market_sim/config/matd3.yaml`。仅当场景明确设置 `learning_config.learning_mode: true` 时，加载器才读取同目录的公共文件，按“公共配置 → 场景覆盖 → 命令行支持的参数覆盖”生效。配置文件路径不依赖运行目录；合并后统一校验。关闭学习的完整旧配置保留原来的校验行为，无学习配置的场景不读取公共文件。
@@ -180,12 +180,13 @@ $$y_t=r_t+\gamma(1-d_t)\min\left(Q'_1(s_{t+1},a'),Q'_2(s_{t+1},a')\right).$$
 | 模块 | 职责 |
 | --- | --- |
 | [learning.py](../electricity_market_sim/deep_learning/learning.py) | 构建观测、生成报价、计算奖励和收集状态转移 |
-| [agent.py](../electricity_market_sim/deep_learning/agent.py) | Actor、双 Critic、经验池、参数更新、检查点及运行清单读写 |
+| [matd3_agent.py](../electricity_market_sim/deep_learning/matd3_agent.py) | MATD3 Actor、双 Critic、经验池、动作生成及参数更新 |
+| [checkpoints.py](../electricity_market_sim/deep_learning/checkpoints.py) | MATD3 / GRPO 共用的检查点保存、策略加载及运行清单读写 |
+| [network_utils.py](../electricity_market_sim/deep_learning/network_utils.py) | MATD3 / GRPO 共用的网络初始化与确定性动作计算 |
 | [training.py](../electricity_market_sim/deep_learning/training.py) | 单次与多次从头训练、验证选模和运行清单写出 |
-| [data_coverage.py](../electricity_market_sim/deep_learning/data_coverage.py) | 训练前扫描三个数据时段的时间索引和必填数据覆盖，不解析时序数值 |
 | [test.py](../electricity_market_sim/deep_learning/test.py) | `evaluate_learning_scenario`、`run_learning_test`，以及训练和测试共用的 Actor 与基线对比 |
 | [learning_metrics.py](../electricity_market_sim/deep_learning/learning_metrics.py) | 回合指标计算、指标 CSV 写出、跨运行均值与标准差 |
 
 文件夹外与第五版相关的部分：[simulators/v5.py](../electricity_market_sim/simulators/v5.py) 组装第五版市场，[simulation.py](../electricity_market_sim/simulation.py) 负责时段换算和回合运行，[plotting/learning.py](../electricity_market_sim/plotting/learning.py) 绘制学习图表，[main.py](../electricity_market_sim/main.py) 提供统一命令行入口。
 
-`training.py` 复用 `test.py` 的验证对比流程；两者共同依赖 `agent.py` 和 `learning_metrics.py`。`test.py` 不依赖 `training.py`，命令行参数及结果文件约定保持一致。`deep_learning/__init__.py` 有意不导入子模块，调用方需使用完整路径（如 `electricity_market_sim.deep_learning.training`），以免与 `reporting.py` 形成循环导入。
+`training.py` 复用 `test.py` 的验证对比流程；两者共同依赖 `checkpoints.py` 和 `learning_metrics.py`，MATD3 训练使用 `matd3_agent.py`。`test.py` 不依赖 `training.py`，命令行参数及结果文件约定保持一致。`deep_learning/__init__.py` 有意不导入子模块，调用方需使用完整路径（如 `electricity_market_sim.deep_learning.training`），以免与 `reporting.py` 形成循环导入。

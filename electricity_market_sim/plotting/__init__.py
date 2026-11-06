@@ -8,7 +8,6 @@ from .common import (
     _load_matplotlib,
     _make_unit_colors,
     _remove_stale_opening_plots,
-    _validate_plot_data,
 )
 from .dispatch import (
     _plot_dispatch_by_unit,
@@ -62,7 +61,8 @@ def generate_plots(
             ),
         )
     )
-    _validate_plot_data(results)
+    if not results:
+        raise PlottingError("Cannot generate plots because the simulation has no delivery products.")
     pyplot, dates = _load_matplotlib()
 
     plot_directory = Path(output_dir)

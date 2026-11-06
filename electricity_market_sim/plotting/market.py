@@ -66,7 +66,8 @@ def _plot_market_overview(
     prices, price_label = _market_price_series(results)
     price_label = {"Clearing price": "出清电价", "Average trade price": "全市场成交量加权均价"}[price_label]
     requested_demand = [
-        market.requested_demand_mwh - market.requested_storage_charge_mwh
+        market.requested_demand_mwh
+        - market.demand_total("bid.volume_mwh", demand_type="storage_charge")
         for market in results
     ]
 
@@ -80,15 +81,15 @@ def _plot_market_overview(
         (by_type("accepted_energy_mwh", "household_load"), "#72B7B2", "已成交的居民用电需求"),
         (by_type("accepted_energy_mwh", "industrial_load"), "#D4A72C", "已成交的工业用电需求"),
         (by_type("accepted_energy_mwh", "elastic_load"), "#54A24B", "已成交的弹性需求"),
-        ([market.cleared_export_mwh for market in results], "#F58518", "已成交的外送需求"),
+        (by_type("accepted_energy_mwh", "export"), "#F58518", "已成交的外送需求"),
     )
     demand_types = {demand.bid.demand_type for market in results for demand in market.demand_bids}
     unaccepted_lines = (
-        ("inelastic_load", [market.unserved_load_mwh for market in results], "#E45756", "未满足的刚性负荷"),
+        ("inelastic_load", by_type("unserved_energy_mwh", "inelastic_load"), "#E45756", "未满足的刚性负荷"),
         ("elastic_load", by_type("unserved_energy_mwh", "elastic_load"), "#7F7F7F", "未成交的弹性需求"),
         ("household_load", by_type("unserved_energy_mwh", "household_load"), "#72B7B2", "未成交的居民用电需求"),
         ("industrial_load", by_type("unserved_energy_mwh", "industrial_load"), "#D4A72C", "未成交的工业用电需求"),
-        ("export", [market.unfulfilled_export_mwh for market in results], "#F58518", "未满足的外送需求"),
+        ("export", by_type("unserved_energy_mwh", "export"), "#F58518", "未满足的外送需求"),
     )
     unaccepted_panels = [panel for panel in unaccepted_lines if panel[0] in demand_types]
 

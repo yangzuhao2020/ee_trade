@@ -1,5 +1,5 @@
 """第五版学习机组的状态构造、报价生成、奖励计算及回合记录。
-通过策略回调接入报价决策，不依赖 PyTorch；网络和参数更新由 agent.py 负责，训练编排由 training.py 负责。"""
+通过策略回调接入报价决策，不依赖 PyTorch；网络和参数更新由 matd3_agent.py / grpo_agent.py 负责，训练编排由 training.py 负责。"""
 
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -37,8 +37,10 @@ class _PendingLearningStep:
 
 
 class LearningEpisodeSession:
-    """Connect a policy to sequential market openings and collect transitions."""
-
+    """管理学习策略与市场仿真的逐小时交互。
+    首先是构建策略输入的 16 维观测，调用策略生成两段报价动作，转换为市场报价；
+    出清后计算奖励，并记录状态、动作、奖励、下一状态及终止标记。
+    """
     def __init__(
         self,
         *,
@@ -66,7 +68,6 @@ class LearningEpisodeSession:
         self, delivery_start: datetime, marginal_cost_eur_per_mwh: float
     ) -> tuple[float, ...]:
         """构建 16 维观测：历史出清价、交付小时编码、上期出力和自身成本。
-
         价格和成本使用与动作映射相同的 max_bid_price 缩放；成本始终放在最后一维。
         不读取负荷或预测电价；小时编码使用场景中的交付时间。
         历史价格窗口在回合开始时补零，缩放参数在会话入口校验。
@@ -95,7 +96,6 @@ class LearningEpisodeSession:
         action: tuple[float, float],
     ) -> tuple[SupplyOffer, ...]:
         """将实际执行的动作映射为可各自独立出清的最低出力段报价和灵活出力段报价。
-
         调用方必须先校验这两个值都是有限数，并施加所需的边界限制。
         经验数据中保留动作的原始顺序，只对报价价格进行排序。
         """
@@ -124,38 +124,47 @@ class LearningEpisodeSession:
 
     def _step_result(self, market_result: MarketClearingResult) -> LearningStepResult:
         """出清后计算利润、遗憾（regret）塑形项和归一化奖励。"""
-
         pending = self._pending
-        price = (
-            market_result.clearing_price_eur_per_mwh
-            if any(item.accepted_power_mw > _POWER_TOLERANCE_MW for item in market_result.offers)
-            else None
+        # 整个市场无成交时，不使用出清价计算奖励。
+        has_trades = any(
+            item.accepted_power_mw > _POWER_TOLERANCE_MW for item in market_result.offers
         )
-        if price is None or pending.available_power_mw < self.plant.min_power_mw - _POWER_TOLERANCE_MW:
-            accepted_power_mw = profit_eur = regret_eur = reward = 0.0
+        if has_trades:
+            price = market_result.clearing_price_eur_per_mwh
         else:
-            cleared = tuple(
-                item for item in market_result.offers if item.offer.unit_name == self.plant.name
-            )
+            price = None
+        if price is None:
+            accepted_power_mw = 0.0
+            profit_eur = 0.0
+            regret_eur = 0.0
+            reward = 0.0
+        else:
+            # 筛选本机组的报价记录，包括未成交的报价。
+            cleared = []
+            for item in market_result.offers:
+                if item.offer.unit_name == self.plant.name:
+                    cleared.append(item)
+                    
+            # 汇总各报价段的成交电量和实际利润。
             accepted_energy_mwh = sum(item.accepted_energy_mwh for item in cleared)
             accepted_power_mw = accepted_energy_mwh / market_result.duration_hours
             profit_eur = sum(item.profit_eur for item in cleared)
+            # 成交功率超过最小出力时，减轻遗憾惩罚。
             regret_factor = 0.1 if accepted_power_mw > self.plant.min_power_mw else 0.5
-            regret_eur = (
-                regret_factor
-                * max(
-                    0.0,
-                    (pending.available_power_mw - accepted_power_mw)
-                    * (price - cleared[0].offer.marginal_cost_eur_per_mwh)
-                    * market_result.duration_hours,
-                )
-                if cleared
-                else 0.0
-            )
+            
+            # 按未成交可用功率计算错失利润，仅惩罚正值。
+            if cleared:
+                unused_power_mw = pending.available_power_mw - accepted_power_mw
+                margin_eur_per_mwh = price - cleared[0].offer.marginal_cost_eur_per_mwh
+                missed_profit_eur = unused_power_mw * margin_eur_per_mwh * market_result.duration_hours
+                regret_eur = regret_factor * max(0.0, missed_profit_eur)
+            else:
+                regret_eur = 0.0
+            # 奖励归一化分母：价格尺度 × 额定最大功率 × 时长。
             denominator = (
                 REWARD_SCALE_EUR_PER_MWH * self.plant.max_power_mw * market_result.duration_hours
             )
-            reward = (profit_eur - regret_eur) / denominator
+            reward = (profit_eur - regret_eur) / denominator # TODO: 奖励的计算
         return LearningStepResult(
             delivery_start=market_result.delivery_start,
             action=pending.action,
@@ -167,14 +176,8 @@ class LearningEpisodeSession:
             reward=reward,
         )
 
-    def _emit_transition(
-        self,
-        *,
-        next_state: tuple[float, ...],
-        done: bool,
-    ) -> None:
-        """发布一个已完成的状态转移，每个转移只发布一次。"""
-
+    def _emit_transition(self, *, next_state, done,):
+        """保存本小时状态、报价动作、奖励及下一小时状态，每条训练记录只保存一次。"""
         pending = self._pending
         if pending is None:
             return
@@ -199,25 +202,25 @@ class LearningEpisodeSession:
     def offers_for_product(
         self,
         *,
-        delivery_start: datetime,
-        delivery_end: datetime,
-        available_power_mw: float,
-        marginal_cost_eur_per_mwh: float,
-    ) -> tuple[SupplyOffer, ...]:
+        delivery_start,
+        delivery_end,
+        available_power_mw,
+        marginal_cost_eur_per_mwh,
+    ):
         previous_start = delivery_start - timedelta(hours=1)
         if self._pending is not None and self._pending.delivery_start != previous_start:
-            raise InputValidationError(
-                "Learning delivery products must form a continuous hourly episode."
-            )
+            raise InputValidationError("学习回合的交付时段必须按小时连续排列。")
         state = self._observation(delivery_start, marginal_cost_eur_per_mwh)
         self._emit_transition(next_state=state, done=False)
         values = np.asarray(self.action_provider(state), dtype=np.float64)
+        
         if values.shape != (ACTION_SIZE,):
-            raise ValueError(f"Learning action must have shape ({ACTION_SIZE},).")
+            raise ValueError(f"学习策略必须返回包含 {ACTION_SIZE} 个数值的一维报价动作。")
         if not np.isfinite(values).all():
-            raise ValueError("Learning action must contain only finite values.")
+            raise ValueError("学习策略的报价动作不能包含 NaN 或无穷大。")
         if self.enforce_action_bounds:
             values = np.clip(values, -1.0, 1.0)
+            
         action = float(values[0]), float(values[1])
         self._pending = _PendingLearningStep(
             delivery_start=delivery_start,
@@ -226,21 +229,15 @@ class LearningEpisodeSession:
             available_power_mw=available_power_mw,
         )
         return self._offers(
-            delivery_start, delivery_end, available_power_mw, marginal_cost_eur_per_mwh, action
+            delivery_start, delivery_end, 
+            available_power_mw, 
+            marginal_cost_eur_per_mwh, action
         )
 
-    def record_result(self, market_result: MarketClearingResult) -> None:
+    def record_result(self, market_result: MarketClearingResult):
         pending = self._pending
         if pending is None or pending.delivery_start != market_result.delivery_start:
             return
         pending.result = self._step_result(market_result)
         self._history.append(pending.result.clearing_price_eur_per_mwh or 0.0)
 
-    def finalize(
-        self,
-    ) -> tuple[tuple[LearningStepResult, ...], tuple[LearningTransition, ...]]:
-        self._emit_transition(
-            next_state=(0.0,) * OBSERVATION_SIZE,
-            done=True,
-        )
-        return tuple(self._steps), tuple(self._transitions)

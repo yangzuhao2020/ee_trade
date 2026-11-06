@@ -1,4 +1,4 @@
-"""连续两段报价的随机策略、组回报和 GRPO 更新。"""
+"""连续两段报价的随机策略、串并行轨迹采样、组回报和 GRPO 更新。"""
 
 from dataclasses import dataclass
 from functools import partial
@@ -11,8 +11,9 @@ from torch.nn import functional as F
 
 from ..errors import InputValidationError
 from ..models import LearningConfig
-from .agent import _deterministic_action, _initialize_linear
+from .network_utils import _deterministic_action, _initialize_linear
 from .learning import ACTION_SIZE, OBSERVATION_SIZE
+from .learning_metrics import _metrics
 
 
 class GaussianActor(nn.Module):
@@ -102,6 +103,33 @@ def collect_group(agent, runner, on_episode):
     return GroupBatch(*(torch.stack(values) for values in zip(*trajectories)))
 
 
+def _sample_trajectory(job):
+    config, weights, rng_state, runner, run, episode = job
+    torch.set_num_threads(1)
+    policy = GaussianActor(config.initial_std).eval().requires_grad_(False)
+    policy.load_state_dict(weights)
+    rng = torch.Generator().set_state(rng_state)
+    trajectory, result = _collect_trajectory(policy, rng, runner, torch.device("cpu"))
+    metrics = _metrics(result, run=run, phase="train", episode=episode, gamma=config.gamma)
+    return trajectory, metrics
+
+
+def collect_parallel_group(agent, runner, pool, steps_per_episode, first_episode):
+    """CPU 多进程采样；组内轨迹顺序和随机数序列与串行保持一致。"""
+    config = agent.config
+    weights = {name: value.detach().clone() for name, value in agent.actor.state_dict().items()}
+    jobs = []
+    for index in range(config.group_size):
+        jobs.append((config, weights, agent.rng.get_state(), runner,
+                     agent.run, first_episode + index + 1))
+        # 与串行逐小时 randn(2) 的调用方式一致；预留每条轨迹的随机数。
+        for _ in range(steps_per_episode):
+            torch.randn(ACTION_SIZE, generator=agent.rng, device=agent.device)
+    trajectories, metrics = zip(*pool.map(_sample_trajectory, jobs))
+    batch = GroupBatch(*(torch.stack(values) for values in zip(*trajectories)))
+    return batch, list(metrics)
+
+
 class GRPOAgent:
     def __init__(self, config: LearningConfig, *, seed: int, run: int):
         self.config, self.seed, self.run = config, seed, run
@@ -130,6 +158,7 @@ class GRPOAgent:
         )
         advantages = advantages.flatten()[mask].to(self.device)
         count = len(advantages)
+        
         for _ in range(cfg.update_epochs if count else 0):
             indices = torch.randperm(count, generator=self.rng, device=self.device)
             self.optimizer.zero_grad(set_to_none=True)
@@ -142,13 +171,19 @@ class GRPOAgent:
                 )
                 # 分批累积整组均值梯度；尾批也按实际样本数加权。
                 loss = -surrogate.sum() / count
-                loss.backward()
+                loss.backward() # 反向传播
+                
             nn.utils.clip_grad_norm_(self.actor.parameters(), cfg.max_grad_norm)
-            self.optimizer.step()
+            self.optimizer.step() # 更新参数
+            
             with torch.no_grad():
+                # 限制报价动作的随机波动范围，并计算新旧策略的差异。
                 self.actor.log_std.clamp_(log(cfg.min_std), log(cfg.max_std))
                 distribution = self.actor.distribution(states)
                 kl = kl_divergence(Normal(old_mean, old_std), distribution).sum(-1).mean().item()
+            # 策略变化超过阈值时，提前结束本组更新。
             if kl > cfg.target_kl:
                 break
+            
+        # 更新结束后清除梯度，将参数的 grad 设为 None。
         self.optimizer.zero_grad(set_to_none=True)

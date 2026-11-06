@@ -112,7 +112,6 @@ def clear_pay_as_bid(
         clearing_price_eur_per_mwh=None,
         offers=cleared_offers,
         demand_bids=cleared_demands,
-        marginal_unit_name=None,
         pricing_method="pay_as_bid",
         trades=tuple(trades),
     )

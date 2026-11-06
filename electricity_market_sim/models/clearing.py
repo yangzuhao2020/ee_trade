@@ -106,7 +106,6 @@ class MarketClearingResult:
     clearing_price_eur_per_mwh: float | None
     offers: tuple[ClearedSupplyOffer, ...]
     demand_bids: tuple[ClearedDemandBid, ...]
-    marginal_unit_name: str | None
     pricing_method: str = "merit_order"
     opening_time: datetime | None = None
     trades: tuple[Trade, ...] = ()
@@ -128,8 +127,8 @@ class MarketClearingResult:
             value < -_ENERGY_TOLERANCE_MWH
             for value in (
                 self.cleared_energy_mwh,
-                self.unserved_load_mwh,
-                self.unfulfilled_export_mwh,
+                self.demand_total("unserved_energy_mwh", demand_type="inelastic_load"),
+                self.demand_total("unserved_energy_mwh", bid_type="export"),
             )
         ):
             raise ValueError("市场电量不能为负数。")
@@ -181,14 +180,6 @@ class MarketClearingResult:
         return sum(offer.accepted_energy_mwh for offer in self.offers)
 
     @property
-    def unserved_load_mwh(self) -> float:
-        return self.demand_total("unserved_energy_mwh", demand_type="inelastic_load")
-
-    @property
-    def unfulfilled_export_mwh(self) -> float:
-        return self.demand_total("unserved_energy_mwh", bid_type="export")
-
-    @property
     def duration_hours(self) -> float:
         """交付时长（小时），用于将电量换算为功率。"""
         return hours_between(self.delivery_start, self.delivery_end)
@@ -211,75 +202,11 @@ class MarketClearingResult:
     @property
     def unserved_demand_mwh(self) -> float:
         """除储能充电外全部未被接受的需求，包括对价格敏感的弹性需求报价。
-        储能未成交充电是未执行的充电计划，不属于未满足需求，由 unaccepted_storage_charge_mwh 单独统计。
+        储能未成交充电是未执行的充电计划，不属于未满足需求。
         """
-        return self.demand_total("unserved_energy_mwh") - self.unaccepted_storage_charge_mwh
-
-    @property
-    def requested_storage_charge_mwh(self) -> float:
-        return self.demand_total("bid.volume_mwh", demand_type="storage_charge")
-
-    @property
-    def unaccepted_storage_charge_mwh(self) -> float:
-        return self.demand_total("unserved_energy_mwh", demand_type="storage_charge")
-
-    @property
-    def unaccepted_elastic_demand_mwh(self) -> float:
-        return self.demand_total("unserved_energy_mwh", demand_type="elastic_load")
-
-    @property
-    def requested_inelastic_demand_mwh(self) -> float:
-        return self.demand_total("bid.volume_mwh", demand_type="inelastic_load")
-
-    @property
-    def cleared_inelastic_demand_mwh(self) -> float:
-        return self.demand_total("accepted_energy_mwh", demand_type="inelastic_load")
-
-    @property
-    def requested_elastic_demand_mwh(self) -> float:
-        return self.demand_total("bid.volume_mwh", demand_type="elastic_load")
-
-    @property
-    def cleared_elastic_demand_mwh(self) -> float:
-        return self.demand_total("accepted_energy_mwh", demand_type="elastic_load")
-
-    @property
-    def requested_local_demand_mwh(self) -> float:
-        return self.demand_total("bid.volume_mwh", bid_type="local_load")
-
-    @property
-    def cleared_local_demand_mwh(self) -> float:
-        return self.demand_total("accepted_energy_mwh", bid_type="local_load")
-
-    @property
-    def cleared_export_mwh(self) -> float:
-        return self.demand_total("accepted_energy_mwh", bid_type="export")
-
-    @property
-    def cleared_import_mwh(self) -> float:
-        return sum(
-            offer.accepted_energy_mwh
-            for offer in self.offers
-            if offer.offer.offer_type == "import"
+        return self.demand_total("unserved_energy_mwh") - self.demand_total(
+            "unserved_energy_mwh", demand_type="storage_charge"
         )
-
-    @property
-    def net_exchange_mwh(self) -> float:
-        """正值表示向本地市场的净进口。"""
-        return self.cleared_import_mwh - self.cleared_export_mwh
-
-    @property
-    def import_revenue_eur(self) -> float:
-        import_revenues = (
-            cleared_offer.revenue_eur
-            for cleared_offer in self.offers
-            if cleared_offer.offer.offer_type == "import"
-        )
-        return sum(import_revenues)
-
-    @property
-    def export_payment_eur(self) -> float:
-        return self.demand_total("payment_eur", bid_type="export")
 
     @property
     def transaction_value_eur(self) -> float:

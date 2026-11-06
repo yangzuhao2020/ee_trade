@@ -25,9 +25,7 @@ from .household import (
     HouseholdResult,
     HouseholdDispatchResult,
     HouseholdPlan,
-    HouseholdSavingSummary,
     HouseholdUnit,
-    summarize_household_savings,
 )
 from .industry import (
     IndustrialDevice,

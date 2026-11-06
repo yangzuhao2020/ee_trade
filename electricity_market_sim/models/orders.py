@@ -1,9 +1,8 @@
-"""市场买卖订单及其派生标识与功率。"""
+"""市场买卖订单及其派生分类与标识。"""
 
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite
-from ..utils import hours_between
 
 
 @dataclass(frozen=True)
@@ -53,7 +52,7 @@ class DemandBid:
 
 @dataclass(frozen=True)
 class SupplyOffer:
-    """出清前的卖单；保存申报电量，报告使用的平均功率由电量和时长推导。"""
+    """出清前的卖单，保存申报电量、报价及复杂订单关系。"""
     unit_name: str
     operator: str
     technology: str
@@ -74,7 +73,7 @@ class SupplyOffer:
     parent_bid_id: str | None = None
 
     def __post_init__(self) -> None:
-        """校验交付时长、电量、价格、边际成本和报价类型，以及 V2 的最小接受比例约定。"""
+        """校验交付时长、电量、价格、边际成本和报价类型。"""
 
         if self.delivery_end <= self.delivery_start:
             raise ValueError("卖单的交付时长必须大于 0。")
@@ -86,14 +85,6 @@ class SupplyOffer:
             raise ValueError("卖单边际成本必须是有限值。")
         if self.bid_type not in {"SB", "BB", "LB"}:
             raise ValueError(f"不支持的 bid_type：{self.bid_type!r}。")
-
-    @property
-    def min_acceptance_ratio(self) -> float:
-        return 1.0 if self.bid_type == "BB" else 0.0
-
-    @property
-    def offered_power_mw(self) -> float:
-        return self.offered_energy_mwh / hours_between(self.delivery_start, self.delivery_end)
 
     @property
     def identifier(self) -> str:

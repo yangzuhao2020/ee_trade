@@ -1,27 +1,21 @@
-"""MATD3 / GRPO 从头训练、验证选模及多次独立运行管理。"""
+"""MATD3 / GRPO 算法选择、公共进度显示及多次独立训练管理。"""
 
 import shutil
 import sys
-from functools import partial
 from pathlib import Path
 from time import monotonic
 from typing import Any
 import numpy as np
-from .agent import (
-    MATD3Agent,
-    load_policy,
-    save_checkpoint,
+from .checkpoints import (
     _default_checkpoint_root,
     _write_run_manifest,
 )
 from ..config import load_market_settings
 from ..errors import InputValidationError
-from .learning_metrics import _EpisodeMetrics, _metrics, _write_metrics, _write_run_summary
+from .learning_metrics import _EpisodeMetrics, _write_metrics, _write_run_summary
 from ..models import MarketSettings, SimulationResult
 from ..reporting import write_results
-from ..simulation import simulate_learning_episode, learning_period_settings, market_openings
-from .test import _evaluate_actor_and_baseline
-from .data_coverage import validate_learning_data_coverage
+from ..simulation import learning_period_settings, market_openings
 
 _DEFAULT_INDEPENDENT_RUNS = 1
 
@@ -74,7 +68,7 @@ def _copy_if_distinct(source: Path, destination: Path) -> None:
     shutil.copy2(source, destination)
 
 
-def _train_single_run(
+def _train_independent_run(
     input_path: Path,
     output_path: Path,
     checkpoint_root: Path,
@@ -85,7 +79,7 @@ def _train_single_run(
     training_episodes: int | None = None,
     training_steps: int | None = None,
 ) -> tuple[SimulationResult, list[_EpisodeMetrics], Path, float]:
-    """完成一次统计上独立的 MATD3 训练：只用训练时段更新，只用验证时段选模型。"""
+    """读取配置，调用对应算法完成一次独立训练。"""
 
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
     config = settings.learning_config
@@ -101,107 +95,11 @@ def _train_single_run(
             run=run, seed=seed, steps_per_episode=steps_per_episode,
             training_steps=training_steps,
         )
-    episode_count = (
-        config.training_episodes if training_episodes is None else training_episodes
-    )
-    if episode_count <= 0:
-        raise InputValidationError("Training episodes must be positive.")
-    budget = config.training_steps if training_steps is None else training_steps
-    if budget:
-        if budget <= 0 or budget % steps_per_episode:
-            raise InputValidationError(f"MATD3 training_steps 必须是 {steps_per_episode} 的正整数倍。")
-        episode_count = budget // steps_per_episode
-    elif training_steps is not None:
-        raise InputValidationError("training_steps 必须为正整数。")
-    regular_episode_count = max(0, episode_count - config.initial_experience_episodes)
-    initial_transition_count = (
-        min(episode_count, config.initial_experience_episodes) * steps_per_episode
-    )
-    regular_transition_count = regular_episode_count * steps_per_episode
-    warmup_transitions = max(0, config.batch_size - initial_transition_count - 1)
-    eligible_regular_steps = max(0, regular_transition_count - warmup_transitions)
-    agent = MATD3Agent(
-        config,
-        total_regular_steps=max(1, eligible_regular_steps),
-        seed=seed,
-        run=run,
-    )
-    best_path = checkpoint_root / "best.pt"
-    best_path.unlink(missing_ok=True)
-
-    # 只有训练时段的经验进入经验池；验证时段只运行确定性 Actor。
-    train_episode = partial(simulate_learning_episode, input_path, scenario=scenario, period="train")
-    validation_episode = partial(simulate_learning_episode, input_path, scenario=scenario, period="validation")
-    metrics: list[_EpisodeMetrics] = []
-    best_total_reward = float("-inf")
-    for episode in _training_progress(episode_count, run):
-        initial_experience = episode <= config.initial_experience_episodes
-        training_result = train_episode(
-            lambda state, initial=initial_experience: agent.exploration_action(
-                state, initial_experience=initial
-            ),
-            transition_consumer=lambda transition, enabled=not initial_experience: (
-                agent.observe(transition, train=enabled)
-            ),
-        )
-        metrics.append(
-            _metrics(
-                training_result,
-                run=run,
-                phase="initial_experience" if initial_experience else "train",
-                episode=episode,
-                gamma=config.gamma,
-            )
-        )
-        is_validation_due = episode % config.validation_interval == 0
-        is_last_episode = episode == episode_count
-        should_validate = is_validation_due or is_last_episode
-        if should_validate:
-            validation_result = validation_episode(agent.deterministic_action)
-            validation_metrics = _metrics(
-                validation_result,
-                run=run,
-                phase="validation",
-                episode=episode,
-                gamma=config.gamma,
-            )
-            metrics.append(validation_metrics)
-            # 按验证时段总奖励选模型；打平时保留更早的检查点。
-            if (
-                not initial_experience
-                and validation_metrics.total_reward > best_total_reward
-            ):
-                best_total_reward = validation_metrics.total_reward
-                save_checkpoint(
-                    agent,
-                    best_path,
-                    episode=episode,
-                    validation_total_reward=best_total_reward,
-                )
-
-    if best_total_reward == float("-inf") or not best_path.is_file():
-        raise InputValidationError(
-            "Training did not produce a best checkpoint; increase training_episodes "
-            "or reduce episodes_collecting_initial_experience."
-        )
-
-    action_provider, best_payload = load_policy(config, best_path)
-    validation_result, comparison = _evaluate_actor_and_baseline(
-        action_provider=action_provider,
-        input_path=input_path,
-        output_path=output_path / "validation",
-        scenario=scenario,
-        period="validation",
-        episode=best_payload["episode"],
-        gamma=config.gamma,
-        run=run,
-    )
-    metrics.extend(comparison)
-    return (
-        validation_result,
-        metrics,
-        best_path,
-        best_total_reward,
+    from .matd3_training import train_single_run
+    return train_single_run(
+        input_path, output_path, checkpoint_root, scenario, config=config,
+        run=run, seed=seed, steps_per_episode=steps_per_episode,
+        training_episodes=training_episodes, training_steps=training_steps,
     )
 
 
@@ -226,8 +124,6 @@ def train_learning_scenario(
     if run_count <= 0:
         raise InputValidationError("Independent learning runs must be positive.")
 
-    validate_learning_data_coverage(input_path, settings)
-
     checkpoint_root = _default_checkpoint_root(config, output_path)
     use_run_dirs = run_count > 1
     all_metrics: list[_EpisodeMetrics] = []
@@ -241,7 +137,7 @@ def train_learning_scenario(
             checkpoint_root if not use_run_dirs else checkpoint_root / f"run_{run:02d}"
         )
         seed = _independent_run_seed(settings.seed, run)
-        result, metrics, best_path, best_reward = _train_single_run(
+        result, metrics, best_path, best_reward = _train_independent_run(
             input_path,
             run_output,
             run_checkpoints,
@@ -257,6 +153,7 @@ def train_learning_scenario(
             selected_reward = best_reward
             root_result = result
         del result
+        
         if use_run_dirs:
             _write_metrics(run_output / "learning_metrics.csv", metrics)
         all_metrics.extend(metrics)

@@ -1,8 +1,7 @@
-"""发电机组可用出力与报价生成、策略配置校验、启动成本结算及交付后的运行状态更新。"""
+"""发电机组可用出力与报价生成、策略配置校验及交付后的运行状态更新。"""
 
 from __future__ import annotations
 from collections import defaultdict
-from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING
 from ...bidding import (
@@ -56,52 +55,6 @@ def _validate_strategy_configuration(
             + ", ".join(missing_fields)
             + "."
         )
-
-
-def _apply_startup_costs(
-    market_result: MarketClearingResult,
-    plants: tuple[PowerPlant, ...],
-    runtime_states: dict[str, bool],
-) -> MarketClearingResult:
-    """已成交的产品开始交付时，为需要启动的机组计入启动成本。"""
-
-    accepted_by_plant: dict[str, float] = defaultdict(float)
-    for cleared in market_result.offers:
-        if cleared.offer.offer_type == "power_plant":
-            accepted_by_plant[cleared.offer.unit_name] += cleared.accepted_energy_mwh
-    started_names = {
-        name
-        for name, is_running in runtime_states.items()
-        if not is_running and accepted_by_plant[name] > _POWER_TOLERANCE_MW
-    }
-    if not started_names:
-        return market_result
-    plants_by_name = {plant.name: plant for plant in plants}
-    has_inflexible_offer = {
-        cleared.offer.unit_name
-        for cleared in market_result.offers
-        if cleared.offer.offer_segment
-        in {"inflexible", "block_inflexible", "learning_minimum"}
-    }
-    applied_names: set[str] = set()
-    cleared_offers = []
-    for cleared in market_result.offers:
-        offer = cleared.offer
-        startup_cost = 0.0
-        if (
-            offer.unit_name in started_names
-            and offer.unit_name not in applied_names
-            and offer.offer_type == "power_plant"
-            and (
-                offer.offer_segment
-                in {"inflexible", "block_inflexible", "learning_minimum"}
-                or offer.unit_name not in has_inflexible_offer
-            )
-        ):
-            startup_cost = plants_by_name[offer.unit_name].start_cost_eur
-            applied_names.add(offer.unit_name)
-        cleared_offers.append(replace(cleared, startup_cost_eur=startup_cost))
-    return replace(market_result, offers=tuple(cleared_offers))
 
 
 def _record_runtime_states(

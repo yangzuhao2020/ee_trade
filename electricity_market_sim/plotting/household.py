@@ -1,19 +1,18 @@
 """居民建筑的电价与电池动作、设备功率、SOC，以及与不使用电池基准方案对比的购电成本 PNG 图表。"""
 
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from ..models import (
-    HouseholdResult,
-    summarize_household_savings,
-)
+from ..models import HouseholdResult
 from ..utils import hours_between
 from .common import _format_time_axis, _save_figure
 from .market import _chinese_font_families
 
 
 _POWER_TOLERANCE_MW = 1e-9
+COMPARISON_TOLERANCE = 1e-6
 _COLORS = {
     "forecast": "#F58518",
     "actual_price": "#2F5597",
@@ -24,6 +23,37 @@ _COLORS = {
     "discharge": "#E45756",
     "soc": "#2F5597",
 }
+
+
+def _summarize_household_savings(
+    *,
+    baseline_payment_eur: float,
+    actual_saving_eur: float,
+    heat_differences: Iterable[float],
+    final_soc_difference: float,
+    electricity_differences: Iterable[float] = (),
+) -> dict[str, float | bool | None]:
+    """供 PNG 和交互图共用的节省比例与对照检查；输入为单个居民的时序差值。
+
+    缺供净差仅供参考；逐时段绝对差之和避免不同时段的差异相互抵消。
+    同等服务要求缺供量相同且期末 SOC 不低于基准，剩余电量不折算为金额。
+    """
+    heat = list(heat_differences)
+    electricity = list(electricity_differences)
+    heat_mismatch = sum(abs(value) for value in heat)
+    electricity_mismatch = sum(abs(value) for value in electricity)
+    return {
+        "actual_saving_share": actual_saving_eur / baseline_payment_eur if baseline_payment_eur else None,
+        "unmet_heat_difference_mwh_th": sum(heat),
+        "unmet_heat_mismatch_mwh_th": heat_mismatch,
+        "unmet_electricity_difference_mwh": sum(electricity),
+        "unmet_electricity_mismatch_mwh": electricity_mismatch,
+        "comparable": (
+            heat_mismatch <= COMPARISON_TOLERANCE
+            and electricity_mismatch <= COMPARISON_TOLERANCE
+            and final_soc_difference >= -COMPARISON_TOLERANCE
+        ),
+    }
 
 
 def _by_unit(results) -> dict[str, list]:
@@ -43,10 +73,11 @@ def _active_spans(
     for row in rows:
         if not active(row):
             continue
-        if spans and spans[-1][1] == row.dispatch.plan.delivery_start:
-            spans[-1] = (spans[-1][0], row.dispatch.plan.delivery_end)
+        plan = row.dispatch.plan
+        if spans and spans[-1][1] == plan.delivery_start:
+            spans[-1] = (spans[-1][0], plan.delivery_end)
         else:
-            spans.append((row.dispatch.plan.delivery_start, row.dispatch.plan.delivery_end))
+            spans.append((plan.delivery_start, plan.delivery_end))
     return spans
 
 
@@ -87,8 +118,10 @@ def _plot_household_dispatch(
         if days is not None:
             limit = rows[0].dispatch.plan.delivery_start + timedelta(days=days)
             rows = [row for row in rows if row.dispatch.plan.delivery_start < limit]
+        dispatches = [row.dispatch for row in rows]
+        plans = [dispatch.plan for dispatch in dispatches]
         price_axis, battery_axis, soc_axis, grid_axis = axes[4 * index: 4 * index + 4, 0]
-        edges = [rows[0].dispatch.plan.delivery_start] + [row.dispatch.plan.delivery_end for row in rows]
+        edges = [plans[0].delivery_start] + [plan.delivery_end for plan in plans]
 
         def stepped(values: list[float]) -> list[float]:
             return [*values, values[-1]]
@@ -99,7 +132,7 @@ def _plot_household_dispatch(
             else cost.actual_price_eur_per_mwh
             for cost in rows
         ]
-        durations = [hours_between(row.dispatch.plan.delivery_start, row.dispatch.plan.delivery_end) for row in rows]
+        durations = [hours_between(plan.delivery_start, plan.delivery_end) for plan in plans]
 
         charge_spans = _active_spans(
             rows, lambda row: row.dispatch.battery_charge_power_mw > _POWER_TOLERANCE_MW)
@@ -114,7 +147,7 @@ def _plot_household_dispatch(
                     axis.axvspan(start, end, color=color, alpha=0.10, linewidth=0)
 
         price_axis.step(
-            edges, stepped([row.dispatch.plan.forecast_price_eur_per_mwh for row in rows]),
+            edges, stepped([plan.forecast_price_eur_per_mwh for plan in plans]),
             where="post", color=_COLORS["forecast"], linewidth=1.3, linestyle="--",
             label=f"{unit_name} 预测购电价（优化依据）",
         )
@@ -131,11 +164,11 @@ def _plot_household_dispatch(
         price_axis.legend(loc="upper right", ncol=2, fontsize=8)
 
         battery_axis.fill_between(
-            edges, 0, stepped([row.dispatch.battery_charge_power_mw * 1000 for row in rows]),
+            edges, 0, stepped([dispatch.battery_charge_power_mw * 1000 for dispatch in dispatches]),
             step="post", color=_COLORS["charge"], alpha=0.8, linewidth=0, label="充电",
         )
         battery_axis.fill_between(
-            edges, 0, stepped([-row.dispatch.battery_discharge_power_mw * 1000 for row in rows]),
+            edges, 0, stepped([-dispatch.battery_discharge_power_mw * 1000 for dispatch in dispatches]),
             step="post", color=_COLORS["discharge"], alpha=0.8, linewidth=0, label="放电",
         )
         battery_axis.axhline(0, color="#1F1F1F", linewidth=0.8)
@@ -146,12 +179,13 @@ def _plot_household_dispatch(
 
         soc_times: list[datetime] = []
         soc_values: list[float] = []
-        for row in rows:
-            if not soc_times or soc_times[-1] != row.dispatch.plan.delivery_start:
-                soc_times.append(row.dispatch.plan.delivery_start)
-                soc_values.append(row.dispatch.soc_before * 100)
-            soc_times.append(row.dispatch.plan.delivery_end)
-            soc_values.append(row.dispatch.soc_after * 100)
+        for dispatch in dispatches:
+            plan = dispatch.plan
+            if not soc_times or soc_times[-1] != plan.delivery_start:
+                soc_times.append(plan.delivery_start)
+                soc_values.append(dispatch.soc_before * 100)
+            soc_times.append(plan.delivery_end)
+            soc_values.append(dispatch.soc_after * 100)
         soc_axis.plot(soc_times, soc_values, color=_COLORS["soc"], linewidth=1.5)
         soc_axis.set_title("电池 SOC", loc="left", fontsize=10)
         soc_axis.set_ylabel("SOC（%）")
@@ -160,8 +194,8 @@ def _plot_household_dispatch(
 
         grid_axis.fill_between(
             edges,
-            stepped([row.dispatch.grid_power_bounds_mw[0] for row in rows]),
-            stepped([row.dispatch.grid_power_bounds_mw[1] for row in rows]),
+            stepped([dispatch.grid_power_bounds_mw[0] for dispatch in dispatches]),
+            stepped([dispatch.grid_power_bounds_mw[1] for dispatch in dispatches]),
             step="post", color=_COLORS["flexibility"], alpha=0.45, linewidth=0,
             label="灵活性区间（成本容忍度内）",
         )
@@ -208,10 +242,6 @@ def _plot_household_savings(
 
     costs_by_unit = _by_unit(results)
     household_names = sorted(costs_by_unit)
-    summaries = {
-        summary.unit_name: summary
-        for summary in summarize_household_savings(results)
-    }
     figure, axes = pyplot.subplots(
         len(household_names),
         1,
@@ -224,12 +254,21 @@ def _plot_household_savings(
         rows = costs_by_unit[unit_name]
         cumulative_axis = axes[index, 0]
 
-        summary = summaries[unit_name]
         times = [rows[0].dispatch.plan.delivery_start] + [row.dispatch.plan.delivery_end for row in rows]
         actual = [0.0]
         for row in rows:
             actual.append(actual[-1] + row.actual_saving_eur)
-        share = summary.actual_saving_share or 0.0
+        baseline = sum(row.baseline_payment_eur for row in rows)
+        saving = baseline - sum(row.payment_eur for row in rows)
+        soc_gap = rows[-1].dispatch.soc_after - rows[-1].baseline.soc_after
+        summary = _summarize_household_savings(
+            baseline_payment_eur=baseline,
+            actual_saving_eur=saving,
+            heat_differences=(row.dispatch.unmet_heat_mwh_th - row.baseline.unmet_heat_mwh_th for row in rows),
+            final_soc_difference=soc_gap,
+        )
+        comparable = summary["comparable"]
+        share = summary["actual_saving_share"] or 0.0
         cumulative_axis.plot(
             times, actual, color=_COLORS["charge"], linewidth=1.8,
             label="实际节省（按实际成交价）",
@@ -237,24 +276,24 @@ def _plot_household_savings(
         cumulative_axis.axhline(0, color="#1F1F1F", linewidth=0.8)
         cumulative_axis.text(
             0.01, 0.95,
-            f"实际节省 {summary.actual_saving_eur:,.2f} EUR（占基准支付 {share:.2%}）\n"
-            f"基准支付 {summary.baseline_payment_eur:,.2f} EUR\n"
-            + ("对照可比" if summary.comparable
+            f"实际节省 {saving:,.2f} EUR（占基准支付 {share:.2%}）\n"
+            f"基准支付 {baseline:,.2f} EUR\n"
+            + ("对照可比" if comparable
                else "对照不可比：实际节省不构成同等服务下的节省")
-            + f"\n缺热量逐时段不一致 {summary.unmet_heat_mismatch_mwh_th:.6f} MWh_th"
-            + f"（净差 {summary.unmet_heat_difference_mwh_th:+.6f}）"
-            + f"\n期末 SOC 差 {summary.final_soc_difference * 100:+.2f} 个百分点",
+            + f"\n缺热量逐时段不一致 {summary['unmet_heat_mismatch_mwh_th']:.6f} MWh_th"
+            + f"（净差 {summary['unmet_heat_difference_mwh_th']:+.6f}）"
+            + f"\n期末 SOC 差 {soc_gap * 100:+.2f} 个百分点",
             transform=cumulative_axis.transAxes, ha="left", va="top", fontsize=10,
             bbox={
                 "boxstyle": "round,pad=0.4", "facecolor": "white",
-                "edgecolor": "#D1D5DB" if summary.comparable else _COLORS["discharge"],
+                "edgecolor": "#D1D5DB" if comparable else _COLORS["discharge"],
             },
         )
         cumulative_axis.set_title(
             f"{unit_name}：相对不使用电池的累计节省"
-            + ("" if summary.comparable else "（对照不可比）"),
+            + ("" if comparable else "（对照不可比）"),
             loc="left", fontsize=10,
-            color="#1F1F1F" if summary.comparable else _COLORS["discharge"],
+            color="#1F1F1F" if comparable else _COLORS["discharge"],
         )
         cumulative_axis.set_ylabel("累计节省（EUR）")
         cumulative_axis.grid(axis="y", alpha=0.25)

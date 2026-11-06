@@ -440,7 +440,6 @@ def _complex_results(
                 clearing_price_eur_per_mwh=prices[product],
                 offers=cleared_offers,
                 demand_bids=cleared_demands,
-                marginal_unit_name=None,
                 pricing_method="dual",
             )
         )

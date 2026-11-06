@@ -85,33 +85,35 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     market_result.requested_demand_mwh
                 ),
                 "requested_local_demand_energy_mwh": _number(
-                    market_result.requested_local_demand_mwh
+                    market_result.demand_total("bid.volume_mwh", bid_type="local_load")
                 ),
                 "cleared_local_demand_energy_mwh": _number(
-                    market_result.cleared_local_demand_mwh
+                    market_result.demand_total("accepted_energy_mwh", bid_type="local_load")
                 ),
                 "requested_inelastic_demand_mwh": _number(
-                    market_result.requested_inelastic_demand_mwh
+                    market_result.demand_total("bid.volume_mwh", demand_type="inelastic_load")
                 ),
                 "cleared_inelastic_demand_mwh": _number(
-                    market_result.cleared_inelastic_demand_mwh
+                    market_result.demand_total("accepted_energy_mwh", demand_type="inelastic_load")
                 ),
                 "requested_elastic_demand_mwh": _number(
-                    market_result.requested_elastic_demand_mwh
+                    market_result.demand_total("bid.volume_mwh", demand_type="elastic_load")
                 ),
                 "cleared_elastic_demand_mwh": _number(
-                    market_result.cleared_elastic_demand_mwh
+                    market_result.demand_total("accepted_energy_mwh", demand_type="elastic_load")
                 ),
                 "unaccepted_elastic_demand_mwh": _number(
-                    market_result.unaccepted_elastic_demand_mwh
+                    market_result.demand_total("unserved_energy_mwh", demand_type="elastic_load")
                 ),
                 "cleared_energy_mwh": _number(market_result.cleared_energy_mwh),
-                "unserved_load_mwh": _number(market_result.unserved_load_mwh),
+                "unserved_load_mwh": _number(
+                    market_result.demand_total("unserved_energy_mwh", demand_type="inelastic_load")
+                ),
                 "unserved_total_demand_mwh": _number(
                     market_result.unserved_demand_mwh
                 ),
                 "unaccepted_storage_charge_mwh": _number(
-                    market_result.unaccepted_storage_charge_mwh
+                    market_result.demand_total("unserved_energy_mwh", demand_type="storage_charge")
                 ),
                 "clearing_price_eur_per_mwh": _optional_number(
                     market_result.clearing_price_eur_per_mwh
@@ -163,14 +165,14 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     "side": "sell",
                     "bid_id": offer.complex_identifier,
                     "bid_type": offer.bid_type,
-                    "min_acceptance_ratio": _number(offer.min_acceptance_ratio),
+                    "min_acceptance_ratio": _number(1.0 if offer.bid_type == "BB" else 0.0),
                     "parent_bid_id": offer.parent_bid_id,
                     "offer_segment": offer.offer_segment,
                     "marginal_cost_eur_per_mwh": _number(
                         offer.marginal_cost_eur_per_mwh
                     ),
                     "bid_price_eur_per_mwh": _number(offer.bid_price_eur_per_mwh),
-                    "offered_power_mw": _number(offer.offered_power_mw),
+                    "offered_power_mw": _number(offer.offered_energy_mwh / duration_hours),
                     "offered_energy_mwh": _number(offer.offered_energy_mwh),
                     "accepted_power_mw": _number(cleared.accepted_power_mw),
                     "accepted_energy_mwh": _number(cleared.accepted_energy_mwh),
@@ -197,7 +199,8 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                 cleared.offer.offered_energy_mwh for cleared in cleared_offers
             )
             offered_power_mw = sum(
-                cleared.offer.offered_power_mw for cleared in cleared_offers
+                cleared.offer.offered_energy_mwh / duration_hours
+                for cleared in cleared_offers
             )
             accepted_energy_mwh = sum(
                 cleared.accepted_energy_mwh for cleared in cleared_offers
@@ -275,8 +278,18 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         if import_offer is not None or export_bid is not None:
             if import_offer is None or export_bid is None:
                 raise ValueError("An Exchange market result must contain both orders.")
-            import_revenue_eur = market_result.import_revenue_eur
-            export_payment_eur = market_result.export_payment_eur
+            import_revenue_eur = sum(
+                cleared.revenue_eur
+                for cleared in market_result.offers
+                if cleared.offer.offer_type == "import"
+            )
+            export_payment_eur = market_result.demand_total("payment_eur", bid_type="export")
+            # 正值表示向本地市场的净进口。
+            net_exchange_mwh = sum(
+                cleared.accepted_energy_mwh
+                for cleared in market_result.offers
+                if cleared.offer.offer_type == "import"
+            ) - market_result.demand_total("accepted_energy_mwh", bid_type="export")
             exchange_rows.append(
                 {
                     **product_columns,
@@ -285,7 +298,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     "exchange_name": import_offer.offer.unit_name,
                     "exchange_operator": import_offer.offer.operator,
                     "offered_import_power_mw": _number(
-                        import_offer.offer.offered_power_mw
+                        import_offer.offer.offered_energy_mwh / duration_hours
                     ),
                     "cleared_import_power_mw": _number(
                         import_offer.accepted_power_mw
@@ -297,7 +310,7 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
                     "unfulfilled_export_mwh": _number(
                         export_bid.unserved_energy_mwh
                     ),
-                    "net_exchange_mwh": _number(market_result.net_exchange_mwh),
+                    "net_exchange_mwh": _number(net_exchange_mwh),
                     "import_revenue_eur": _number(import_revenue_eur),
                     "export_payment_eur": _number(export_payment_eur),
                     "exchange_market_cash_flow_eur": _number(
@@ -370,34 +383,28 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         )
         totals["profit_eur"] += storage_result.net_cash_flow_eur
 
-    household_rows = [
-        {
-            "delivery_start": format_timestamp(result.dispatch.plan.delivery_start),
-            "delivery_end": format_timestamp(result.dispatch.plan.delivery_end),
-            "unit_name": result.dispatch.plan.unit_name,
-            "forecast_price_eur_per_mwh": _number(
-                result.dispatch.plan.forecast_price_eur_per_mwh
-            ),
-            "heat_demand_mw_th": _number(result.dispatch.plan.heat_demand_mw_th),
+    household_rows = []
+    for result in simulation_result.household_results:
+        dispatch = result.dispatch
+        plan = dispatch.plan
+        baseline = result.baseline
+        household_rows.append({
+            "delivery_start": format_timestamp(plan.delivery_start),
+            "delivery_end": format_timestamp(plan.delivery_end),
+            "unit_name": plan.unit_name,
+            "forecast_price_eur_per_mwh": _number(plan.forecast_price_eur_per_mwh),
+            "heat_demand_mw_th": _number(plan.heat_demand_mw_th),
             "fixed_power_mw": "0.000000",
-            "planned_grid_power_mw": _number(result.dispatch.plan.planned_grid_power_mw),
-            "minimum_grid_power_mw": _number(
-                result.dispatch.grid_power_bounds_mw[0]
-            ),
-            "maximum_grid_power_mw": _number(
-                result.dispatch.grid_power_bounds_mw[1]
-            ),
-            "heat_pump_power_mw": _number(result.dispatch.heat_pump_power_mw),
-            "battery_charge_power_mw": _number(
-                result.dispatch.battery_charge_power_mw
-            ),
-            "battery_discharge_power_mw": _number(
-                result.dispatch.battery_discharge_power_mw
-            ),
-            "soc_before": _number(result.dispatch.soc_before),
-            "soc_after": _number(result.dispatch.soc_after),
+            "planned_grid_power_mw": _number(plan.planned_grid_power_mw),
+            "minimum_grid_power_mw": _number(dispatch.grid_power_bounds_mw[0]),
+            "maximum_grid_power_mw": _number(dispatch.grid_power_bounds_mw[1]),
+            "heat_pump_power_mw": _number(dispatch.heat_pump_power_mw),
+            "battery_charge_power_mw": _number(dispatch.battery_charge_power_mw),
+            "battery_discharge_power_mw": _number(dispatch.battery_discharge_power_mw),
+            "soc_before": _number(dispatch.soc_before),
+            "soc_after": _number(dispatch.soc_after),
             "unmet_electricity_mwh": "0.000000",
-            "unmet_heat_mwh_th": _number(result.dispatch.unmet_heat_mwh_th),
+            "unmet_heat_mwh_th": _number(dispatch.unmet_heat_mwh_th),
             "accepted_grid_energy_mwh": _number(result.accepted_grid_energy_mwh),
             "actual_price_eur_per_mwh": _optional_number(result.actual_price_eur_per_mwh),
             "payment_eur": _number(result.payment_eur),
@@ -406,11 +413,9 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "actual_saving_eur": _number(result.actual_saving_eur),
             "forecast_saving_eur": _number(result.forecast_saving_eur),
             "baseline_unmet_electricity_mwh": "0.000000",
-            "baseline_unmet_heat_mwh_th": _number(result.baseline.unmet_heat_mwh_th),
-            "baseline_soc_after": _number(result.baseline.soc_after),
-        }
-        for result in simulation_result.household_results
-    ]
+            "baseline_unmet_heat_mwh_th": _number(baseline.unmet_heat_mwh_th),
+            "baseline_soc_after": _number(baseline.soc_after),
+        })
     industry_rows = [
         {
             "datetime": format_timestamp(result.plan.delivery_start),
@@ -433,8 +438,12 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
             "maximum_power_mw": _number(
                 result.plan.maximum_power_mw
             ),
-            "flex_up_mw": _number(result.plan.flex_up_mw),
-            "flex_down_mw": _number(result.plan.flex_down_mw),
+            "flex_up_mw": _number(
+                result.plan.maximum_power_mw - result.plan.planned_grid_power_mw
+            ),
+            "flex_down_mw": _number(
+                result.plan.planned_grid_power_mw - result.plan.minimum_power_mw
+            ),
         }
         for result in simulation_result.industry_results
     ]

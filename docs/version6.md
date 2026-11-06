@@ -192,12 +192,11 @@ $$
 | 位置 | 实现 |
 | --- | --- |
 | `deep_learning/learning.py` 与市场模块 | 复用观测、报价、出清和奖励语义 |
-| [grpo_agent.py](../electricity_market_sim/deep_learning/grpo_agent.py) | 随机 Actor、组采样缓存、回报/优势计算、裁剪更新 |
-| [grpo_sampling.py](../electricity_market_sim/deep_learning/grpo_sampling.py) | CPU 并行采样、随机流分配和按轨迹编号合并 |
+| [grpo_agent.py](../electricity_market_sim/deep_learning/grpo_agent.py) | 随机 Actor、串并行组采样、随机流分配、回报/优势计算、裁剪更新 |
 | [grpo_training.py](../electricity_market_sim/deep_learning/grpo_training.py) | 从头按完整组训练，按配置的组间隔验证选模 |
 | 学习配置与入口 | 支持 `matd3` / `grpo` 分支，按算法校验参数，不能仅修改算法名字就共用原训练循环 |
 | 评估及指标模块 | 复用确定性策略评估、边际成本基线和经济指标；GRPO 诊断另存 |
-| 检查点与输出目录 | 保存策略权重、算法名、分布和优势版本、数据时段；按算法隔离 |
+| [checkpoints.py](../electricity_market_sim/deep_learning/checkpoints.py) 与输出目录 | 保存策略权重、算法名、分布和优势版本、数据时段；按算法隔离 |
 
 MATD3 和 GRPO 每次都从头训练，只保存验证奖励最高的 `best.pt`，供后续评估和独立测试；不保存优化器、经验池或随机状态，不支持断点续训。`--checkpoint` 仅用于评估和测试，两种算法的模型不能直接互换。
 

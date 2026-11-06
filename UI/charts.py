@@ -8,6 +8,11 @@ import plotly.graph_objects as go
 from plotly.colors import hex_to_rgb, qualitative
 from plotly.subplots import make_subplots
 
+from electricity_market_sim.plotting.household import (
+    COMPARISON_TOLERANCE,
+    _summarize_household_savings,
+)
+
 ENERGY_TOLERANCE_MWH = 1e-7
 MAX_DISPATCH_UNITS = 5
 MAX_OPERATORS = 5
@@ -60,7 +65,6 @@ HOUSEHOLD_SAVING_COLUMNS = (
     "unmet_electricity_mwh", "baseline_unmet_electricity_mwh",
     "unmet_heat_mwh_th", "baseline_unmet_heat_mwh_th", "soc_after", "baseline_soc_after",
 )
-COMPARISON_TOLERANCE = 1e-6
 
 
 def has_results(run_dir: Path) -> bool:
@@ -502,23 +506,24 @@ def household_savings(tables: dict[str, pd.DataFrame]) -> go.Figure:
 
         baseline = rows["baseline_payment_eur"].sum()
         saving = rows["actual_saving_eur"].sum()
-        # 逐时段比较，不同时段的缺供差不会相互抵消；净差仅供参考。
-        electricity_gap = rows["unmet_electricity_mwh"] - rows["baseline_unmet_electricity_mwh"]
-        heat_gap = rows["unmet_heat_mwh_th"] - rows["baseline_unmet_heat_mwh_th"]
-        electricity_mismatch, heat_mismatch = electricity_gap.abs().sum(), heat_gap.abs().sum()
         soc_gap = rows["soc_after"].iloc[-1] - rows["baseline_soc_after"].iloc[-1]
-        comparable = (
-            electricity_mismatch <= COMPARISON_TOLERANCE
-            and heat_mismatch <= COMPARISON_TOLERANCE
-            and soc_gap >= -COMPARISON_TOLERANCE
+        summary = _summarize_household_savings(
+            baseline_payment_eur=baseline,
+            actual_saving_eur=saving,
+            heat_differences=rows["unmet_heat_mwh_th"] - rows["baseline_unmet_heat_mwh_th"],
+            final_soc_difference=soc_gap,
+            electricity_differences=rows["unmet_electricity_mwh"] - rows["baseline_unmet_electricity_mwh"],
         )
+        comparable = summary["comparable"]
         all_comparable &= comparable
-        share = f"（{saving / baseline:.2%}）" if baseline else ""
+        share = f"（{summary['actual_saving_share']:.2%}）" if baseline else ""
         verdict = "对照可比" if comparable else "<b>对照不可比：实际节省不构成同等服务下的节省</b>"
         notes.append(
             f"{name}：实际节省 {saving:,.2f} 欧元{share}；"
-            f"{verdict}<br>缺电量逐时段不一致 {electricity_mismatch:.6f} MWh（净差 {electricity_gap.sum():+.6f}），"
-            f"缺热量逐时段不一致 {heat_mismatch:.6f} MWh_th（净差 {heat_gap.sum():+.6f}），"
+            f"{verdict}<br>缺电量逐时段不一致 {summary['unmet_electricity_mismatch_mwh']:.6f} MWh"
+            f"（净差 {summary['unmet_electricity_difference_mwh']:+.6f}），"
+            f"缺热量逐时段不一致 {summary['unmet_heat_mismatch_mwh_th']:.6f} MWh_th"
+            f"（净差 {summary['unmet_heat_difference_mwh_th']:+.6f}），"
             f"期末 SOC 差 {soc_gap * 100:+.2f} 个百分点"
         )
     figure.add_hline(y=0, line_color="#1F1F1F", line_width=0.8)

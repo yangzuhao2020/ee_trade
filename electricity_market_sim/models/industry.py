@@ -61,14 +61,6 @@ class IndustrialPlan:
     def planned_energy_mwh(self) -> float:
         return self.planned_grid_power_mw * hours_between(self.delivery_start, self.delivery_end)
 
-    @property
-    def flex_up_mw(self) -> float:
-        return self.maximum_power_mw - self.planned_grid_power_mw
-
-    @property
-    def flex_down_mw(self) -> float:
-        return self.planned_grid_power_mw - self.minimum_power_mw
-
 
 @dataclass(frozen=True)
 class IndustrialDispatchResult:

@@ -77,11 +77,12 @@ def _forecast_starts(
     requires_storage_price_forecast: bool = False,
     hard_forecast_horizon: bool = False,
 ) -> set[datetime]:
-    """返回各个已启用的策略类别为给定交付时段所需的预测时间点。
-    机组需要从交付开始时刻起共 _FORECAST_HOURS + 1 个小时的预测。
-    储能额外需要以交付时刻为中心的对称窗口，并截取在
-    仿真时间范围内。hard_forecast_horizon 为 True 时（如学习时段），所有窗口
-    进一步截取在 settings.end 之前，不向时段边界外读取真实数据。
+    """汇总机组和储能报价所需的参考电价时间点。
+    启用相应预测时，机组取交付时刻及之后 12 小时；储能取交付时刻前后
+    各 12 小时，用于计算周边均价，判断充放电方向，均按小时取点。
+    前后均相对于交付时刻，当前统一使用预测价格，不混用历史成交价。
+    储能的时间点限制在仿真起止范围内。
+    若 hard_forecast_horizon=True，所有时间点都必须早于仿真结束时间。
     """
 
     starts: set[datetime] = set()
@@ -115,9 +116,11 @@ def _opening_coverage_issues(
     requires_storage_price_forecast: bool = False,
     hard_forecast_horizon: bool = False,
 ) -> list[str]:
-    """检查交付及机组、储能价格预测所需的数据。"""
-
-    issues: list[str] = []
+    """检查本次开市的交付是否超出仿真结束时间，以及交付和电价预测所需的
+    负荷、已提供的机组可用率及已启用的进出口数据是否齐全。
+    返回问题描述列表；无问题时返回空列表。
+    """
+    issues = []
     delivery_times = {delivery_start for delivery_start, _ in opening.products}
     beyond_end = [
         (delivery_start, delivery_end)
@@ -125,11 +128,8 @@ def _opening_coverage_issues(
         if delivery_end > settings.end
     ]
     if beyond_end:
-        issues.append(
-            "交付时段超出仿真结束时间: "
-            + ", ".join(
-                f"{format_timestamp(start)}–{format_timestamp(end)}" for start, end in beyond_end
-            )
+        issues.append("交付时段超出仿真结束时间: " + ", ".join(
+                f"{format_timestamp(start)}–{format_timestamp(end)}" for start, end in beyond_end)
         )
     forecast_times = _forecast_starts(
         delivery_times,
@@ -143,14 +143,11 @@ def _opening_coverage_issues(
     def add_missing_issue(source: str, missing: list[datetime]) -> None:
         if not missing:
             return
-        kind = (
-            "报价预测数据"
+        kind = ("报价预测数据"
             if any(time in forecast_times for time in missing)
-            else "交付数据"
-        )
+            else "交付数据")
         issues.append(
-            f"{kind}缺少 {source}: " + ", ".join(format_timestamp(time) for time in missing)
-        )
+            f"{kind}缺少 {source}: " + ", ".join(format_timestamp(time) for time in missing))
 
     for demand_unit in demand_units:
         if demand_unit.is_elastic:

@@ -1,7 +1,7 @@
 """采用稳定排序的单节点、单产品统一价格出清。
 按报价排序撮合买卖订单，允许订单部分成交。
 以已成交卖单的最高报价作为统一结算价；无成交时价格为 0。
-返回成交记录、未满足需求和边际参与者等单时段出清结果。"""
+返回成交记录和未满足需求等单时段出清结果。"""
 
 from collections import defaultdict
 from ..models import (
@@ -56,7 +56,6 @@ def clear_pay_as_clear(
     remaining_supply = (
         ordered_supply[0].offered_energy_mwh if ordered_supply else 0.0
     )
-    marginal_unit_name: str | None = None
     accepted_by_demand_index = [0.0] * len(demand_bids)
     matched_orders: list[tuple[DemandBid, SupplyOffer, float]] = []
 
@@ -76,9 +75,6 @@ def clear_pay_as_clear(
 
             remaining_demand -= accepted # 这个需求单还剩多少电量没满足。
             remaining_supply -= accepted # 这个供给报价还剩多少电量没成交。
-            if accepted > _EPSILON:
-                marginal_unit_name = offer.unit_name
-
             if remaining_supply <= _EPSILON:
                 supply_index += 1
                 if supply_index < len(ordered_supply): # 避免最后一单越界
@@ -127,6 +123,5 @@ def clear_pay_as_clear(
         clearing_price_eur_per_mwh=clearing_price,
         offers=cleared_offers,
         demand_bids=cleared_demands,
-        marginal_unit_name=marginal_unit_name,
         trades=trades,
     )

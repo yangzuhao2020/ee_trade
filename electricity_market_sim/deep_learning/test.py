@@ -1,7 +1,7 @@
 """第五版学习策略的确定性评估、独立测试及 Actor 与边际成本基线对比。"""
 
 from pathlib import Path
-from .agent import (
+from .checkpoints import (
     load_policy,
     _RUN_MANIFEST,
     _default_checkpoint_root,

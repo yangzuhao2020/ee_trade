@@ -9,9 +9,8 @@ def _elastic_demand_bids(
     demand_unit,
     delivery_start: datetime,
     delivery_end: datetime,
-) -> list[DemandBid]:
+):
     """将 V2 的等弹性需求曲线离散化为价格逐段递减的买单。"""
-
     duration_hours = hours_between(delivery_start, delivery_end)
     maximum_power = demand_unit.max_power_mw
     maximum_price = demand_unit.max_price_eur_per_mwh
@@ -19,6 +18,7 @@ def _elastic_demand_bids(
     incremental_power = (maximum_power - first_power) / (demand_unit.num_bids - 1)
     timestamp = delivery_start.isoformat()
     bids: list[DemandBid] = []
+    
     for index in range(demand_unit.num_bids):
         if index == 0:
             power = first_power
@@ -52,9 +52,8 @@ def _demand_bids_for_product(
     delivery_end: datetime,
     maximum_bid_price: float, # 刚性负载最高意愿的买单。
     include_elastic: bool = True,
-) -> list[DemandBid]:
-    """为指定交付时段生成需求侧买单，供后续市场出清使用"""
-
+):
+    """为指定交付时段汇总买单：刚性负荷按最高买价申报，弹性负荷调用上面的函数，再加入计划出口需求"""
     duration_hours = hours_between(delivery_start, delivery_end)
     demand_bids: list[DemandBid] = []
     for demand_unit in demand_units:
@@ -99,7 +98,12 @@ def _exchange_import_offer(
     exchange_schedule: tuple[float, float],
     delivery_start: datetime,
     delivery_end: datetime,
-) -> SupplyOffer:
+):
+    """为指定交付时段生成进口卖单，作为本地市场供给。
+
+    exchange_schedule 为（进口功率、出口功率），单位 MW；
+    取进口功率乘以交付时长得到申报电量（MWh），按交换单元的进口价格报价。
+    """
     import_power, _ = exchange_schedule
     duration_hours = hours_between(delivery_start, delivery_end)
     identifier = f"{exchange_unit.name}::import::{delivery_start.isoformat()}"

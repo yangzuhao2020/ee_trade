@@ -15,14 +15,11 @@ from ..inputs import (
 )
 from ..models import (
     IndustrialUnit,
-    MarketClearingResult,
     MarketOpening,
     MarketSettings,
     SimulationResult,
-    StorageDispatchResult,
 )
 from .base_market import BaseMarket
-from .eom import ScheduledProductKey
 
 
 def _load_industry_inputs(

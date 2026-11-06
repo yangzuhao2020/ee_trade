@@ -5,19 +5,22 @@ import warnings
 from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
-from typing import Any
 import yaml
 from ..errors import InputValidationError
 from ..models import LEARNING_PERIOD_NAMES, LearningConfig, MarketSettings
 
+# 匹配数值与时间单位，如 15min、1.5h。
 _DURATION_PATTERN = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>min|m|h|d)$")
+# 同目录下的算法默认配置，场景配置可覆盖。
 _MATD3_DEFAULTS_PATH = Path(__file__).with_name("matd3.yaml")
 _GRPO_DEFAULTS_PATH = Path(__file__).with_name("grpo.yaml")
+# 场景专属设置，包括学习开关、时段和策略路径，禁止写入公共默认配置。
 _LEARNING_SCENE_FIELDS = frozenset({
     "learning_mode", "periods",
     "trained_policies_save_path", "trained_policies_load_path",
 })
-_LEARNING_PARAMETER_FIELDS = frozenset({
+# 通用及 MATD3 训练参数字段，与场景字段合并后用于识别未知配置项。
+_COMMON_AND_MATD3_PARAMETER_FIELDS = frozenset({
     "algorithm", "actor_architecture", "device", "learning_rate",
     "training_episodes", "episodes_collecting_initial_experience",
     "replay_buffer_size", "batch_size", "gamma", "train_freq", "gradient_steps",
@@ -31,10 +34,10 @@ _GRPO_PARAMETER_FIELDS = frozenset({
     "clip_epsilon", "target_kl", "initial_std", "min_std", "max_std", "advantage_threshold",
     "max_grad_norm", "weight_decay", "min_lr_ratio",
 })
-_LEARNING_FIELDS = _LEARNING_PARAMETER_FIELDS | _LEARNING_SCENE_FIELDS | _GRPO_PARAMETER_FIELDS
+_LEARNING_FIELDS = _COMMON_AND_MATD3_PARAMETER_FIELDS | _LEARNING_SCENE_FIELDS | _GRPO_PARAMETER_FIELDS
 
 
-def _warn_unknown_learning_fields(raw: dict[str, Any], source: str) -> None:
+def _warn_unknown_learning_fields(raw, source):
     """仅由 _load_learning_config 调用，警告位置指向 load_market_settings 的调用方。"""
     unknown = raw.keys() - _LEARNING_FIELDS
     if unknown:
@@ -46,7 +49,7 @@ def _warn_unknown_learning_fields(raw: dict[str, Any], source: str) -> None:
         )
 
 
-def _load_learning_defaults(path: Path) -> dict[str, Any]:
+def _load_learning_defaults(path):
     """读取与加载器同目录的公共训练参数；场景专属设置不能作为默认值。"""
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -63,9 +66,8 @@ def _load_learning_defaults(path: Path) -> dict[str, Any]:
     return raw
 
 
-def parse_duration(value: Any, field_name: str) -> timedelta:
+def parse_duration(value, field_name):
     """解析 YAML 文件中使用的简写时长（如 '1h'、'15m'）。"""
-
     match = _DURATION_PATTERN.fullmatch(value.strip())
     if not match:
         raise InputValidationError(
@@ -85,13 +87,13 @@ def parse_duration(value: Any, field_name: str) -> timedelta:
     return duration
 
 
-def _parse_integer(value: Any, field_name: str, *, minimum: int = 1) -> int:
+def _parse_integer(value, field_name, *, minimum=1):
     if type(value) is not int or value < minimum:
         raise InputValidationError(f"{field_name} 必须是不小于 {minimum} 的整数。")
     return value
 
 
-def _parse_datetime(value: Any, field_name: str) -> datetime:
+def _parse_datetime(value, field_name):
     if isinstance(value, datetime):
         return value
     try:
@@ -102,21 +104,7 @@ def _parse_datetime(value: Any, field_name: str) -> datetime:
         ) from exc
 
 
-def _parse_additional_fields(eom: dict[str, Any]) -> frozenset[str]:
-    """读取订单元数据字段（additional_fields），不会静默丢弃这些字段。"""
-    raw_fields = eom.get("additional_fields", [])
-    if not isinstance(raw_fields, list) or any(
-        not isinstance(value, str) or not value.strip() for value in raw_fields
-    ):
-        raise InputValidationError(
-            "markets_config.EOM.additional_fields 必须是由非空字符串组成的列表。"
-        )
-    return frozenset(value.strip() for value in raw_fields)
-
-
-def _load_learning_periods(
-    raw: Any, *, required: bool
-) -> dict[str, tuple[datetime, datetime]] | None:
+def _load_learning_periods(raw, *, required):
     """读取按交付时间定义的训练、验证、测试时段，并检查顺序与重叠。"""
     if raw is None:
         if required:
@@ -153,7 +141,7 @@ def _load_learning_periods(
     return periods
 
 
-def _validate_learning_period_alignment(settings: MarketSettings) -> None:
+def _validate_learning_period_alignment(settings):
     """检查各时段边界都落在交付产品的整数倍时刻上。"""
     for name, (start, end) in settings.learning_config.periods.items():
         for label, moment in (("start", start), ("end", end)):
@@ -167,9 +155,7 @@ def _validate_learning_period_alignment(settings: MarketSettings) -> None:
                 )
 
 
-def _load_learning_config(
-    data: dict[str, Any], *, time_step: timedelta, source: str
-) -> LearningConfig | None:
+def _load_learning_config(data, *, time_step, source):
     raw = data.get("learning_config")
     if raw is None:
         return None
@@ -184,7 +170,7 @@ def _load_learning_config(
         _warn_unknown_learning_fields(defaults, str(defaults_path))
         raw = {**defaults, **raw}
     nulls = sorted(
-        name for name in _LEARNING_PARAMETER_FIELDS | _GRPO_PARAMETER_FIELDS
+        name for name in _COMMON_AND_MATD3_PARAMETER_FIELDS | _GRPO_PARAMETER_FIELDS
         if name in raw and raw[name] is None
     )
     if nulls:
@@ -192,14 +178,14 @@ def _load_learning_config(
             f"{source} 的 learning_config 参数不能为 null（需要公共默认值时请省略该字段）："
             + ", ".join(nulls))
 
-    def required(name: str) -> Any:
+    def required(name):
         if name not in raw:
             raise InputValidationError(
                 f"learning_config 缺少必填字段：{name}"
             )
         return raw[name]
 
-    def optional_path(name: str) -> str | None:
+    def optional_path(name):
         value = raw.get(name)
         if value is None:
             return None
@@ -326,7 +312,7 @@ def _validate_grpo_config(config):
         raise InputValidationError("GRPO 要求 gamma 在 [0, 1] 内。")
 
 
-def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSettings:
+def load_market_settings(config_path, scenario="base"):
     """读取一个场景的 EOM 市场配置"""
     if not config_path.is_file():
         raise InputValidationError(f"缺少配置文件：{config_path}")
@@ -355,7 +341,7 @@ def load_market_settings(config_path: Path, scenario: str = "base") -> MarketSet
     if not isinstance(markets, dict) or "EOM" not in markets:
         raise InputValidationError("场景必须定义 markets_config.EOM。")
     eom = markets["EOM"]
-    additional_fields = _parse_additional_fields(eom)
+    additional_fields = frozenset(value.strip() for value in eom.get("additional_fields", []))
     if "start_date" in eom:
         market_start = _parse_datetime(
             eom["start_date"], "markets_config.EOM.start_date"

@@ -1,6 +1,5 @@
-"""市场 PNG 图表共用的绘图库加载、数据校验、配色、时间轴格式化、文件保存及旧图清理工具。"""
+"""市场 PNG 图表共用的绘图库加载、配色、时间轴格式化、文件保存及旧图清理工具。"""
 
-from math import isclose
 from pathlib import Path
 from ..errors import PlottingError
 from ..models import MarketClearingResult, StorageDispatchResult
@@ -37,30 +36,6 @@ def _load_matplotlib():
             "PNG generation requires Matplotlib. Install matplotlib or run with --no-plots."
         ) from exc
     return pyplot, dates
-
-
-def _validate_plot_data(results: tuple[MarketClearingResult, ...]) -> None:
-    if not results:
-        raise PlottingError("Cannot generate plots because the simulation has no delivery products.")
-
-    for market in results:
-        if market.duration_hours <= 0:
-            raise PlottingError(
-                f"Product at {market.delivery_start!s} has a non-positive duration."
-            )
-        if not isclose(
-            market.requested_demand_mwh,
-            market.cleared_energy_mwh
-            + market.unserved_demand_mwh
-            + market.unaccepted_storage_charge_mwh,
-            rel_tol=0.0,
-            abs_tol=_ENERGY_TOLERANCE_MWH,
-        ):
-            raise PlottingError(
-                "Demand energy must equal cleared energy plus unmet demand and "
-                "unaccepted storage charge for "
-                f"{market.delivery_start:%Y-%m-%d %H:%M}."
-            )
 
 
 def _make_unit_colors(
