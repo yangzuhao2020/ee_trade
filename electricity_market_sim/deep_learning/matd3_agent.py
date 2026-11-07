@@ -49,6 +49,7 @@ class _TwinCritic(nn.Module):
 
 
 class _ReplayBuffer:
+    """循环存储交互经验，并随机采样供智能体训练。"""
     def __init__(self, capacity, rng: np.random.Generator):
         self.capacity = capacity
         self.rng = rng
@@ -113,6 +114,7 @@ class MATD3Agent:
         self.noise_factor = config.noise_dt
 
     def exploration_action(self, state, *, initial_experience):
+        """在边际成本基准或策略网络动作上加入高斯噪声，生成探索报价动作。"""
         if initial_experience:
             # 初始阶段以归一化边际成本作为两段报价的基准。
             action = np.full(ACTION_SIZE, state[-1], dtype=np.float64)

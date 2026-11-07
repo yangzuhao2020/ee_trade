@@ -360,7 +360,7 @@ flex_down_mw
 
 各时段上下限来自独立优化，不能将所有时段的最大值或最小值组合成一套同时执行的生产计划。导出时要求生产与灵活性结果按主体、完整交付区间和优化窗口一一匹配，且基准功率与计划购电功率一致；重复、缺失或基准不一致时给出明确错误。
 
-原 `industry_flexibility_results.csv` 的输出内容已并入本节的 `industry_results.csv`，不再作为独立输出文件或字段小节。合并表成功写出后，清理输出目录中遗留的旧文件。读取旧文件的外部脚本需要改为读取合并表中的4个新增字段；原 `baseline_power_mw` 对应合并表中的 `planned_grid_power_mw`。内部功率上下界保存在工业承诺计划中，实际调度结果通过 `plan` 引用该计划，供绘图与计算使用。
+原 `industry_flexibility_results.csv` 的输出内容已并入本节的 `industry_results.csv`，不再作为独立输出文件或字段小节。合并表成功写出后，清理输出目录中遗留的旧文件。读取旧文件的外部脚本需要改为读取合并表中的4个新增字段；原 `baseline_power_mw` 对应合并表中的 `planned_grid_power_mw`。内部使用 `IndustrialResult` 同时承载承诺计划、功率上下界与实际执行结果；未交付时实际值为 `None`，交付结束后生成填入实际值的新对象，供绘图与计算使用。
 
 ### 工业优化窗口结果：`industry_optimization_windows.csv`
 

@@ -96,3 +96,6 @@ class HouseholdResult:
     def actual_saving_eur(self) -> float:
         """基准方案实际支付 − 优化方案实际支付。"""
         return self.baseline_payment_eur - self.payment_eur
+
+# `HouseholdDispatchResult`：记录**一次调度的运行状态**，如热泵功率、电池充放电、SOC 和缺热量。
+# `HouseholdResult`：汇总**实际方案与无电池基准方案**的调度及结算结果，用于计算电费节省。

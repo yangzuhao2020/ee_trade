@@ -45,8 +45,10 @@ def train_single_run(input_path, output_path,
     best_path.unlink(missing_ok=True)
 
     # 只有训练时段的经验进入经验池；验证时段只运行确定性 Actor。
+    # 用 partial 预设输入路径、场景和时段，生成训练与验证回合的调用函数。
     train_episode = partial(simulate_learning_episode, input_path, scenario=scenario, period="train")
     validation_episode = partial(simulate_learning_episode, input_path, scenario=scenario, period="validation")
+    
     metrics: list[_EpisodeMetrics] = []
     best_total_reward = float("-inf")
     
@@ -75,6 +77,7 @@ def train_single_run(input_path, output_path,
         is_last_episode = episode == episode_count
         should_validate = is_validation_due or is_last_episode
         
+        # 运行验证并记录指标，在初始经验收集结束后保存验证总奖励最高的模型。
         if should_validate:
             validation_result = validation_episode(agent.deterministic_action)
             validation_metrics = _metrics(

@@ -418,31 +418,31 @@ def write_results(output_dir: Path, simulation_result: SimulationResult) -> None
         })
     industry_rows = [
         {
-            "datetime": format_timestamp(result.plan.delivery_start),
-            "window_id": result.plan.window_id,
-            "unit_name": result.plan.unit_name,
-            "electrolyser_power_mw": _number(result.plan.electrolyser_power_mw),
-            "hydrogen_output_mwh": _number(result.plan.hydrogen_output_mwh),
-            "dri_power_mw": _number(result.plan.dri_power_mw),
-            "dri_output_t": _number(result.plan.dri_output_t),
-            "eaf_power_mw": _number(result.plan.eaf_power_mw),
-            "planned_steel_output_t": _number(result.plan.planned_steel_output_t),
-            "planned_grid_power_mw": _number(result.plan.planned_grid_power_mw),
-            "planned_energy_mwh": _number(result.plan.planned_energy_mwh),
+            "datetime": format_timestamp(result.delivery_start),
+            "window_id": result.window_id,
+            "unit_name": result.unit_name,
+            "electrolyser_power_mw": _number(result.electrolyser_power_mw),
+            "hydrogen_output_mwh": _number(result.hydrogen_output_mwh),
+            "dri_power_mw": _number(result.dri_power_mw),
+            "dri_output_t": _number(result.dri_output_t),
+            "eaf_power_mw": _number(result.eaf_power_mw),
+            "planned_steel_output_t": _number(result.planned_steel_output_t),
+            "planned_grid_power_mw": _number(result.planned_grid_power_mw),
+            "planned_energy_mwh": _number(result.planned_energy_mwh),
             "actual_grid_power_mw": _number(result.actual_grid_power_mw),
             "actual_steel_output_t": _number(result.actual_steel_output_t),
-            "forecast_cost_eur": _number(result.plan.forecast_cost_eur),
+            "forecast_cost_eur": _number(result.forecast_cost_eur),
             "minimum_power_mw": _number(
-                result.plan.minimum_power_mw
+                result.minimum_power_mw
             ),
             "maximum_power_mw": _number(
-                result.plan.maximum_power_mw
+                result.maximum_power_mw
             ),
             "flex_up_mw": _number(
-                result.plan.maximum_power_mw - result.plan.planned_grid_power_mw
+                result.maximum_power_mw - result.planned_grid_power_mw
             ),
             "flex_down_mw": _number(
-                result.plan.planned_grid_power_mw - result.plan.minimum_power_mw
+                result.planned_grid_power_mw - result.minimum_power_mw
             ),
         }
         for result in simulation_result.industry_results

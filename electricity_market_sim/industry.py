@@ -1,7 +1,7 @@
 """第四版工业需求响应：钢铁生产滚动优化、购电功率灵活性评估及出清后执行记录。
 根据预测价格、参考负荷和生产约束制定计划，并按实际成交电量更新钢产量与设备出力。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from math import isfinite
 import numpy as np
@@ -10,9 +10,8 @@ from .errors import InputValidationError
 from .models import (
     DemandBid,
     IndustrialDevice,
-    IndustrialDispatchResult,
-    IndustrialOptimizationWindowResult,
-    IndustrialPlan,
+    IndustrialResult,
+    Industrial_Optimization_Window_Result,
     IndustrialUnit,
     MarketClearingResult,
 )
@@ -118,13 +117,13 @@ def _constraint_row(
 
 
 def _ramp_constraint_rows(
-    devices: tuple[IndustrialDevice, IndustrialDevice, IndustrialDevice],
-    power_coefficients: np.ndarray,
-    initial_powers_mw: tuple[float, float, float],
+    devices,
+    power_coefficients,
+    initial_powers_mw,
     *,
-    row_width: int,
-) -> tuple[list[np.ndarray], list[float]]:
-    """设备功率按固定工艺比例联动，每时段只保留最严格的升、降约束。"""
+    row_width,
+):
+    """约束：设备功率按固定工艺比例联动，每时段只保留最严格的升、降约束。"""
     rows: list[np.ndarray] = []
     limits: list[float] = []
     for index, coefficients in enumerate(power_coefficients):
@@ -214,7 +213,7 @@ def _build_industry_problem(
     demand_to_schedule_t: float,
     initial_powers_mw: tuple[float, float, float],
 ) -> _IndustryProblem:
-    """构建一个滚动窗口的工业线性规划问题。
+    """定义问题：构建一个滚动窗口的工业线性规划问题。
 
     目标：最小化窗口内生产成本与购电功率偏差惩罚之和。
     生产成本 = 每吨钢可变成本 × 钢产量，含电费、铁矿石、石灰和碳排放；
@@ -394,15 +393,15 @@ def _build_industry_plans(
     steel: np.ndarray,
     window_id: str,
     power_bounds_mw: tuple[tuple[float, float], ...],
-) -> tuple[IndustrialPlan, ...]:
-    """为各承诺时段构建 IndustrialPlan，并返回计划元组。"""
+) -> tuple[IndustrialResult, ...]:
+    """将各承诺时段的优化钢产量换算为设备功率、氢气和 DRI 产量及预测可变成本，并附上购电功率上下界，返回计划元组。"""
     coefficients = process_coefficients(unit)
-    plans: list[IndustrialPlan] = []
+    plans: list[IndustrialResult] = []
     for index, (minimum_power, maximum_power) in enumerate(power_bounds_mw):
         start, end = problem.products[index]
         steel_output = steel[index]
         plans.append(
-            IndustrialPlan(
+            IndustrialResult(
                 window_id=window_id,
                 delivery_start=start,
                 delivery_end=end,
@@ -430,7 +429,7 @@ def _calculate_industry_flexibility(
     committed_steel: np.ndarray,
     variable_cost_limit: float,
 ) -> tuple[tuple[float, float], ...]:
-    """在生产约束和窗口总可变成本上限内，分别求各承诺时段的最低、最高购电功率，各时段极值不保证可同时实现。"""
+    """在生产约束和窗口总可变成本上限内，分别求各承诺时段的最低、最高购电功率，各时段极值不保证可同时实现。20% """
     bounds = []
     for index, steel in enumerate(committed_steel):
         # 仅以当前时段购电功率为目标；其他时段仍参与求解并满足原有约束。
@@ -476,7 +475,7 @@ def maximum_industry_production(
     products: tuple[tuple[datetime, datetime], ...],
     initial_powers_mw: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> float:
-    """在设备容量和爬坡约束下最大化钢产量。"""
+    """在设备容量和爬坡约束下最大化钢产量，传入全部时段的最大钢产量总和。"""
     if not products:
         return 0.0
     coefficients = process_coefficients(unit)
@@ -519,8 +518,8 @@ def optimize_industry_window(
     demand_to_schedule_t: float,
     initial_powers_mw: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> tuple[
-    tuple[IndustrialPlan, ...],
-    IndustrialOptimizationWindowResult,
+    tuple[IndustrialResult, ...],
+    Industrial_Optimization_Window_Result,
 ]:
     """优化函数：求解一个滚动窗口的基准计划，以及逐时段的灵活性上下界。"""
     maximum = maximum_industry_production(
@@ -556,7 +555,7 @@ def optimize_industry_window(
     power_bounds = _calculate_industry_flexibility(
         unit, problem, steel[:commit_count], flexible_limit)
     plans = _build_industry_plans(unit, problem, steel, window_id, power_bounds)
-    window = IndustrialOptimizationWindowResult(
+    window = Industrial_Optimization_Window_Result(
         window_id=window_id,
         unit_name=unit.name,
         optimization_start=products[0][0],
@@ -569,27 +568,22 @@ def optimize_industry_window(
     return plans, window
 
 
-def _actual_steel_output(plan: IndustrialPlan, accepted_energy_mwh):
-    """按成交电量占申报电量的比例折算实际钢产量。"""
-    if plan.planned_energy_mwh <= _TOLERANCE:
-        return 0.0
-    ratio = max(0.0, accepted_energy_mwh) / plan.planned_energy_mwh
-    return ratio * plan.planned_steel_output_t
-
-
-def dispatch_industry(
-    plan: IndustrialPlan,
-    accepted_energy_mwh: float,
-) -> IndustrialDispatchResult:
-    """按购电量的成交比例缩放计划生产链的产量。"""
-    # 成交电量范围已由市场出清结果校验，再计算实际产量与功率。
-    actual_steel = _actual_steel_output(plan, accepted_energy_mwh)
+def _actual_production(plan, accepted_energy_mwh):
+    """按成交电量换算实际钢产量和购电功率，返回执行结果及电解槽、DRI、电弧炉的实际功率。"""
+    planned_energy = plan.planned_energy_mwh
+    ratio = 0.0 if planned_energy <= _TOLERANCE else accepted_energy_mwh / planned_energy
     duration = hours_between(plan.delivery_start, plan.delivery_end)
-    return IndustrialDispatchResult(
-        plan=plan,
+    dispatch = replace(
+        plan,
         actual_grid_power_mw=(accepted_energy_mwh / duration),
-        actual_steel_output_t=actual_steel,
+        actual_steel_output_t=max(0.0, ratio) * plan.planned_steel_output_t,
     )
+    actual_powers = (
+        ratio * plan.electrolyser_power_mw,
+        ratio * plan.dri_power_mw,
+        ratio * plan.eaf_power_mw,
+    )
+    return dispatch, actual_powers
 
 
 class IndustryRollingCoordinator:
@@ -614,7 +608,7 @@ class IndustryRollingCoordinator:
         self.fuel_price_profiles = fuel_price_profiles
         self.maximum_bid_price = maximum_bid_price
         # 以（用户名称，交付开始时间）保存未交付的承诺计划。
-        self.plans: dict[tuple[str, datetime], IndustrialPlan] = {}
+        self.plans: dict[tuple[str, datetime], IndustrialResult] = {}
         # 实际钢产量（吨）和设备功率作为后续窗口的初始状态。
         self.actual_steel_t = {unit.name: 0.0 for unit in units}
         # 连续生产的设备在仿真开始前已按整条生产链的最低负荷运行。
@@ -627,8 +621,8 @@ class IndustryRollingCoordinator:
                 for power in _power_coefficients(coefficients, 1.0)[:3]
             )
         # 累积交付、灵活性和窗口成本记录，仿真结束时汇入结果。
-        self.dispatch_results: list[IndustrialDispatchResult] = []
-        self.window_results: list[IndustrialOptimizationWindowResult] = []
+        self.dispatch_results: list[IndustrialResult] = []
+        self.window_results: list[Industrial_Optimization_Window_Result] = []
 
     def bids_for_products(
         self,
@@ -721,7 +715,7 @@ class IndustryRollingCoordinator:
         scheduled_results,
     ):
         """计算前序未交付计划的预计钢产量，并确定本轮优化的起始设备功率。"""
-        pending: list[tuple[IndustrialPlan, float]] = []
+        pending = []
         for (unit_name, _), plan in self.plans.items():
             if unit_name != unit.name:
                 continue
@@ -729,19 +723,19 @@ class IndustryRollingCoordinator:
                 continue
             result = self._result_for_plan(plan, scheduled_results)
             accepted = self._cleared_industry_energy(result, unit.name)
-            pending.append((plan, accepted))
+            pending.append(_actual_production(plan, accepted))
 
         # 按交付时间排序后累加，保证求和顺序稳定；末段用于初始功率衔接。
         pending.sort(key=lambda item: item[0].delivery_start)
         pending_steel = sum(
-            _actual_steel_output(plan, accepted) for plan, accepted in pending)
+            dispatch.actual_steel_output_t for dispatch, _ in pending)
         initial_powers = self.last_actual_powers_mw[unit.name]
         # 前序待交付产品若与新窗口相邻，以其成交后功率衔接爬坡约束。
         
         if pending:
-            last_plan, accepted = pending[-1]
-            if last_plan.delivery_end == first_product[0]:
-                initial_powers = self._actual_device_powers(last_plan, accepted)
+            last_dispatch, actual_powers = pending[-1]
+            if last_dispatch.delivery_end == first_product[0]:
+                initial_powers = actual_powers
         return pending_steel, initial_powers
 
 
@@ -754,8 +748,7 @@ class IndustryRollingCoordinator:
             if plan is None:
                 continue
             accepted = self._cleared_industry_energy(result, unit.name)
-            dispatch = dispatch_industry(plan, accepted)
-            actual_powers = self._actual_device_powers(plan, accepted)
+            dispatch, actual_powers = _actual_production(plan, accepted)
             devices = (unit.electrolyser, unit.dri_plant, unit.eaf)
             for device, power, previous in zip(
                 devices, actual_powers, self.last_actual_powers_mw[unit.name]):
@@ -789,7 +782,7 @@ class IndustryRollingCoordinator:
                 )
 
 
-    def _result_for_plan(self, plan: IndustrialPlan, scheduled_results):
+    def _result_for_plan(self, plan: IndustrialResult, scheduled_results):
         """按交付起止时间查找对应的出清结果；入口已保证产品唯一。"""
         return next(
             result for result in scheduled_results.values()
@@ -801,7 +794,7 @@ class IndustryRollingCoordinator:
     def _cleared_industry_energy(
         result: MarketClearingResult, unit_name: str
     ) -> float:
-        """读取指定工业用户的成交电量；未找到对应订单时返回零。"""
+        """从出清结果中查出指定钢厂实际买到的电量，未找到对应订单时返回零。"""
         for cleared_bid in result.demand_bids:
             bid = cleared_bid.bid
             if bid.unit_name == unit_name and bid.demand_type == "industrial_load":
@@ -809,25 +802,9 @@ class IndustryRollingCoordinator:
 
         return 0.0
 
-    @staticmethod
-    def _actual_device_powers(
-        plan: IndustrialPlan, accepted_energy_mwh: float
-    ) -> tuple[float, float, float]:
-        """按成交比例缩放设备功率，计划电量近零时返回全零。
-        返回顺序为电解槽、直接还原装置、电弧炉。
-        """
-        ratio = (0.0
-            if plan.planned_energy_mwh <= _TOLERANCE
-            else accepted_energy_mwh / plan.planned_energy_mwh
-        )
-        return (
-            ratio * plan.electrolyser_power_mw,
-            ratio * plan.dri_power_mw,
-            ratio * plan.eaf_power_mw,
-        )
 
-
-def _price(prices: dict[str, float], *names: str) -> float:
+def _price(prices: dict[str, float], *names: str):
+    """按候选字段名依次读取铁矿石或石灰价格，均未找到时返回零。"""
     for name in names:
         if name in prices:
             return prices[name]
@@ -845,5 +822,4 @@ def missing_industrial_price_names(
     if "lime" not in columns:
         missing.append("lime")
     return tuple(missing)
-
 

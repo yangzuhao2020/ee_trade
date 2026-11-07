@@ -78,9 +78,8 @@ def _train_independent_run(
     seed: int,
     training_episodes: int | None = None,
     training_steps: int | None = None,
-) -> tuple[SimulationResult, list[_EpisodeMetrics], Path, float]:
-    """读取配置，调用对应算法完成一次独立训练。"""
-
+):
+    """读取配置,是matd3 还是 grpo 算法执行"""
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
     config = settings.learning_config
     steps_per_episode = _steps_per_episode(settings, "train")
@@ -115,14 +114,11 @@ def train_learning_scenario(
     """从头训练多次独立运行，按验证总奖励选模型并写出运行清单。
     返回入选运行在验证时段上的结果；测试时段由独立测试命令运行。
     """
-
     input_path = Path(input_dir)
     output_path = Path(output_dir)
     settings = load_market_settings(input_path / "config.yaml", scenario=scenario)
     config = settings.learning_config
     run_count = _DEFAULT_INDEPENDENT_RUNS if independent_runs is None else independent_runs
-    if run_count <= 0:
-        raise InputValidationError("Independent learning runs must be positive.")
 
     checkpoint_root = _default_checkpoint_root(config, output_path)
     use_run_dirs = run_count > 1

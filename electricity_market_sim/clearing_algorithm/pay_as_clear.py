@@ -23,11 +23,9 @@ def clear_pay_as_clear(
     demand_bids: list[DemandBid], supply_offers: list[SupplyOffer]
 ) -> MarketClearingResult:
     """按报价撮合单个交付时段的买卖订单，并以统一出清价结算。
-
     卖单按报价升序、机组名称升序排序；同价同机组时，
     最小出力报价段（learning_minimum）优先，再按订单标识排序。
     买单按愿付价格降序、参与者名称升序排序，仍相同时保持输入顺序。
-
     允许部分成交，报价段排序不构成最小出力约束。
     统一出清价为已成交卖单的最高报价；无成交时为 0。
     """

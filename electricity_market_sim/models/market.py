@@ -1,9 +1,13 @@
-"""能量市场配置与市场开市安排。"""
+"""能量市场配置、市场开市安排与完整仿真结果。"""
 
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from .learning import LearningConfig
+from .clearing import MarketClearingResult
+from .household import HouseholdResult
+from .industry import IndustrialResult, Industrial_Optimization_Window_Result
+from .learning import LearningConfig, LearningStepResult, LearningTransition
+from .storage import StorageDispatchResult
 
 
 @dataclass(frozen=True)
@@ -33,3 +37,16 @@ class MarketOpening:
     """一次市场开市时同时提供的所有交付产品。"""
     opening_time: datetime # 本次市场开盘/开市的时刻，时间点。
     products: tuple[tuple[datetime, datetime], ...] # 本次开市可交易的各交付时段，比如 10:00 到 11:00
+
+
+@dataclass(frozen=True)
+class SimulationResult:
+    """一次仿真运行的完整内存结果。"""
+    settings: MarketSettings
+    market_results: tuple[MarketClearingResult, ...]
+    storage_results: tuple[StorageDispatchResult, ...] = ()
+    household_results: tuple[HouseholdResult, ...] = ()
+    industry_results: tuple[IndustrialResult, ...] = ()
+    industry_optimization_windows: tuple[Industrial_Optimization_Window_Result, ...] = ()
+    learning_steps: tuple[LearningStepResult, ...] = ()
+    learning_transitions: tuple[LearningTransition, ...] = ()

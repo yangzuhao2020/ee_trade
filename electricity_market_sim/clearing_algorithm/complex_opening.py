@@ -12,12 +12,7 @@ from .common import _EPSILON
 
 
 def clear_complex_opening(demand_bids, supply_offers, storages=()):
-    """联合出清本次开市的所有产品，考虑块报价、关联报价和储能电量约束。
-    先求解混合整数规划确定成交方案，再固定块报价的接受决策，
-    通过线性规划的供需平衡约束对偶值计算各时段出清价。
-    若已接受块报价及其关联报价的合计价差收益为负，
-    每轮剔除收益最低的一组并重新出清，直到不存在负收益组。
-    """
+    """TODO:复杂出清主函数，考虑块报价、关联报价和储能电量约束，联合出清本次开市的所有产品。"""
 
     products = tuple(
         sorted({(bid.delivery_start, bid.delivery_end) for bid in demand_bids}|{(offer.delivery_start, offer.delivery_end) for offer in supply_offers}))
@@ -156,8 +151,9 @@ def _solve_complex_order_book(
 
 
 def _build_complex_variables(demand_bids, supply_offers, products, storages):
-    """列出订单接受比例和储能期末电量变量"""
+    """整理优化模型中“需要求解哪些变量”，并确定它们的排列顺序，供后续构建矩阵使用"""
     variables = []
+    # 每笔买单对应一个接受比例变量。
     for demand_index, bid in enumerate(demand_bids):
         variables.append(
             {
@@ -169,6 +165,7 @@ def _build_complex_variables(demand_bids, supply_offers, products, storages):
             }
         )
 
+    # 同一块报价的各时段卖单共用一个接受变量。
     block_legs = defaultdict(list)
     simple_legs = []
     for offer_index, offer in enumerate(supply_offers):
@@ -186,6 +183,7 @@ def _build_complex_variables(demand_bids, supply_offers, products, storages):
                 "parent_bid_id": None,
             }
         )
+    # 普通报价和关联报价各自对应一个接受比例变量。
     for offer_index in sorted(simple_legs, key=lambda index: supply_offers[index].identifier):
         offer = supply_offers[offer_index]
         variables.append(
@@ -198,9 +196,11 @@ def _build_complex_variables(demand_bids, supply_offers, products, storages):
             }
         )
 
+    # 每台储能、每个交付时段设置一个期末电量变量。
     storage_state_variables = {}
     for storage, _ in storages:
         for product in products:
+            # 保存变量索引，供储能电量约束引用。
             storage_state_variables[(storage.name, product)] = len(variables)
             variables.append(
                 {
@@ -215,12 +215,11 @@ def _build_complex_variables(demand_bids, supply_offers, products, storages):
     return variables, storage_state_variables
 
 
-def _build_complex_matrices(
-    demand_bids, supply_offers, products, product_rows, storages
-):
+def _build_complex_matrices(demand_bids, supply_offers, 
+                            products, product_rows, storages):
     """构建目标函数、变量边界、供需平衡、储能电量和父子报价约束。
     储能变量表示各产品结束时的电量，按成交充放电量及效率更新。
-    TODO: 第二关键的地方。
+    TODO: 将约束变为矩阵。
     """
     variables, storage_state_variables = _build_complex_variables(
         demand_bids, supply_offers, products, storages)
@@ -364,7 +363,8 @@ def _decode_complex_solution(
 
 
 def _lowest_negative_parent_bid(supply_offers, accepted_supply, prices):
-    """返回已接受报价组中合计价差收益最负的 BB 标识；计入关联 LB，无负收益组时返回 None。"""
+    """返回已接受报价组中合计价差收益最负的 BB 标识；计入关联 LB，无负收益组时返回 None。
+    剔除就是让这组报价在本次开市中不成交,也就是意味着不成交是吗"""
     blocks = defaultdict(list)
     children = defaultdict(list)
     for offer in supply_offers:

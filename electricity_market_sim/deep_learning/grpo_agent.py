@@ -93,21 +93,15 @@ def _collect_trajectory(policy, rng, runner, device):
     ), result
 
 
-def collect_group(agent, runner, on_episode):
-    """同一旧策略运行完整组，通过回调处理回合结果，只返回训练张量。"""
-    trajectories = []
-    for _ in range(agent.config.group_size):
-        trajectory, result = _collect_trajectory(agent.actor, agent.rng, runner, agent.device)
-        trajectories.append(trajectory)
-        on_episode(result)
-    return GroupBatch(*(torch.stack(values) for values in zip(*trajectories)))
-
-
 def _sample_trajectory(job):
+    """在子进程中采样一条轨迹，并计算训练指标。"""
     config, weights, rng_state, runner, run, episode = job
+    # 每个采样进程仅使用一个计算线程。
     torch.set_num_threads(1)
+    # 加载策略权重，关闭梯度计算。
     policy = GaussianActor(config.initial_std).eval().requires_grad_(False)
     policy.load_state_dict(weights)
+    # 恢复分配给本轨迹的随机数状态。
     rng = torch.Generator().set_state(rng_state)
     trajectory, result = _collect_trajectory(policy, rng, runner, torch.device("cpu"))
     metrics = _metrics(result, run=run, phase="train", episode=episode, gamma=config.gamma)

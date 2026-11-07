@@ -45,7 +45,7 @@ def _build_household_problem(
     initial_battery_charge_power_mw,
     initial_battery_discharge_power_mw,
 ):
-    """根据家庭设备参数、交付时段、预测电价与热需求及电池初始状态，组装购电和电池充放电优化所需的数据、变量边界与运行约束。"""
+    """构建约束：根据家庭设备参数、交付时段、预测电价与热需求及电池初始状态，组装购电和电池充放电优化所需的数据、变量边界与运行约束。"""
     # 1. 按交付时段排列预测数据，计算热泵功率。
     durations = np.array([hours_between(*product) for product in products])
     prices = np.array([price_forecast[start] for start, _ in products], dtype=float)
@@ -175,7 +175,7 @@ def _solve_household_problem(
     objective: np.ndarray,
     constraint: LinearConstraint,
 ) -> np.ndarray:
-    """在满足变量范围和运行约束的前提下求解优化问题，返回各变量的取值。"""
+    """求解：在满足变量范围和运行约束的前提下求解优化问题，返回各变量的取值。"""
     # x 是全部优化变量的取值；milp 寻找使 objective @ x 最小的可行方案。
     # 具体目标由调用者传入，例如降低购电费用或最小化某个时段的购电功率。
     result = milp(

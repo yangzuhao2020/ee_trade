@@ -14,7 +14,6 @@ def validate_order_prices(
     settings: MarketSettings,
 ) -> None:
     """检查买卖单报价是否在市场限价范围内（含上下限）。"""
-
     for orders, price_field, label in (
         (demand_bids, "price_eur_per_mwh", "买单"),
         (supply_offers, "bid_price_eur_per_mwh", "卖单"),
@@ -28,10 +27,7 @@ def validate_order_prices(
                 )
 
 
-def _validate_order_ids(
-    demand_bids: list[DemandBid],
-    supply_offers: list[SupplyOffer],
-) -> None:
+def _validate_order_ids(demand_bids, supply_offers,):
     bid_ids = [bid.identifier for bid in demand_bids]
     offer_ids = [offer.identifier for offer in supply_offers]
     if len(bid_ids) != len(set(bid_ids)):
@@ -40,9 +36,7 @@ def _validate_order_ids(
         raise ValueError("同一交付产品内的卖单标识不得重复。")
 
 
-def _single_product(
-    demand_bids: list[DemandBid], supply_offers: list[SupplyOffer]
-) -> tuple[datetime, datetime]:
+def _single_product(demand_bids, supply_offers):
     """读取交付时段；调用方保证订单非空且属于同一产品。"""
     order = (demand_bids or supply_offers)[0]
     return order.delivery_start, order.delivery_end

@@ -46,9 +46,10 @@ def simulate_eom_market(market):
         if settle_before_opening:
             finalize_product_starts(starting_keys)
 
-        # 处理当前时刻的所有开市事件，对产品进行市场出清，并把成交产品登记到未来的“开始交付”和“结束交付”事件队列。
+        # TODO: 处理当前时刻的所有开市事件，对产品进行市场出清，并把成交产品登记到未来的“开始交付”和“结束交付”事件队列。
         for opening in openings_by_time.pop(event_time, []):
-            for result in market.clear_opening(opening, scheduled_results):
+            for result in market.clear_opening(opening, scheduled_results): 
+                # TODO: market.clear_opening 执行出清。
                 result = replace(result, opening_time=opening.opening_time)
                 key = (opening.opening_time, result.delivery_start, result.delivery_end)
                 scheduled_results[key] = result

@@ -24,7 +24,6 @@ from ..models import (
     MarketClearingResult,
     PowerPlant,
     SimulationResult,
-    SupplyOffer,
 )
 from ..utils import (format_timestamp, hours_between,
                      validate_fuel_coverage, validate_unique_names,)
@@ -96,6 +95,7 @@ def load_household_market_inputs(input_path: Path, openings) -> HouseholdMarketI
 
 def _run_household_openings(inputs, settings, openings, households, evaluate_flexibility):
     """按开市顺序完成居民优化、报价、出清及设备调度，返回全部结果。"""
+    # 按居民名称初始化内部电池储电量（MWh），初始值为电池容量乘以初始 SOC。
     household_energy = {household.name: household.initial_energy_mwh for household in households}
     household_heat_pump_power = {household.name: 0.0 for household in households}
     household_charge_power = {household.name: 0.0 for household in households}
@@ -251,9 +251,7 @@ def simulate_household_market(inputs, settings, openings):
     )
 
 
-def _household_purchases(
-    market_results: list[MarketClearingResult],
-) -> dict[tuple[str, datetime], tuple[float, float]]:
+def _household_purchases(market_results):
     """按 (居民名称, 交付开始时间) 汇总居民买单的实际成交电量和实际支付。"""
     purchases: dict[tuple[str, datetime], tuple[float, float]] = {}
     for market in market_results:
@@ -265,11 +263,11 @@ def _household_purchases(
 
 
 def _household_results(
-    household_results: list[HouseholdDispatchResult],
-    market_results: list[MarketClearingResult],
-    baseline_household_results: list[HouseholdDispatchResult],
-    baseline_market_results: list[MarketClearingResult],
-) -> tuple[HouseholdResult, ...]:
+    household_results,
+    market_results,
+    baseline_household_results,
+    baseline_market_results,
+):
     """逐产品对比优化与基准方案的实际支付，按预测电价计算计划购电节省，并保留基准缺供量和 SOC 供服务水平核对。"""
     purchases = _household_purchases(market_results)
     baseline_purchases = _household_purchases(baseline_market_results)

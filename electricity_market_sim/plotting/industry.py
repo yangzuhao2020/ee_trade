@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from pathlib import Path
-from ..models import IndustrialDispatchResult
+from ..models import IndustrialResult
 from .common import _format_time_axis, _save_figure
 
 
@@ -12,14 +12,14 @@ _COMPARISON_TOLERANCE = 1e-6
 def _plot_industry_dispatch(
     pyplot,
     dates,
-    results: tuple[IndustrialDispatchResult, ...],
+    results: tuple[IndustrialResult, ...],
     path: Path,
 ) -> Path:
     """绘制工业用户的承诺计划、实际执行情况以及逐时段的功率上下界。"""
 
-    dispatch_by_unit: dict[str, list[IndustrialDispatchResult]] = defaultdict(list)
+    dispatch_by_unit: dict[str, list[IndustrialResult]] = defaultdict(list)
     for result in results:
-        dispatch_by_unit[result.plan.unit_name].append(result)
+        dispatch_by_unit[result.unit_name].append(result)
 
     figure, (power_axis, steel_axis, cumulative_axis) = pyplot.subplots(
         3,
@@ -32,18 +32,18 @@ def _plot_industry_dispatch(
 
     for index, unit_name in enumerate(sorted(dispatch_by_unit)):
         rows = sorted(
-            dispatch_by_unit[unit_name], key=lambda result: result.plan.delivery_start
+            dispatch_by_unit[unit_name], key=lambda result: result.delivery_start
         )
         color = color_map(index % 10)
-        times = [row.plan.delivery_start for row in rows]
-        step_times = [*times, rows[-1].plan.delivery_end]
-        planned_power = [row.plan.planned_grid_power_mw for row in rows]
+        times = [row.delivery_start for row in rows]
+        step_times = [*times, rows[-1].delivery_end]
+        planned_power = [row.planned_grid_power_mw for row in rows]
         actual_power = [row.actual_grid_power_mw for row in rows]
-        planned_steel = [row.plan.planned_steel_output_t for row in rows]
+        planned_steel = [row.planned_steel_output_t for row in rows]
         actual_steel = [row.actual_steel_output_t for row in rows]
 
-        minimum_power = [row.plan.minimum_power_mw for row in rows]
-        maximum_power = [row.plan.maximum_power_mw for row in rows]
+        minimum_power = [row.minimum_power_mw for row in rows]
+        maximum_power = [row.maximum_power_mw for row in rows]
 
         power_axis.fill_between(
             step_times,
@@ -63,7 +63,7 @@ def _plot_industry_dispatch(
             actual_total += actual
             cumulative_planned.append(planned_total)
             cumulative_actual.append(actual_total)
-        cumulative_times = [rows[0].plan.delivery_start, *(row.plan.delivery_end for row in rows)]
+        cumulative_times = [rows[0].delivery_start, *(row.delivery_end for row in rows)]
         for axis, x, planned, actual, planned_label, actual_label in (
             (power_axis, step_times,
              [*planned_power, planned_power[-1]], [*actual_power, actual_power[-1]],
@@ -89,11 +89,11 @@ def _plot_industry_dispatch(
 
     window_start_by_id = {}
     for result in results:
-        existing = window_start_by_id.get(result.plan.window_id)
-        if existing is None or result.plan.delivery_start < existing:
-            window_start_by_id[result.plan.window_id] = result.plan.delivery_start
+        existing = window_start_by_id.get(result.window_id)
+        if existing is None or result.delivery_start < existing:
+            window_start_by_id[result.window_id] = result.delivery_start
     window_starts = sorted(set(window_start_by_id.values()))
-    first_delivery = min(result.plan.delivery_start for result in results)
+    first_delivery = min(result.delivery_start for result in results)
     boundary_label_used = False
     for window_start in window_starts:
         if window_start == first_delivery:

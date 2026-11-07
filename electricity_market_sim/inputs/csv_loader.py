@@ -431,7 +431,7 @@ def load_household_units(path: Path) -> tuple[HouseholdUnit, ...]:
     return tuple(households)
 
 
-def load_industrial_units(path: Path) -> tuple[IndustrialUnit, ...]:
+def load_industrial_units(path):
     """将电解槽、DRI（直接还原铁）和 EAF（电弧炉）行合并为钢厂参与者。"""
 
     if not path.is_file():

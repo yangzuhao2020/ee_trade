@@ -38,7 +38,7 @@ class _PendingLearningStep:
 
 class LearningEpisodeSession:
     """管理学习策略与市场仿真的逐小时交互。
-    首先是构建策略输入的 16 维观测，调用策略生成两段报价动作，转换为市场报价；
+    首先是构建策略*输入*的 16 维观测，调用策略生成两段报价动作，转换为市场报价；
     出清后计算奖励，并记录状态、动作、奖励、下一状态及终止标记。
     """
     def __init__(
@@ -51,9 +51,9 @@ class LearningEpisodeSession:
         price_scale_eur_per_mwh: float,
     ) -> None:
         if not isfinite(plant.max_power_mw) or plant.max_power_mw <= 0:
-            raise ValueError("Rated power must be positive and finite.")
+            raise ValueError("额定功率必须为正的有限值。")
         if not isfinite(price_scale_eur_per_mwh) or price_scale_eur_per_mwh <= 0:
-            raise ValueError("Price scale must be positive and finite.")
+            raise ValueError("价格缩放系数必须为正的有限值。")
         self.plant = plant
         self.action_provider = action_provider
         self.transition_consumer = transition_consumer
@@ -123,7 +123,8 @@ class LearningEpisodeSession:
         )
 
     def _step_result(self, market_result: MarketClearingResult) -> LearningStepResult:
-        """出清后计算利润、遗憾（regret）塑形项和归一化奖励。"""
+        """出清后汇总机组利润，计算错失利润惩罚及归一化奖励。
+        TODO: 计算利润是为了奖励计算"""
         pending = self._pending
         # 整个市场无成交时，不使用出清价计算奖励。
         has_trades = any(
@@ -207,20 +208,27 @@ class LearningEpisodeSession:
         available_power_mw,
         marginal_cost_eur_per_mwh,
     ):
+        """根据当前时段的市场观测调用学习策略生成机组报价，并保存上一时段的训练记录、暂存当前时段的状态和动作。"""
+        # 当前时段必须紧接待记录的上一时段，保证训练记录按小时连续。
         previous_start = delivery_start - timedelta(hours=1)
         if self._pending is not None and self._pending.delivery_start != previous_start:
             raise InputValidationError("学习回合的交付时段必须按小时连续排列。")
+        # 用当前观测补齐上一时段的下一状态，并将其保存为非终止训练记录。
         state = self._observation(delivery_start, marginal_cost_eur_per_mwh)
         self._emit_transition(next_state=state, done=False)
+        # 策略根据当前观测返回两个报价动作，统一转换为浮点数组。
         values = np.asarray(self.action_provider(state), dtype=np.float64)
         
+        # 在策略输出边界检查动作维度和数值有效性。
         if values.shape != (ACTION_SIZE,):
             raise ValueError(f"学习策略必须返回包含 {ACTION_SIZE} 个数值的一维报价动作。")
         if not np.isfinite(values).all():
             raise ValueError("学习策略的报价动作不能包含 NaN 或无穷大。")
+        # 启用动作边界限制时，将两个动作分别截断到 [-1, 1]。
         if self.enforce_action_bounds:
             values = np.clip(values, -1.0, 1.0)
             
+        # 暂存当前状态和实际执行的动作，等待出清后补充结果。
         action = float(values[0]), float(values[1])
         self._pending = _PendingLearningStep(
             delivery_start=delivery_start,
@@ -228,6 +236,7 @@ class LearningEpisodeSession:
             action=action,
             available_power_mw=available_power_mw,
         )
+        # 将动作映射为最低出力段和灵活出力段的市场报价。
         return self._offers(
             delivery_start, delivery_end, 
             available_power_mw, 

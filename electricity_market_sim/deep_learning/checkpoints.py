@@ -20,20 +20,14 @@ _RUN_MANIFEST = "runs.json"
 
 
 def _periods_payload(config: LearningConfig):
-    """以可写入检查点的字符串形式记录三个交付时段。"""
+    """将训练、验证和测试时段的起止时间转为字符串，供检查点保存。"""
     return {
         name: [format_timestamp(start), format_timestamp(end)]
         for name, (start, end) in config.periods.items()
     }
 
 
-def save_checkpoint(
-    agent,
-    path: Path,
-    *,
-    episode: int,
-    validation_total_reward: float | None,
-):
+def save_checkpoint(agent, path, episode, validation_total_reward):
     config = agent.config
     grpo = config.algorithm == "grpo"
     payload = {
@@ -83,17 +77,17 @@ def _read_run_manifest(path: Path, config: LearningConfig) -> dict[str, Any]:
     """读取训练写出的运行清单，并核对其数据划分与当前配置一致。"""
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload["algorithm"] != config.algorithm:
-        raise InputValidationError("Run manifest algorithm differs from config; use a separate output directory.")
+        raise InputValidationError("运行清单中的算法与当前配置不一致，请为不同算法使用独立的输出目录。")
     if payload.get("periods") != _periods_payload(config):
         raise InputValidationError(
-            f"Learning run manifest {path} 的训练、验证、测试时段与当前 "
+            f"运行清单 {path} 的训练、验证、测试时段与当前 "
             "learning_config.periods 不一致。"
         )
     if (
         type(payload.get("selected_run")) is not int
         or payload["selected_run"] not in {entry["run"] for entry in payload["runs"]}
     ):
-        raise InputValidationError("Run manifest selected_run must identify an existing run.")
+        raise InputValidationError("运行清单中的 selected_run 必须是整数，且对应 runs 中已有的运行编号。")
     return payload
 
 

@@ -13,21 +13,17 @@ _FORECAST_HOURS = 12
 
 def _naive_price_forecasts(
     *,
-    settings: MarketSettings,
-    plants: tuple[PowerPlant, ...],
-    marginal_costs: dict[str, float],
-    availability_profiles: dict[str, dict[datetime, float]],
+    settings,
+    plants,
+    marginal_costs,
+    availability_profiles,
     demand_units,
-    demand_profiles: dict[str, dict[datetime, float]],
-    exchange_unit: ExchangeUnit | None,
-    exchange_profiles: dict[datetime, tuple[float, float]],
-    forecast_starts: set[datetime],
-) -> dict[datetime, float]:
-    """按边际成本报价模拟出清，为机组和储能策略提供朴素 EOM 电价预测。
-    使用刚性负荷、机组可用容量及进出口计划，逐时段按 pay_as_clear 出清，
-    忽略弹性需求、储能及机组启停约束。返回“时段起点 -> 电价（EUR/MWh）”；
-    电价为成交卖单的最高报价，无成交时为 0.0。
-    """
+    demand_profiles,
+    exchange_unit,
+    exchange_profiles,
+    forecast_starts,
+):
+    """基于刚性负荷、可用机组的边际成本报价及进出口计划模拟统一出清，忽略弹性需求、储能及机组启停约束，生成逐时段 EOM 电价预测。TODO: 预测电价算法"""
 
     prices: dict[datetime, float] = {}
     for delivery_start in sorted(forecast_starts):
@@ -104,18 +100,18 @@ def _forecast_starts(
 
 def _opening_coverage_issues(
     *,
-    opening: MarketOpening,
-    settings: MarketSettings,
-    plants: tuple[PowerPlant, ...],
+    opening,
+    settings,
+    plants,
     demand_units,
-    demand_profiles: dict[str, dict[datetime, float]],
-    availability_profiles: dict[str, dict[datetime, float]],
-    exchange_unit: ExchangeUnit | None,
-    exchange_profiles: dict[datetime, tuple[float, float]],
-    requires_price_forecast: bool,
-    requires_storage_price_forecast: bool = False,
-    hard_forecast_horizon: bool = False,
-) -> list[str]:
+    demand_profiles,
+    availability_profiles,
+    exchange_unit,
+    exchange_profiles,
+    requires_price_forecast,
+    requires_storage_price_forecast=False,
+    hard_forecast_horizon=False,
+):
     """检查本次开市的交付是否超出仿真结束时间，以及交付和电价预测所需的
     负荷、已提供的机组可用率及已启用的进出口数据是否齐全。
     返回问题描述列表；无问题时返回空列表。

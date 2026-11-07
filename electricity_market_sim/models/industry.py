@@ -25,7 +25,7 @@ class IndustrialDevice:
 
 @dataclass(frozen=True)
 class IndustrialUnit:
-    """由三行设备数据组装而成的单个钢铁厂参与者。"""
+    """钢铁厂参与者参数，包含电解槽、直接还原装置和电弧炉。"""
     name: str
     operator: str
     cost_tolerance_percent: float
@@ -40,8 +40,8 @@ class IndustrialUnit:
 
 
 @dataclass(frozen=True)
-class IndustrialPlan:
-    """工业用户基于预测、针对单个交付产品制定的生产计划。"""
+class IndustrialResult:
+    """单个交付时段的工业承诺计划与执行结果；未交付时实际值为 None。"""
     window_id: str
     delivery_start: datetime
     delivery_end: datetime
@@ -55,6 +55,8 @@ class IndustrialPlan:
     forecast_cost_eur: float
     minimum_power_mw: float
     maximum_power_mw: float
+    actual_grid_power_mw: float | None = None
+    actual_steel_output_t: float | None = None
 
     @property
     def planned_grid_power_mw(self) -> float:
@@ -66,16 +68,8 @@ class IndustrialPlan:
 
 
 @dataclass(frozen=True)
-class IndustrialDispatchResult:
-    """引用承诺计划，记录出清后的实际购电功率与钢产量。"""
-    plan: IndustrialPlan
-    actual_grid_power_mw: float
-    actual_steel_output_t: float
-
-
-@dataclass(frozen=True)
-class IndustrialOptimizationWindowResult:
-    """单个滚动优化窗口的成本合计（不重复计算）。"""
+class Industrial_Optimization_Window_Result:
+    """单个滚动优化窗口的基准可变成本及灵活性成本上限，不含负荷偏差惩罚。"""
     window_id: str
     unit_name: str
     optimization_start: datetime

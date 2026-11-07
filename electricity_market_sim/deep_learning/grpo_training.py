@@ -6,13 +6,25 @@ from functools import partial
 from multiprocessing import get_context
 from math import cos, pi
 
+import torch
+
 from ..errors import InputValidationError
 from ..simulation import simulate_learning_episode
 from .checkpoints import load_policy, save_checkpoint
-from .grpo_agent import GRPOAgent, collect_group, collect_parallel_group
+from .grpo_agent import GRPOAgent, GroupBatch, _collect_trajectory, collect_parallel_group
 from .learning_metrics import _metrics
 from .test import _evaluate_actor_and_baseline
 from .training import _training_progress
+
+
+def collect_group(agent, runner, on_episode):
+    """同一旧策略运行完整组，通过回调处理回合结果，只返回训练张量。"""
+    trajectories = []
+    for _ in range(agent.config.group_size):
+        trajectory, result = _collect_trajectory(agent.actor, agent.rng, runner, agent.device)
+        trajectories.append(trajectory)
+        on_episode(result)
+    return GroupBatch(*(torch.stack(values) for values in zip(*trajectories)))
 
 
 def train_single_run(input_path, output_path, 
@@ -54,7 +66,7 @@ def train_single_run(input_path, output_path,
                 metrics.append(_metrics(result, run=run, phase="train", episode=episode,
                                         gamma=config.gamma))
 
-            # 2. 收集一组完整轨迹及各回合指标。
+            # 收集一组完整轨迹及各回合指标。
             if executor is None:
                 batch = collect_group(agent, runner, on_episode=record)
             else:

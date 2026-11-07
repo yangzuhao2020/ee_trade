@@ -131,7 +131,7 @@ def simulate_learning_episode(
     *,
     period: str,
 ) -> SimulationResult:
-    """使用传入的策略和经验回放回调，在指定数据时段运行第五版的一轮仿真。"""
+    """调用模拟器仿真，在指定数据时段运行第五版的一轮仿真。"""
     return simulate(
         input_dir,
         scenario=scenario,

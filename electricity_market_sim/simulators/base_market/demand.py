@@ -100,9 +100,8 @@ def _exchange_import_offer(
     delivery_end: datetime,
 ):
     """为指定交付时段生成进口卖单，作为本地市场供给。
-
-    exchange_schedule 为（进口功率、出口功率），单位 MW；
-    取进口功率乘以交付时长得到申报电量（MWh），按交换单元的进口价格报价。
+    exchange_schedule 为（进口功率、出口功率）
+    取进口功率乘以交付时长得到申报电量，按交换单元的进口价格报价。
     """
     import_power, _ = exchange_schedule
     duration_hours = hours_between(delivery_start, delivery_end)

@@ -36,9 +36,7 @@ class _EpisodeMetrics:
     flexible_segment_acceptance_ratio: float
 
 
-def _metrics(
-    result: SimulationResult, *, run: int, phase: str, episode: int, gamma: float
-) -> _EpisodeMetrics:
+def _metrics(result, *, run, phase, episode, gamma):
     """汇总一个回合的奖励、利润、成交电量及两段报价表现；每个交付产品按 1 小时计算。"""
     total_reward = 0.0
     discounted_reward = 0.0

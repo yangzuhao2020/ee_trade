@@ -1,6 +1,6 @@
 """电力市场仿真的配置、参与者参数及运行结果数据结构。
 按领域划分为以下子模块：
-- market：市场配置 MarketSettings 与开市安排 MarketOpening
+- market：市场配置 MarketSettings、开市安排 MarketOpening 与完整仿真结果 SimulationResult
 - learning：学习配置 LearningConfig 及学习步结果、经验回放记录
 - plants：可调度发电机组 PowerPlant
 - demand：需求 DemandUnit 与进出口交换 ExchangeUnit
@@ -9,7 +9,6 @@
 - industry：工业参与者参数、生产计划、调度、灵活性及滚动优化窗口结果
 - orders：出清前的市场买单 DemandBid 与卖单 SupplyOffer
 - clearing：出清后的订单结果、成交记录 Trade 及单时段出清结果 MarketClearingResult
-- results：完整仿真结果 SimulationResult
 还提供边际成本、储能量与 SOC 换算、净现金流、工业灵活性幅度、成交收支与利润等派生计算，
 并校验成交电量平衡与结算一致性。
 """
@@ -29,9 +28,8 @@ from .household import (
 )
 from .industry import (
     IndustrialDevice,
-    IndustrialDispatchResult,
-    IndustrialOptimizationWindowResult,
-    IndustrialPlan,
+    IndustrialResult,
+    Industrial_Optimization_Window_Result,
     IndustrialUnit,
 )
 from .learning import (
@@ -40,8 +38,7 @@ from .learning import (
     LearningStepResult,
     LearningTransition,
 )
-from .market import MarketOpening, MarketSettings
+from .market import MarketOpening, MarketSettings, SimulationResult
 from .orders import DemandBid, SupplyOffer
 from .plants import PowerPlant
-from .results import SimulationResult
 from .storage import StorageDispatchResult, StorageUnit

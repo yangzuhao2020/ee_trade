@@ -14,7 +14,6 @@ from ..inputs import (
     load_industrial_units,
 )
 from ..models import (
-    IndustrialUnit,
     MarketOpening,
     MarketSettings,
     SimulationResult,
@@ -22,9 +21,7 @@ from ..models import (
 from .base_market import BaseMarket
 
 
-def _load_industry_inputs(
-    market: BaseMarket, units: tuple[IndustrialUnit, ...],
-) -> tuple[dict[str, dict[datetime, float]], dict[datetime, dict[str, float]]]:
+def _load_industry_inputs(market, units):
     """按产品时长对齐工业预测和价格，返回时序数据。"""
     required_forecasts = tuple(
         sorted(
@@ -128,7 +125,7 @@ def simulate_v4_market(
         for opening in openings_by_time.pop(event_time, []):
             # 3. 优化或复用已承诺的工业生产计划，并生成购电订单。
             industrial_bids = tuple(
-                coordinator.bids_for_products(opening.products, scheduled_results))
+                coordinator.bids_for_products(opening.products, scheduled_results)) # TODO: 经过了优化的。
             # 4. 复用基础市场生成常规订单、储能订单，并与工业买单一起出清。
             opening_results = market.clear_opening(
                 opening, scheduled_results, additional_demand_bids=industrial_bids
@@ -160,7 +157,7 @@ def simulate_v4_market(
         )),
         industry_results=tuple(sorted(
             coordinator.dispatch_results,
-            key=lambda item: (item.plan.delivery_start, item.plan.unit_name),
+            key=lambda item: (item.delivery_start, item.unit_name),
         )),
         industry_optimization_windows=tuple(sorted(
             coordinator.window_results,
